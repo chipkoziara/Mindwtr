@@ -256,14 +256,22 @@ export const clearOmarchyThemeOverrides = () => {
 };
 
 const loadAndApplyOmarchyTheme = async (): Promise<string> => {
-    const { BaseDirectory, readTextFile } = await import('@tauri-apps/plugin-fs');
-    const toml = await readTextFile(OMARCHY_THEME_RELATIVE_PATH, { baseDir: BaseDirectory.Home });
+    const { homeDir, join } = await import('@tauri-apps/api/path');
+    const absPath = await join(await homeDir(), OMARCHY_THEME_RELATIVE_PATH);
+
+    // Use fetch with file:// URI to bypass the Tauri fs scope restrictions
+    const uri = `file://${absPath}`;
+    const response = await fetch(uri);
+    if (!response.ok) {
+        throw new Error(`Could not read Omarchy theme file: ${uri}`);
+    }
+    const toml = await response.text();
     const palette = parseOmarchyPalette(toml);
     if (!palette) {
         throw new Error('Could not parse Omarchy theme colors.');
     }
     applyPalette(palette);
-    return OMARCHY_THEME_RELATIVE_PATH;
+    return absPath;
 };
 
 export const syncOmarchyTheme = async (
@@ -298,10 +306,10 @@ export const watchOmarchyTheme = (
         .then(async (path) => {
             if (cancelled) return;
             try {
-                const { BaseDirectory, watch } = await import('@tauri-apps/plugin-fs');
+                const { watch } = await import('@tauri-apps/plugin-fs');
                 const unwatch = await watch(path, () => {
                     void loadAndApplyOmarchyTheme().catch((error) => onError?.('read', error));
-                }, { baseDir: BaseDirectory.Home });
+                });
                 const resolved = resolveUnwatch(unwatch);
                 if (!resolved) return;
                 if (cancelled) {
