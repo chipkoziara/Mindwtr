@@ -79,12 +79,18 @@ const loadJsonData = (path: string): AppData | null => {
 
 const writeJsonData = (path: string, data: AppData) => {
     mkdirSync(dirname(path), { recursive: true });
-    const tmpPath = `${path}.tmp`;
-    writeFileSync(tmpPath, JSON.stringify(data, null, 2));
-    if (process.platform === 'win32' && existsSync(path)) {
-        unlinkSync(path);
+    if (process.platform === 'win32') {
+        // Windows can't rename over an existing file, so use atomic temp+rename.
+        const tmpPath = `${path}.tmp`;
+        writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+        if (existsSync(path)) unlinkSync(path);
+        renameSync(tmpPath, path);
+    } else {
+        // Write directly so inotify watchers (e.g. Tauri LocalDataWatcher) receive
+        // a modify event on the actual file. Atomic rename replaces the inode,
+        // causing inotify watches on the old inode to silently go dead.
+        writeFileSync(path, JSON.stringify(data, null, 2));
     }
-    renameSync(tmpPath, path);
 };
 
 function openSqliteDatabase(dbPath: string) {
