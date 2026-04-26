@@ -4,7 +4,7 @@ import {
     getGlobalQuickAddShortcutOptions,
 } from '../../../lib/global-quick-add-shortcut';
 
-type ThemeMode = 'system' | 'light' | 'dark' | 'eink' | 'nord' | 'sepia';
+type ThemeMode = 'system' | 'light' | 'dark' | 'eink' | 'nord' | 'omarchy' | 'sepia';
 type DensityMode = 'comfortable' | 'compact';
 type TextSizeMode = 'default' | 'large' | 'extra-large';
 type WeekStart = 'sunday' | 'monday';
@@ -31,6 +31,7 @@ type Labels = {
     dark: string;
     eink: string;
     nord: string;
+    omarchy: string;
     sepia: string;
     language: string;
     weekStart: string;
@@ -201,7 +202,7 @@ export function SettingsMainPage({
             <SettingsCard>
                 <SettingsRow
                     title={t.appearance}
-                    description={`${t.system} / ${t.light} / ${t.dark} / ${t.eink} / ${t.nord} / ${t.sepia}`}
+                    description={`${t.system} / ${t.light} / ${t.dark} / ${t.eink} / ${t.nord} / ${t.omarchy} / ${t.sepia}`}
                 >
                     <select
                         value={themeMode}
@@ -213,6 +214,7 @@ export function SettingsMainPage({
                         <option value="dark">{t.dark}</option>
                         <option value="eink">{t.eink}</option>
                         <option value="nord">{t.nord}</option>
+                        <option value="omarchy">{t.omarchy}</option>
                         <option value="sepia">{t.sepia}</option>
                     </select>
                 </SettingsRow>

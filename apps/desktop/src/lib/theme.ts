@@ -1,6 +1,6 @@
 import type { AppData } from '@mindwtr/core';
 
-export type DesktopThemeMode = 'system' | 'light' | 'dark' | 'eink' | 'nord' | 'sepia';
+export type DesktopThemeMode = 'system' | 'light' | 'dark' | 'eink' | 'nord' | 'omarchy' | 'sepia';
 export type SystemThemePreference = 'light' | 'dark' | null;
 type NativeThemePreference = Exclude<SystemThemePreference, null>;
 type NativeThemeWindow = {
@@ -22,6 +22,7 @@ const isDesktopThemeMode = (value: string | null | undefined): value is DesktopT
     || value === 'dark'
     || value === 'eink'
     || value === 'nord'
+    || value === 'omarchy'
     || value === 'sepia'
 );
 
@@ -125,12 +126,12 @@ export const watchNativeSystemThemePreference = (
 
 export const applyThemeMode = (mode: DesktopThemeMode | null, systemTheme?: SystemThemePreference) => {
     const root = document.documentElement;
-    root.classList.remove('theme-eink', 'theme-nord', 'theme-sepia');
+    root.classList.remove('theme-eink', 'theme-nord', 'theme-omarchy', 'theme-sepia');
 
     const prefersDark = resolveSystemThemePreference(systemTheme) === 'dark';
     if (mode === 'system' || mode === null) {
         root.classList.toggle('dark', prefersDark);
-    } else if (mode === 'dark' || mode === 'nord') {
+    } else if (mode === 'dark' || mode === 'nord' || mode === 'omarchy') {
         root.classList.add('dark');
     } else {
         root.classList.remove('dark');
@@ -138,11 +139,12 @@ export const applyThemeMode = (mode: DesktopThemeMode | null, systemTheme?: Syst
 
     if (mode === 'eink') root.classList.add('theme-eink');
     if (mode === 'nord') root.classList.add('theme-nord');
+    if (mode === 'omarchy') root.classList.add('theme-omarchy');
     if (mode === 'sepia') root.classList.add('theme-sepia');
 };
 
 export const resolveNativeTheme = (mode: DesktopThemeMode | null): 'light' | 'dark' | null => {
     if (!mode || mode === 'system') return null;
-    if (mode === 'dark' || mode === 'nord') return 'dark';
+    if (mode === 'dark' || mode === 'nord' || mode === 'omarchy') return 'dark';
     return 'light';
 };

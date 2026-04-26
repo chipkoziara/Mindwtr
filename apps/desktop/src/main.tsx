@@ -10,6 +10,7 @@ import { normalizeAnalyticsInstallChannel } from './lib/install-source';
 import { reportError } from './lib/report-error';
 import { webStorage } from './lib/storage-adapter-web';
 import { isDiagnosticsEnabled, logError, logInfo, logWarn, setupGlobalErrorLogging } from './lib/app-log';
+import { syncOmarchyTheme } from './lib/omarchy-theme';
 import { THEME_STORAGE_KEY, applyThemeMode, coerceDesktopThemeMode, resolveNativeTheme } from './lib/theme';
 import { TEXT_SIZE_STORAGE_KEY, applyDesktopTextSize, coerceDesktopTextSize } from './lib/text-size';
 import { loadStoredFullscreen } from './lib/window-state';
@@ -217,6 +218,7 @@ const sendDesktopHeartbeat = async (): Promise<void> => {
 // Initialize theme immediately before React renders to prevent flash
 const savedTheme = coerceDesktopThemeMode(localStorage.getItem(THEME_STORAGE_KEY));
 applyThemeMode(savedTheme);
+void syncOmarchyTheme(savedTheme, () => undefined);
 const savedTextSize = coerceDesktopTextSize(localStorage.getItem(TEXT_SIZE_STORAGE_KEY));
 applyDesktopTextSize(savedTextSize);
 

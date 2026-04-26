@@ -27,6 +27,7 @@ import { logError } from './lib/app-log';
 import { createDesktopAutoSyncController } from './lib/auto-sync-controller';
 import { canDesktopAutoSync } from './lib/desktop-auto-sync-eligibility';
 import { beginSettingsOpenTrace, markSettingsOpenTrace, wrapSettingsOpenImport } from './lib/settings-open-diagnostics';
+import { watchOmarchyTheme } from './lib/omarchy-theme';
 import {
     THEME_STORAGE_KEY,
     applyThemeMode,
@@ -135,12 +136,19 @@ function App() {
         if (!normalizedTheme) return;
         localStorage.setItem(THEME_STORAGE_KEY, normalizedTheme);
         applyThemeMode(normalizedTheme);
+        const stopWatchingOmarchyTheme = watchOmarchyTheme(normalizedTheme, (step, error) => {
+            void logError(error, { scope: 'theme', step: `omarchy-${step}` });
+        });
 
         if (!isTauriRuntime()) return;
         const nativeTheme = resolveNativeTheme(normalizedTheme);
         import('@tauri-apps/api/app')
             .then(({ setTheme }) => setTheme(nativeTheme))
             .catch((error) => void logError(error, { scope: 'theme', step: 'apply' }));
+
+        return () => {
+            stopWatchingOmarchyTheme();
+        };
     }, [settingsTheme]);
 
     useEffect(() => {

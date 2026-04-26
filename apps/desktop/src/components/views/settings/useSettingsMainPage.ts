@@ -9,6 +9,7 @@ import {
 
 import type { Language } from '../../../contexts/language-context';
 import type { GlobalQuickAddShortcutSetting } from '../../../lib/global-quick-add-shortcut';
+import { syncOmarchyTheme } from '../../../lib/omarchy-theme';
 import { reportError } from '../../../lib/report-error';
 import {
     THEME_STORAGE_KEY,
@@ -86,6 +87,7 @@ export function useSettingsMainPage({
 
     useEffect(() => {
         applyThemeMode(themeMode);
+        void syncOmarchyTheme(themeMode, (_step, error) => reportError('Failed to apply Omarchy theme', error));
 
         if (!isTauri) return;
         const tauriTheme = resolveNativeTheme(themeMode);

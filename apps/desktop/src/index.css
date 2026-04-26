@@ -215,6 +215,49 @@
     --badge-info-fg: 217.5 26.7% 94.1%;
   }
 
+  :root.theme-omarchy {
+    color-scheme: dark;
+    --background: 40 4% 16%;
+    --foreground: 35 40% 71%;
+    --card: 35 4% 19%;
+    --card-foreground: 35 40% 71%;
+    --popover: 35 4% 20%;
+    --popover-foreground: 35 40% 71%;
+    --primary: 171 21% 57%;
+    --primary-foreground: 40 4% 16%;
+    --secondary: 35 4% 22%;
+    --secondary-foreground: 35 40% 71%;
+    --muted: 35 4% 19%;
+    --muted-foreground: 35 20% 56%;
+    --accent: 35 4% 22%;
+    --accent-foreground: 35 40% 71%;
+    --destructive: 4 76% 66%;
+    --destructive-foreground: 42 67% 81%;
+    --border: 35 4% 24%;
+    --input: 35 4% 24%;
+    --ring: 171 21% 57%;
+    --status-inbox: 171 21% 57%;
+    --status-next: 78 31% 56%;
+    --status-waiting: 39 60% 59%;
+    --status-someday: 330 47% 68%;
+    --status-reference: 144 28% 62%;
+    --status-done: 35 40% 71%;
+    --badge-project-bg: 171 16% 24%;
+    --badge-project-fg: 171 21% 57%;
+    --badge-context-bg: 330 18% 24%;
+    --badge-context-fg: 330 47% 68%;
+    --badge-tag-bg: 35 4% 22%;
+    --badge-tag-fg: 35 40% 71%;
+    --badge-priority-bg: 39 20% 24%;
+    --badge-priority-fg: 39 60% 59%;
+    --badge-estimate-bg: 78 14% 24%;
+    --badge-estimate-fg: 78 31% 56%;
+    --badge-age-bg: 39 18% 23%;
+    --badge-age-fg: 39 60% 59%;
+    --badge-info-bg: 35 4% 22%;
+    --badge-info-fg: 35 40% 71%;
+  }
+
   :root.theme-sepia {
     color-scheme: light;
     --background: 42.9 56% 90.2%;

@@ -20,6 +20,7 @@ const THEME_VALUE_FLAGS: Record<ThemeValue, true> = {
     system: true,
     eink: true,
     nord: true,
+    omarchy: true,
     sepia: true,
     'material3-light': true,
     'material3-dark': true,

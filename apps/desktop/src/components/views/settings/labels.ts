@@ -373,6 +373,7 @@ export const labelFallback = {
         dark: 'Dark',
         eink: 'E-Ink',
         nord: 'Nord',
+        omarchy: 'Omarchy',
         sepia: 'Sepia',
     },
     zh: {
@@ -749,6 +750,7 @@ export const labelFallback = {
         dark: '深色',
         eink: '电子墨水',
         nord: 'Nord',
+        omarchy: 'Omarchy',
         sepia: '复古米黄',
     },
 } as const;
