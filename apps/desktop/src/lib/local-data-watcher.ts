@@ -12,7 +12,7 @@ import { hashString, toStableJson } from './sync-service-utils';
 import { logInfo, logWarn } from './app-log';
 
 const IGNORE_WINDOW_MS = 2000;
-const DEBOUNCE_MS = 750;
+const DEBOUNCE_MS = 150;
 const IGNORE_DRAIN_PADDING_MS = 25;
 const SELF_WRITE_RETENTION_MS = 10_000;
 const MAX_PENDING_SELF_WRITES = 8;

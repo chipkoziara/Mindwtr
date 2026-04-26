@@ -255,23 +255,14 @@ export const clearOmarchyThemeOverrides = () => {
     root.style.removeProperty('color-scheme');
 };
 
-const loadAndApplyOmarchyTheme = async (): Promise<string> => {
-    const { homeDir, join } = await import('@tauri-apps/api/path');
-    const absPath = await join(await homeDir(), OMARCHY_THEME_RELATIVE_PATH);
-
-    // Use fetch with file:// URI to bypass the Tauri fs scope restrictions
-    const uri = `file://${absPath}`;
-    const response = await fetch(uri);
-    if (!response.ok) {
-        throw new Error(`Could not read Omarchy theme file: ${uri}`);
-    }
-    const toml = await response.text();
+const loadAndApplyOmarchyTheme = async (): Promise<void> => {
+    const { BaseDirectory, readTextFile } = await import('@tauri-apps/plugin-fs');
+    const toml = await readTextFile(OMARCHY_THEME_RELATIVE_PATH, { baseDir: BaseDirectory.Home });
     const palette = parseOmarchyPalette(toml);
     if (!palette) {
         throw new Error('Could not parse Omarchy theme colors.');
     }
     applyPalette(palette);
-    return absPath;
 };
 
 export const syncOmarchyTheme = async (
@@ -290,6 +281,8 @@ export const syncOmarchyTheme = async (
     }
 };
 
+const OMARCHY_THEME_NAME_RELATIVE_PATH = '.config/omarchy/current/theme.name';
+
 export const watchOmarchyTheme = (
     mode: DesktopThemeMode | null,
     onError?: (step: 'read' | 'watch', error: unknown) => void,
@@ -303,13 +296,19 @@ export const watchOmarchyTheme = (
     let stopWatching = () => { };
 
     void loadAndApplyOmarchyTheme()
-        .then(async (path) => {
+        .then(async () => {
             if (cancelled) return;
             try {
+                const { homeDir, join } = await import('@tauri-apps/api/path');
+                const themeNamePath = await join(await homeDir(), OMARCHY_THEME_NAME_RELATIVE_PATH);
                 const { watch } = await import('@tauri-apps/plugin-fs');
-                const unwatch = await watch(path, () => {
-                    void loadAndApplyOmarchyTheme().catch((error) => onError?.('read', error));
-                });
+                const unwatch = await watch(
+                    themeNamePath,
+                    () => {
+                        void loadAndApplyOmarchyTheme().catch((error) => onError?.('read', error));
+                    },
+                    { delayMs: 100 },
+                );
                 const resolved = resolveUnwatch(unwatch);
                 if (!resolved) return;
                 if (cancelled) {
