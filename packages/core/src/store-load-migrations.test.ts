@@ -29,6 +29,7 @@ const settledSettings = (): AppSettings => ({
         taskEditor: { defaultsVersion: 9999 },
         focusGroupByDefaultsVersion: 9999,
     },
+    window: { decorations: false },
 });
 
 const settledData = (overrides: Partial<AppData> = {}): AppData => ({
@@ -401,6 +402,21 @@ describe('runLoadMigrations', () => {
         data.settings = { ...data.settings, notificationsEnabled: undefined };
         const { applied } = runLoadMigrations(data, ctxFor(data, false));
         expect(applied).not.toContain('fresh-install-notifications-default');
+    });
+
+    it('window-decorations-default: seeds decorations off when nothing is stored', () => {
+        const data = settledData();
+        data.settings = { ...data.settings, window: undefined };
+        const { data: result, applied } = runLoadMigrations(data, ctxFor(data));
+        expect(applied).toContain('window-decorations-default');
+        expect(result.settings.window?.decorations).toBe(false);
+    });
+
+    it('window-decorations-default: keeps an explicit choice', () => {
+        const data = settledData();
+        data.settings = { ...data.settings, window: { decorations: true } };
+        const { applied } = runLoadMigrations(data, ctxFor(data));
+        expect(applied).not.toContain('window-decorations-default');
     });
 
     it('task-editor-defaults: migrates an uncustomized layout to the lean default hidden set', () => {

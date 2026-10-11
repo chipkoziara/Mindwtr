@@ -180,6 +180,24 @@ const freshInstallNotificationsDefaultMigration: LoadMigration = {
     },
 };
 
+// Local build default: this fork runs on Omarchy, which draws its own window
+// borders, so a profile that has never chosen keeps decorations off. An
+// explicit choice is left alone. The window group is device-local, so this
+// never travels between machines.
+const windowDecorationsDefaultMigration: LoadMigration = {
+    name: 'window-decorations-default',
+    run: (data) => {
+        if (data.settings.window?.decorations !== undefined) return null;
+        return {
+            ...data,
+            settings: {
+                ...data.settings,
+                window: { ...(data.settings.window ?? {}), decorations: false },
+            },
+        };
+    },
+};
+
 const taskEditorDefaultsMigration: LoadMigration = {
     name: 'task-editor-defaults',
     run: (data) => {
@@ -782,6 +800,7 @@ const LOAD_MIGRATIONS: LoadMigration[] = [
     ensureDeviceIdMigration,
     ensureAnalyticsProfileIdMigration,
     freshInstallNotificationsDefaultMigration,
+    windowDecorationsDefaultMigration,
     taskEditorDefaultsMigration,
     focusGroupByDefaultsMigration,
     clearDeletedTaskProjectArchiveMetadataMigration,

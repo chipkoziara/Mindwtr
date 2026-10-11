@@ -2610,6 +2610,7 @@ describe('TaskStore', () => {
                     taskEditor: { defaultsVersion: 9999 },
                     focusGroupByDefaultsVersion: 1,
                 },
+                window: { decorations: false },
             },
         };
         const acknowledgeDataLoad = vi.fn();
@@ -2814,6 +2815,7 @@ describe('TaskStore', () => {
                     taskEditor: { defaultsVersion: 9999 },
                     focusGroupByDefaultsVersion: 1,
                 },
+                window: { decorations: false },
             },
         };
         let resolveFetch: ((value: typeof persistedData) => void) | null = null;
@@ -3098,6 +3100,7 @@ describe('TaskStore', () => {
                 taskEditor: { defaultsVersion: 9999 },
                 focusGroupByDefaultsVersion: 1,
             },
+            window: { decorations: false },
         };
         mockStorage.getData = vi.fn().mockResolvedValue({
             tasks: [createStoreTask('task-victim-1'), createStoreTask('task-victim-2')],
