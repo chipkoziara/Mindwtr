@@ -953,6 +953,43 @@ where
         .any(|arg| arg.as_ref().eq_ignore_ascii_case(STARTUP_LAUNCH_CLI_FLAG))
 }
 
+/// What a forwarded second-instance invocation should do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForwardedLaunchAction {
+    /// Open (or focus) the quick-add window for the macOS widget.
+    WidgetQuickAdd,
+    /// Open (or focus) the standard quick-add window.
+    QuickAdd,
+    /// The session is already up: a forwarded `--startup` must not raise a UI.
+    StartupNoop,
+    /// Anything else is a plain launch, which may reveal the main window.
+    ShowMain,
+}
+
+/// Classify a forwarded argv with the same precedence the callback applies.
+///
+/// A quick-add request outranks `--startup` because it is an explicit ask for the
+/// quick-add surface, while `--startup` only says "the session is already up".
+fn forwarded_launch_action<I, S>(args: I) -> ForwardedLaunchAction
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if launch_requests_widget_quick_add(args.iter()) {
+        ForwardedLaunchAction::WidgetQuickAdd
+    } else if launch_requests_quick_add(args.iter()) {
+        ForwardedLaunchAction::QuickAdd
+    } else if launch_requests_startup(args.iter()) {
+        ForwardedLaunchAction::StartupNoop
+    } else {
+        ForwardedLaunchAction::ShowMain
+    }
+}
+
 fn should_suppress_initial_main_reveal(
     start_hidden: bool,
     initial_launch_requests_quick_add: bool,
@@ -1544,12 +1581,13 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if launch_requests_widget_quick_add(args.iter()) {
-                show_macos_widget_quick_add_window(app);
-            } else if launch_requests_quick_add(args.iter()) {
-                show_quick_add_window(app);
-            } else {
-                show_main(app);
+            match forwarded_launch_action(args.iter()) {
+                ForwardedLaunchAction::WidgetQuickAdd => show_macos_widget_quick_add_window(app),
+                ForwardedLaunchAction::QuickAdd => show_quick_add_window(app),
+                // A second launcher ran (for example an XDG autostart entry next
+                // to Omarchy's Hyprland autostart line): stay hidden.
+                ForwardedLaunchAction::StartupNoop => {}
+                ForwardedLaunchAction::ShowMain => show_main(app),
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
@@ -2425,6 +2463,30 @@ arch=x86_64
             "mindwtr",
             "--quick-add"
         ]));
+    }
+
+    #[test]
+    fn forwarded_launch_action_keeps_a_duplicate_startup_launch_silent() {
+        use ForwardedLaunchAction::*;
+
+        assert_eq!(
+            forwarded_launch_action(["mindwtr", "--startup"]),
+            StartupNoop
+        );
+        assert_eq!(
+            forwarded_launch_action(["mindwtr", "--STARTUP", "--foo"]),
+            StartupNoop
+        );
+        assert_eq!(
+            forwarded_launch_action(["mindwtr", "--startup", "--quick-add"]),
+            QuickAdd
+        );
+        assert_eq!(
+            forwarded_launch_action(["mindwtr", "--startup", "--widget-quick-add"]),
+            WidgetQuickAdd
+        );
+        assert_eq!(forwarded_launch_action(["mindwtr"]), ShowMain);
+        assert_eq!(forwarded_launch_action(["mindwtr", "some-file"]), ShowMain);
     }
 
     #[test]
