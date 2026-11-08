@@ -8,16 +8,18 @@ import { TASK_LIST_WINDOWING_PROPS } from '@/components/task-list-windowing';
 import { useLanguage } from '@/contexts/language-context';
 import { useTheme } from '@/contexts/theme-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useLocalDayKey } from '@/hooks/use-local-day-key';
 import { resolveWidgetListDestination } from '@/lib/widget-list-destination';
 import { logInfo } from '@/lib/app-log';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
+import { WidgetLaunchDestination } from '@/hooks/use-widget-launch';
 
-/** An exact widget list destination, not an additional main navigation item. */
+
 export default function WidgetListScreen() {
   const { id, source } = useLocalSearchParams<{ id?: string | string[]; source?: string }>();
   const data = useTaskStore((state) => ({
-    // Match widget publication's canonical pools: parent tombstones must remain
-    // present so the shared visibility predicate can exclude their children.
+
+
     tasks: state._allTasks?.length ? state._allTasks : state.tasks,
     projects: state._allProjects?.length ? state._allProjects : state.projects,
     sections: state._allSections?.length ? state._allSections : state.sections,
@@ -27,7 +29,10 @@ export default function WidgetListScreen() {
   const { language, t } = useLanguage();
   const { isDark } = useTheme();
   const tc = useThemeColors();
-  const list = useMemo(() => resolveWidgetListDestination(data, language, id), [data, id, language]);
+  const dayKey = useLocalDayKey(id === 'upcoming');
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const list = useMemo(() => resolveWidgetListDestination(data, language, id), [data, id, language, dayKey]);
   const title = list?.title ?? t('search.noResults');
   const available = Boolean(list);
   useEffect(() => {
@@ -37,7 +42,6 @@ export default function WidgetListScreen() {
       extra: { releaseCheck: 'v1.3.3/saved-list-shortcut', available },
     });
   }, [source, id, available]);
-  const listKind = id === 'next' ? 'next' : typeof id === 'string' && id.startsWith('project:') ? 'project' : 'filter';
   const { updateTask, deleteTask, fetchData } = useTaskStore((state) => ({
     updateTask: state.updateTask,
     deleteTask: state.deleteTask,
@@ -69,9 +73,10 @@ export default function WidgetListScreen() {
   }, [fetchData]);
   return (
     <View style={{ flex: 1, backgroundColor: tc.bg }}>
+      <WidgetLaunchDestination path={`/widget-list/${typeof id === 'string' ? id : ''}`} />
       <Stack.Screen options={{ title }} />
-      {/* This pool is already filtered and ordered by the widget's shared core
-          projection. Do not apply unrelated in-app area/filter selections again. */}
+      {
+                                                                                    }
       <FlatList
         data={list?.tasks ?? []}
         renderItem={renderTask}

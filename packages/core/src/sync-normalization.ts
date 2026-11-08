@@ -1,3 +1,7 @@
+import { normalizeTaskReminderPolicy } from './task-reminder-policy';
+import { DEFAULT_PROJECT_COLOR, isValidProjectColorOverride } from './color-constants';
+import { isTaxonomyCatalog } from './taxonomy-catalog';
+import { runToEnd, SLICE_ITEMS, type CooperativePass } from './cooperative';
 import type { AppData, Area, Attachment, Person, Project, Section, Task } from './types';
 import { isSha256Hex } from './attachment-hash';
 import { normalizePersonName, normalizePersonNote, normalizePersonReferenceLink } from './people';
@@ -45,8 +49,8 @@ const normalizeOptionalString = (value: unknown): string | undefined =>
 const normalizeStringArray = (value: unknown): string[] => {
     if (!Array.isArray(value)) return [];
     const strings = value.filter((item): item is string => typeof item === 'string');
-    // Every element survived the filter, so the copy is value-identical: keep the
-    // input array so its owner can keep its own identity (#766).
+
+
     return strings.length === value.length ? (value as string[]) : strings;
 };
 
@@ -69,14 +73,14 @@ const containsAttachmentTraversalSegment = (value: string): boolean => {
             const decoded = decodeURIComponent(current);
             if (decoded !== current) enqueueCandidate(decoded);
         } catch {
-            // Keep evaluating other candidates when decoding fails.
+
         }
         const trimmed = current.trim();
         if (trimmed.startsWith('//')) {
             try {
                 enqueueCandidate(new URL(`file:${trimmed}`).pathname);
             } catch {
-                // Keep evaluating the raw candidate when URL parsing fails.
+
             }
             continue;
         }
@@ -84,7 +88,7 @@ const containsAttachmentTraversalSegment = (value: string): boolean => {
             try {
                 enqueueCandidate(new URL(trimmed).pathname);
             } catch {
-                // Keep evaluating the raw candidate when URL parsing fails.
+
             }
         }
     }
@@ -108,8 +112,7 @@ export const sanitizeAttachmentCloudKeyForSyncMerge = (value: unknown): string |
     return ATTACHMENT_CLOUD_KEY_PATTERN.test(trimmed) ? trimmed : undefined;
 };
 
-/** A malformed digest can never match real bytes, so keeping it would either strand the
- *  attachment or (before the fail-closed check) disable validation entirely. Drop it. */
+
 export const sanitizeAttachmentFileHashForSyncMerge = (value: unknown): string | undefined =>
     (isSha256Hex(value) ? value : undefined);
 
@@ -139,9 +142,7 @@ type RevisionMetadata = {
 
 const hasOwnKey = (item: object, key: string): boolean => Object.prototype.hasOwnProperty.call(item, key);
 
-/** True when normalizeRevisionMetadata would emit `item` unchanged. Deliberately
- *  does not call normalizeRevision, whose clamp path logs — a clamp is a change,
- *  so it falls through to the real normalizer and logs exactly once (#766). */
+
 const hasNormalizedRevisionMetadata = (item: RevisionMetadata): boolean => {
     const rawRev = item.rev;
     const revIsNormalized = isValidRevision(rawRev)
@@ -177,12 +178,16 @@ export const normalizeRevisionMetadata = <T extends RevisionMetadata>(item: T): 
     return normalized;
 };
 
-// CloudKit's macOS bridge can box booleans read off iOS-written records as
-// numeric NSNumbers (1/0), which NSJSONSerialization then emits as JSON
-// numbers rather than JSON booleans (see macos_cloudkit_bridge.m,
-// ck_json_from_record). Synced booleans in the merge normalizers below must
-// tolerate that shape so a numeric `true` never gets coerced to `false` (#902).
+
 const normalizeSyncedBoolean = (value: unknown): boolean => value === true || value === 1;
+
+
+const normalizeFlowBoolean = <T extends object>(item: T, key: keyof T & string): T => {
+    if (!hasOwnKey(item, key)) return item;
+    const value = (item as Record<string, unknown>)[key];
+    const normalized = value === true || value === 1 ? true : value === false || value === 0 ? false : undefined;
+    return normalized === value ? item : { ...item, [key]: normalized };
+};
 
 const normalizeProjectStatusForMerge = (value: unknown): Project['status'] => {
     if (value === 'active' || value === 'someday' || value === 'waiting' || value === 'archived') {
@@ -197,11 +202,12 @@ const normalizeProjectStatusForMerge = (value: unknown): Project['status'] => {
     return 'active';
 };
 
-/** Older clients uploaded `deletedAtBeforeProjectArchive: null`; absent is canonical (#1156). */
-export const normalizeSectionForSyncMerge = (section: Section): Section => (
+
+export const normalizeSectionForSyncMerge = (section: Section): Section => normalizeFlowBoolean(
     section.deletedAtBeforeProjectArchive === null
         ? { ...section, deletedAtBeforeProjectArchive: undefined }
-        : section
+        : section,
+    'isSequential',
 );
 
 export const normalizeTaskForSyncMerge = (
@@ -248,13 +254,16 @@ export const normalizeTaskForSyncMerge = (
         timeSpentMinutes: normalized.timeSpentMinutes,
         showFutureRecurrence: hasRecurrence && normalizeSyncedBoolean(normalized.showFutureRecurrence) ? true : undefined,
         suppressMindwtrReminders: normalizeSyncedBoolean(normalized.suppressMindwtrReminders),
+        reminderPolicy: normalizeTaskReminderPolicy(normalized.reminderPolicy),
         repeatReminderMinutes: normalized.repeatReminderMinutes,
+        dueReminderLeadMinutes: normalized.dueReminderLeadMinutes,
+        startReminderLeadMinutes: normalized.startReminderLeadMinutes,
         reviewAt: normalized.reviewAt,
         completedAt: normalized.completedAt,
         cancelledAt: normalized.cancelledAt,
         archivedAt: normalizeOptionalString(normalized.archivedAt),
         statusBeforeProjectArchive: normalized.statusBeforeProjectArchive,
-        // Older clients uploaded these as explicit `null`; absent is the canonical shape (#1156).
+
         completedAtBeforeProjectArchive: normalized.completedAtBeforeProjectArchive ?? undefined,
         isFocusedTodayBeforeProjectArchive: normalized.isFocusedTodayBeforeProjectArchive ?? undefined,
         projectArchivedAt: normalized.projectArchivedAt,
@@ -268,18 +277,11 @@ export const normalizeTaskForSyncMerge = (
         orderNum: normalized.orderNum,
         boardOrder: normalized.boardOrder,
         focusOrder: normalized.focusOrder,
-        // Fields not listed here are stripped from every task on every merge.
-        // The satisfies clause turns a forgotten new Task field into a compile error.
-        // Keep this an exhaustive literal: the explicit-undefined keys it emits only
-        // ever match a previous merge output held in memory — a JSON round-trip drops
-        // them — so rewriting it as conditional spreads would change the emitted
-        // shape without ever buying remote-side identity (#766).
+
+
     } satisfies Record<keyof Task, unknown>;
-    // normalizeRevisionMetadata runs next in the merge pipeline and deletes an
-    // undefined revBy own key. Emit that same shape here, or a task without a
-    // revBy oscillates between key sets and never reaches an identity fixed
-    // point across the composed pipeline (#766). rev needs no such branch:
-    // normalizeTaskForLoad always backfills it to a valid number.
+
+
     if (candidate.revBy === undefined) delete candidate.revBy;
     if (!hasOwnKey(normalized, 'viewSectionIds')) delete candidate.viewSectionIds;
     return sameShallowRecord(task, candidate) ? task : candidate;
@@ -301,6 +303,7 @@ export const normalizeProjectForSyncMerge = (
         ...project,
         status: normalizeProjectStatusForMerge(project.status),
         color: normalizeOptionalString(project.color) ?? '#6B7280',
+        colorOverride: isValidProjectColorOverride(project.colorOverride) ? project.colorOverride : undefined,
         tagIds: normalizeStringArray(project.tagIds),
         isSequential: normalizeSyncedBoolean(project.isSequential),
         sequentialScope: normalizeProjectSequentialScope(project.sequentialScope),
@@ -315,8 +318,9 @@ export const normalizeProjectForSyncMerge = (
         areaId: normalizeOptionalString(project.areaId),
         areaTitle: normalizeOptionalString(project.areaTitle),
     };
-    const normalized = normalizeProjectLifecycleFields(candidate);
-    if (normalized !== candidate) {
+    const flowNormalized = normalizeFlowBoolean(candidate, 'perSectionFlow');
+    const normalized = normalizeProjectLifecycleFields(flowNormalized);
+    if (normalized !== flowNormalized) {
         logInfo('Project lifecycle normalized for sync', {
             scope: 'sync',
             context: { releaseCheck: 'v1.3.0/project-lifecycle-sync', count: 1 },
@@ -420,6 +424,7 @@ export const repairMergedSyncReferences = (data: AppData, nowIso: string): AppDa
             ...withRepairRevision(project),
             areaId: undefined,
             areaTitle: undefined,
+            color: project.colorOverride ?? DEFAULT_PROJECT_COLOR,
             updatedAt: nowIso,
         };
     });
@@ -587,12 +592,13 @@ const validateRevisionFields = (
     }
 };
 
-const validateEntityShape = (
+function* validateEntityShape(
     items: unknown[],
     label: 'tasks' | 'projects' | 'sections',
     errors: string[]
-) => {
+): CooperativePass<void> {
     for (let index = 0; index < items.length; index += 1) {
+        if ((index + 1) % SLICE_ITEMS === 0) yield;
         const item = items[index];
         if (!isObjectRecord(item)) {
             errors.push(`${label}[${index}] must be an object`);
@@ -620,9 +626,12 @@ const validateEntityShape = (
         }
         validateRevisionFields(item, label, index, errors);
     }
-};
+}
 
-export const validateMergedSyncData = (data: AppData): string[] => {
+export const validateMergedSyncData = (data: AppData): string[] => runToEnd(validateMergedSyncDataPass(data));
+
+
+export function* validateMergedSyncDataPass(data: AppData): CooperativePass<string[]> {
     const errors: string[] = [];
     if (!Array.isArray(data.tasks)) errors.push('tasks must be an array');
     if (!Array.isArray(data.projects)) errors.push('projects must be an array');
@@ -630,10 +639,12 @@ export const validateMergedSyncData = (data: AppData): string[] => {
     if (!Array.isArray(data.areas)) errors.push('areas must be an array');
     if (data.people !== undefined && !Array.isArray(data.people)) errors.push('people must be an array');
     if (!isObjectRecord(data.settings)) errors.push('settings must be an object');
+    else if (data.settings.taxonomy !== undefined && !isTaxonomyCatalog(data.settings.taxonomy))
+        errors.push('settings.taxonomy must contain valid saved contexts and tags');
 
-    if (Array.isArray(data.tasks)) validateEntityShape(data.tasks as unknown[], 'tasks', errors);
-    if (Array.isArray(data.projects)) validateEntityShape(data.projects as unknown[], 'projects', errors);
-    if (Array.isArray(data.sections)) validateEntityShape(data.sections as unknown[], 'sections', errors);
+    if (Array.isArray(data.tasks)) yield* validateEntityShape(data.tasks as unknown[], 'tasks', errors);
+    if (Array.isArray(data.projects)) yield* validateEntityShape(data.projects as unknown[], 'projects', errors);
+    if (Array.isArray(data.sections)) yield* validateEntityShape(data.sections as unknown[], 'sections', errors);
     if (Array.isArray(data.areas)) {
         for (let index = 0; index < data.areas.length; index += 1) {
             const area = data.areas[index] as unknown;
@@ -774,6 +785,9 @@ export const validateMergedSyncData = (data: AppData): string[] => {
     if (Array.isArray(data.projects)) {
         data.projects.forEach((project, index) => {
             if (!isObjectRecord(project)) return;
+            if (!isValidProjectColorOverride(project.colorOverride)) {
+                errors.push(`projects[${index}].colorOverride must be a six-digit hex color or null`);
+            }
             if (isNonEmptyString(project.areaId) && !allAreaIds.has(project.areaId)) {
                 errors.push(`projects[${index}].areaId must reference an existing area`);
                 return;
@@ -800,7 +814,7 @@ export const validateMergedSyncData = (data: AppData): string[] => {
     }
 
     if (Array.isArray(data.tasks)) {
-        data.tasks.forEach((task, index) => {
+        const checkTask = (task: (typeof data.tasks)[number], index: number) => {
             if (!isObjectRecord(task)) return;
             const taskProjectExists = !isNonEmptyString(task.projectId) || allProjectIds.has(task.projectId);
             const taskAreaExists = !isNonEmptyString(task.areaId) || allAreaIds.has(task.areaId);
@@ -847,11 +861,15 @@ export const validateMergedSyncData = (data: AppData): string[] => {
                     errors.push(`tasks[${index}].sectionId must belong to the same projectId`);
                 }
             }
-        });
+        };
+        for (let index = 0; index < data.tasks.length; index += 1) {
+            checkTask(data.tasks[index], index);
+            if ((index + 1) % SLICE_ITEMS === 0) yield;
+        }
     }
 
     return errors;
-};
+}
 
 export const validateSyncPayloadShape = (data: unknown, source: 'local' | 'remote'): string[] => {
     const errors: string[] = [];
@@ -878,5 +896,7 @@ export const validateSyncPayloadShape = (data: unknown, source: 'local' | 'remot
     if (record.settings !== undefined && !isObjectRecord(record.settings)) {
         errors.push(`${source} payload field "settings" must be an object when present`);
     }
+    if (isObjectRecord(record.settings) && record.settings.taxonomy !== undefined && !isTaxonomyCatalog(record.settings.taxonomy))
+        errors.push(`${source} payload field "settings.taxonomy" must contain valid saved contexts and tags`);
     return errors;
 };

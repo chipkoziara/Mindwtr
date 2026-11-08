@@ -45,6 +45,40 @@ const buildProject = (overrides: Partial<Project>): Project => ({
 });
 
 describe('schedule-utils', () => {
+    it('resolves inherited policy for start, due and repeats while preserving reviews and legacy choices', () => {
+        const now = new Date('2026-03-16T12:00:00.000Z');
+        const task = buildTask({ reminderPolicy: 'inherit', startTime: '2026-03-17T08:00:00.000Z',
+            dueDate: '2026-03-17T09:00:00.000Z', reviewAt: '2026-03-17T10:00:00.000Z', repeatReminderMinutes: 30 });
+        const skip = { taskReminderDefault: 'skip' as const, includeReviewAt: true };
+        expect(getTaskReminderPlan(task, now, skip)).toMatchObject({ next: { kind: 'review' }, repeats: [] });
+        expect(getTaskReminderPlan(task, now, { taskReminderDefault: 'send' })).toMatchObject({ next: { kind: 'start' }, repeats: expect.any(Array) });
+        expect(getDueReminderRepeatTimes(task, { taskReminderDefault: 'send' })).toHaveLength(4);
+        expect(getNextScheduledAt({ ...task, reminderPolicy: 'send', suppressMindwtrReminders: true }, now, skip))
+            .toEqual(new Date(task.startTime!));
+        expect(getNextScheduledAt({ ...task, reminderPolicy: 'skip' }, now, { taskReminderDefault: 'send' })).toBeNull();
+        expect(getNextScheduledAt({ ...task, reminderPolicy: undefined, suppressMindwtrReminders: false }, now, skip))
+            .toEqual(new Date(task.startTime!));
+        expect(getNextScheduledAt({ ...task, reminderPolicy: undefined, suppressMindwtrReminders: true }, now)).toBeNull();
+        expect(task.repeatReminderMinutes).toBe(30);
+        expect(getTaskReminderPlan({ ...task, startTime: '2026-03-17', dueDate: '2026-03-17', reviewAt: undefined }, now))
+            .toEqual({ next: null, repeats: [], advance: null, startAdvance: null });
+    });
+
+    it('uses the default in the complete schedule and retains category gates', () => {
+        const task = buildTask({ reminderPolicy: 'inherit', dueDate: '2026-03-17T09:00:00.000Z',
+            reviewAt: '2026-03-17T10:00:00.000Z', repeatReminderMinutes: 30 });
+        const input = { tasks: [task], projects: [], now: new Date('2026-03-16T12:00:00.000Z'), translations: {} };
+        const skip = buildReminderSchedule({ ...input, settings: { taskReminderDefault: 'skip' } });
+        expect(skip.requests).toMatchObject([{ key: 'task:task-1', data: { kind: 'task-review' } }]);
+        expect(skip.diagnostics.suppressedTaskReminderCount).toBe(1);
+        const send = buildReminderSchedule({ ...input, settings: { taskReminderDefault: 'send' } });
+        expect(send.requests).toHaveLength(5);
+        expect(send.requests.filter((entry) => entry.key === 'task:task-1')).toHaveLength(1);
+        expect(buildReminderSchedule({ ...input, settings: { taskReminderDefault: 'send', notificationsEnabled: false } }).requests).toEqual([]);
+        expect(buildReminderSchedule({ ...input, settings: { taskReminderDefault: 'send', dueDateNotificationsEnabled: false } }).requests)
+            .toMatchObject([{ data: { kind: 'task-review' } }]);
+    });
+
     it('skips date-only start reminders', () => {
         const task = buildTask({ startTime: '2026-03-17' });
         const now = new Date(2026, 2, 16, 20, 0, 0, 0);
@@ -175,7 +209,7 @@ describe('getDueReminderRepeatTimes', () => {
     it('caps by occurrence ceiling for short intervals (5min -> 8 occurrences over 40min)', () => {
         const times = getDueReminderRepeatTimes(dueTask({ repeatReminderMinutes: 5 }));
         expect(times).toHaveLength(8);
-        expect(times[0].getTime()).toBe(dueMs + 5 * 60_000); // index 1, not the due moment
+        expect(times[0].getTime()).toBe(dueMs + 5 * 60_000);
         expect(times[7].getTime()).toBe(dueMs + 40 * 60_000);
     });
 
@@ -298,7 +332,7 @@ describe('getDigestSchedule', () => {
             dailyDigestEveningEnabled: true,
             dailyDigestEveningTime: '21:45',
             weeklyReviewEnabled: true,
-            weeklyReviewDay: 9, // out of range, clamps to 6
+            weeklyReviewDay: 9,
             weeklyReviewTime: '17:30',
         })).toEqual({
             morning: { enabled: true, hour: 7, minute: 15 },
@@ -347,14 +381,14 @@ describe('buildReminderSchedule', () => {
 
     it('schedules the morning/evening digests at local wall-clock time, rolling to tomorrow once today\'s slot has passed', () => {
         const now = new Date();
-        now.setHours(12, 0, 0, 0); // fixed local midday, independent of the runner's timezone
+        now.setHours(12, 0, 0, 0);
 
         const { requests } = buildReminderSchedule({
             settings: {
                 dailyDigestMorningEnabled: true,
-                dailyDigestMorningTime: '09:00', // already passed today -> tomorrow
+                dailyDigestMorningTime: '09:00',
                 dailyDigestEveningEnabled: true,
-                dailyDigestEveningTime: '20:00', // still ahead today -> today
+                dailyDigestEveningTime: '20:00',
             },
             tasks: [],
             projects: [],
@@ -422,7 +456,7 @@ describe('buildReminderSchedule', () => {
 
         const { requests, diagnostics } = buildReminderSchedule({
             settings: {
-                notificationsEnabled: false, // task reminders off entirely
+                notificationsEnabled: false,
                 weeklyReviewEnabled: true,
                 weeklyReviewDay: targetDay,
                 weeklyReviewTime: '18:00',
@@ -526,7 +560,7 @@ describe('buildReminderSchedule', () => {
         const tasks = Array.from({ length: 5 }, (_, index) => buildTask({
             id: `task-${index}`,
             title: `Task ${index}`,
-            dueDate: new Date(now.getTime() + (5 - index) * 60_000).toISOString(), // reverse order on purpose
+            dueDate: new Date(now.getTime() + (5 - index) * 60_000).toISOString(),
         }));
 
         const { requests } = buildReminderSchedule({
@@ -541,7 +575,7 @@ describe('buildReminderSchedule', () => {
         expect(requests.some((request) => request.key === 'digest:weekly-review')).toBe(true);
         const taskRequests = requests.filter((request) => request.data.taskId);
         expect(taskRequests).toHaveLength(2);
-        // earliest fire times survive the cap, in fire-time order
+
         expect(taskRequests.map((request) => request.data.taskId)).toEqual(['task-4', 'task-3']);
     });
 
@@ -570,9 +604,7 @@ describe('buildReminderSchedule', () => {
         expect(projectReviewRequests).toHaveLength(diagnostics.projectReviewReminderCount);
     });
 
-    // Pins mobile's existing call site (notification-service-local.ts: bare buildReminderSchedule,
-    // no window) against a multi-kind input, so a future change to this file cannot silently shift
-    // what mobile arms. If this ever needs updating, mobile's alarm scheduling changed too.
+
     it('is a stable pin for mobile\'s unwindowed call site across digest, task, repeat, and project-review kinds', () => {
         const task = buildTask({
             id: 'task-1',
@@ -618,7 +650,7 @@ describe('resolveDueReminders', () => {
 
     it('anchors the schedule at window.from so a reminder due while the app was asleep is still caught, then bounds it by window.to', () => {
         const task = buildTask({ id: 'task-1', dueDate: '2026-06-17T09:00:00.000Z' });
-        // Poll ran 4 minutes late (now=09:04:00); window.to = now + one poll interval.
+
 
         const caught = resolveDueReminders(
             { settings: {}, tasks: [task], projects: [], translations },
@@ -626,8 +658,7 @@ describe('resolveDueReminders', () => {
         );
         expect(caught.map((request) => request.key)).toEqual(['task:task-1']);
 
-        // A window whose "from" is already past the due time means an earlier poll would have
-        // caught it already -- this cycle must not resend it.
+
         const alreadyPast = resolveDueReminders(
             { settings: {}, tasks: [task], projects: [], translations },
             { from: new Date('2026-06-17T09:01:00.000Z'), to: new Date('2026-06-17T09:04:15.000Z') },
@@ -641,8 +672,8 @@ describe('resolveDueReminders', () => {
             dueDate: '2026-06-17T09:00:00.000Z',
             repeatReminderMinutes: 10,
         });
-        // The due+20min repeat (index 2) would be the only entry buildReminderSchedule has for
-        // this task in this window -- the base "next" reminder is long past window.from.
+
+
         const due = resolveDueReminders(
             { settings: {}, tasks: [task], projects: [], translations },
             { from: new Date('2026-06-17T09:19:50.000Z'), to: new Date('2026-06-17T09:20:20.000Z') },
@@ -652,7 +683,7 @@ describe('resolveDueReminders', () => {
 
     it('excludes digest/weekly-review entries -- a polling platform tracks those on its own per-day cadence', () => {
         const now = new Date();
-        now.setHours(9, 0, 5, 0); // just past the default 09:00 morning digest slot
+        now.setHours(9, 0, 5, 0);
         const due = resolveDueReminders(
             {
                 settings: { dailyDigestMorningEnabled: true, weeklyReviewEnabled: true },

@@ -18,10 +18,11 @@ import { mergeSettingsForSync } from './sync-merge-settings';
 import { toRemoteSyncDocument } from './sync-document';
 import { normalizeAiSettingsForSync } from './store-helpers';
 import type { AppData, Attachment, GtdSettings } from './types';
+import { withQuickJsArgumentLimit } from './quickjs-test-utils';
 
 describe('stable sync property-order reuse', () => {
-    // Original serializer, kept as a byte-for-byte compatibility oracle. These
-    // bytes drive self-write detection and sync fingerprints across old clients.
+
+
     const originalNormalize = (value: unknown): unknown => {
         if (Array.isArray(value)) {
             const items = value.map(originalNormalize);
@@ -75,9 +76,7 @@ describe('stable sync property-order reuse', () => {
     });
 });
 
-// One representative, distinct-from-default value per gtd synced field, used
-// to drive the allowlist-drift guard test below without hardcoding the field
-// list a second time.
+
 const GTD_SYNCED_FIELD_SAMPLE_VALUES: Record<GtdSyncedFieldKey, GtdSettings[GtdSyncedFieldKey]> = {
     timeEstimatePresets: ['15min', '1hr'],
     autoArchiveDays: 14,
@@ -193,6 +192,14 @@ describe('sync-helpers pending attachment uploads', () => {
                 reason: 'missing-cloud-key',
             },
         ]);
+    });
+
+    it('lists one task\'s and one project\'s 65536 pending uploads each, more than a QuickJS call takes arguments', () => {
+        const attachments = Array.from({ length: 65_536 }, (_, index) => fileAttachment({ id: `att-${index}` }));
+        const data = createData(attachments);
+        data.projects = [{ id: 'project-1', title: 'Project', status: 'active', color: '#000000', order: 0, tagIds: [],
+            attachments, createdAt: now, updatedAt: now }];
+        expect(withQuickJsArgumentLimit(() => findPendingAttachmentUploads(data))).toHaveLength(2 * 65_536);
     });
 
     it('ignores attachments that are already uploaded, remote links, or marked missing', () => {
@@ -414,7 +421,7 @@ describe('sync-helpers sanitizeAppDataForRemote', () => {
 
         expect(sanitized.settings.globalQuickAddShortcut).toBeUndefined();
         expect(sanitized.settings.deviceId).toBeUndefined();
-        // Dataset-level, not preference groups: always on the wire.
+
         expect(sanitized.settings.analyticsProfileId).toBe('profile-1');
         expect(sanitized.settings.supportPrompt).toEqual({ lastShownAt: now });
         expect(sanitized.settings.lastSyncAt).toBeUndefined();
@@ -551,10 +558,7 @@ describe('sync-helpers sanitizeAppDataForRemote', () => {
         const sourceBefore = structuredClone(source);
         const firstPayload = sanitizeAppDataForRemote(source);
 
-        // v1.2.5-rc.2 first merged the entire preference map by its
-        // `preferences` timestamp, then uploaded GTD fields only when gtd was
-        // explicitly true. Its newer unrelated preference-map edit must not
-        // discard the current client's wire-only default.
+
         const rc2Settings: AppData['settings'] = {
             syncPreferences: { language: true },
             syncPreferencesUpdatedAt: {
@@ -701,11 +705,7 @@ describe('sync-helpers sanitizeAppDataForRemote', () => {
         expect(sanitized.settings.timeFormat).toBe('24h');
     });
 
-    // Guard against allowlist drift (this is the second incident — see
-    // naturalLanguageDates below): every field in GTD_SYNCED_FIELD_KEYS must
-    // round-trip through sanitizeAppDataForRemote on its own. A field that is
-    // wired into the merge side (sync-merge-settings.ts) but missing from the
-    // upload allowlist silently never leaves the device.
+
     for (const key of GTD_SYNCED_FIELD_KEYS) {
         it(`uploads the gtd.${key} field in isolation`, () => {
             const data = createData([]);
@@ -1170,9 +1170,7 @@ describe('sync comparison ignores the order of id-keyed lists (#1136)', () => {
     });
 });
 
-// Plan 117: the endpoint URL and extra request body are device-local, like the
-// API key. An older peer still writes them; this device must ignore them and
-// must not rewrite the remote document just because they are there.
+
 describe('device-local AI endpoint fields', () => {
     const baseData = (ai: AppData['settings']['ai']): AppData => ({
         tasks: [],

@@ -2,7 +2,7 @@ name: Manage Store Rollout
 
 on:
   schedule:
-    # Advance at most one stage per day. Paused/completed/non-staged releases are no-ops.
+
     - cron: '17 15 * * *'
   workflow_dispatch:
     inputs:
@@ -48,6 +48,13 @@ jobs:
             echo 'ready=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          published_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          newest_stable_tag="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate --jq '.[] | .ref | select(test("^refs/tags/v[0-9]+[.][0-9]+[.][0-9]+$")) | ltrimstr("refs/tags/")' | sort -V | tail -n 1)"
+          if [ "$published_tag" != "$newest_stable_tag" ]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo "Stable tag $newest_stable_tag has not published its release; keeping store rollouts unchanged."
+            exit 0
+          fi
           published_at="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .published_at)"
           published_epoch="$(date -u -d "$published_at" +%s)"
           now_epoch="$(date -u +%s)"
@@ -64,7 +71,7 @@ jobs:
           fi
 
   play:
-    # Forks hold no Store credentials, so the daily schedule must not run there.
+
     needs: promotion-gate
     if: always() && github.repository == 'dongdongbh/Mindwtr' && needs.promotion-gate.result == 'success' && (github.event_name != 'schedule' || needs.promotion-gate.outputs.ready == 'true') && (github.event_name == 'schedule' || inputs.store == 'play')
     runs-on: ubuntu-latest
@@ -73,10 +80,10 @@ jobs:
       group: google-play-production
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       - name: Authenticate Google Play API
         id: play_auth
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         with:
           credentials_json: ${{ secrets.ANDROID_SERVICE_ACCOUNT_JSON }}
           token_format: access_token
@@ -92,12 +99,18 @@ jobs:
           if [ "$ROLLOUT_ACTION" = auto ]; then
             args=(auto-rollout --package tech.dongdongbh.mindwtr)
           else
-            args=(rollout --package tech.dongdongbh.mindwtr --version-code "$VERSION_CODE" --action "$ROLLOUT_ACTION")
+            args=(rollout --package tech.dongdongbh.mindwtr --action "$ROLLOUT_ACTION")
+            if [ -n "$VERSION_CODE" ]; then
+              args+=(--version-code "$VERSION_CODE")
+            fi
             if [ "$ROLLOUT_ACTION" = increase ]; then
               args+=(--percentage "$ROLLOUT_PERCENTAGE")
             fi
           fi
           python3 scripts/ci/google-play-edit.py "${args[@]}" --result "$RUNNER_TEMP/play-rollout.json"
+          if [ "$ROLLOUT_ACTION" = status ]; then
+            python3 scripts/ci/google-play-edit.py max-version-code --package tech.dongdongbh.mindwtr --result "$RUNNER_TEMP/play-maximum.json"
+          fi
           {
             echo '### Google Play production rollout'
             echo '```json'
@@ -114,8 +127,8 @@ jobs:
       group: msstore-production
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 22
       - name: Manage existing Microsoft production submission

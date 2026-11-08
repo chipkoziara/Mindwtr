@@ -1,8 +1,9 @@
-import { useId, useState } from 'react';
+import { getProjectAccentColor } from '@mindwtr/core';
+import { useId, useMemo, useState } from 'react';
 import {
+    createProjectToSectionPreviewer,
     formatI18nTemplate,
     prepareProjectToSection,
-    previewProjectToSection,
     tFallback,
     useTaskStore,
     type Project,
@@ -26,9 +27,13 @@ export function ProjectToSectionDialog({ source, projects, onCancel, onSuccess, 
     const [busy, setBusy] = useState(false);
     const [retryOnly, setRetryOnly] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const preview = destinationId
-        ? previewProjectToSection(useTaskStore.getState(), source.id, destinationId)
-        : null;
+
+    const { _allProjects, _allSections, _allTasks } = useTaskStore.getState();
+    const previewDestination = useMemo(() => createProjectToSectionPreviewer({ _allProjects, _allSections, _allTasks }, source.id),
+        [_allProjects, _allSections, _allTasks, source.id]);
+    const destinations = useMemo(() => projects.filter((project) => previewDestination(project.id).ok),
+        [projects, previewDestination]);
+    const preview = destinationId ? previewDestination(destinationId) : null;
     const shownPreview = prepared?.preview ?? (preview?.ok ? preview : null);
     const destination = prepared?.command.destination ?? projects.find((project) => project.id === destinationId);
     const sourceForSummary = prepared?.command.source.before ?? source;
@@ -65,12 +70,13 @@ export function ProjectToSectionDialog({ source, projects, onCancel, onSuccess, 
             <h3 id={titleId} className="text-lg font-semibold">{label}</h3>
         </DialogHeader>
         <DialogBody className="space-y-4 px-5 pb-5">
+            {sourceForSummary.isSequential && <p className="text-sm">{tFallback(t, 'projects.convertBlocked.destination-section-sequence', 'Choose a destination set to Sequential → Within sections. The new section keeps its task sequence; other sections keep progressing independently.')}</p>}
             {!prepared ? <>
                 <label className="block text-sm font-medium">
                     {tFallback(t, 'projects.convertDestination', 'Destination project')}
                     <select value={destinationId} onChange={(event) => { setDestinationId(event.target.value); setError(null); }} disabled={busy} className="mt-1 w-full rounded-lg border border-border bg-card px-3 py-2">
                         <option value="">{tFallback(t, 'projects.convertChooseDestination', 'Choose a project')}</option>
-                        {projects.filter((project) => previewProjectToSection(useTaskStore.getState(), source.id, project.id).ok).map((project) =>
+                        {destinations.map((project) =>
                             <option key={project.id} value={project.id}>{project.title}</option>)}
                     </select>
                 </label>
@@ -90,7 +96,7 @@ export function ProjectToSectionDialog({ source, projects, onCancel, onSuccess, 
                 {prepared && <p>{formatI18nTemplate(tFallback(t, 'projects.convertNamedSection', 'New section: {{name}}'), { name: prepared.command.section.title })}</p>}
                 {sourceForSummary.supportNotes ? <p>{tFallback(t, 'projects.convertNotes', 'Project notes become section notes.')}</p> : null}
                 <p>{formatI18nTemplate(tFallback(t, 'projects.convertArea', 'Moved tasks use the destination Area: {{area}}.'), { area: destinationArea?.name ?? tFallback(t, 'projects.noArea', 'No Area') })}</p>
-                <p className="flex items-center gap-2"><span className="h-3 w-3 rounded-full border border-border" style={{ backgroundColor: destinationArea?.color ?? destination?.color }} />{tFallback(t, 'projects.convertDestinationColor', 'Section follows the destination color.')}</p>
+                <p className="flex items-center gap-2"><span className="h-3 w-3 rounded-full border border-border" style={{ backgroundColor: destination ? getProjectAccentColor(destination, new Map(destinationArea ? [[destinationArea.id, destinationArea]] : [])) : undefined }} />{tFallback(t, 'projects.convertDestinationColor', 'Section follows the destination color.')}</p>
                 <p>{tFallback(t, 'projects.convertColor', 'The source project color is not carried to the section.')}</p>
                 <p>{tFallback(t, 'projects.convertSettings', 'The new section uses the destination project’s settings.')}</p>
                 <p>{tFallback(t, 'projects.convertTrash', 'The source project moves to Trash. Already-deleted tasks stay in Trash.')}</p>

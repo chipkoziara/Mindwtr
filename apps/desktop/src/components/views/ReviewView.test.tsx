@@ -5,6 +5,7 @@ import { ReviewView } from './ReviewView';
 import { LanguageProvider } from '../../contexts/language-context';
 import { useUiStore } from '../../store/ui-store';
 import { fetchExternalCalendarEvents } from '../../lib/external-calendar-events';
+import { resolveTaskNavigationView } from '../../lib/task-navigation';
 
 const renderWithProviders = (ui: React.ReactElement) => {
     return render(
@@ -14,9 +15,9 @@ const renderWithProviders = (ui: React.ReactElement) => {
     );
 };
 
-// Keep review calendar stages genuinely empty unless a test seeds calendar work.
+
 vi.mock('../../lib/external-calendar-events', () => ({
-    fetchExternalCalendarEvents: vi.fn(async () => ({ events: [], warnings: [] })),
+    fetchExternalCalendarEvents: vi.fn(async () => ({ calendars: [], events: [], warnings: [] })),
     summarizeExternalCalendarWarnings: vi.fn((warnings: string[]) => warnings[0] ?? null),
 }));
 
@@ -92,6 +93,54 @@ describe('ReviewView', () => {
             },
             expandedTaskIds: {},
         });
+    });
+
+    it('keeps sequence tails editable behind a local disclosure and never hides explicit due reviews', () => {
+        const project = makeProject('sequence', { isSequential: true });
+        const tasks = [
+            makeTask('head', { projectId: project.id, title: 'Waiting head', status: 'waiting', order: 0 }),
+            makeTask('tail', { projectId: project.id, title: 'Later tail', order: 1 }),
+            makeTask('due-tail', { projectId: project.id, title: 'Review due tail', order: 2, reviewAt: '2020-01-01' }),
+        ];
+        const updateTask = vi.fn();
+        useTaskStore.setState({ _allTasks: tasks, tasks, _allProjects: [project], projects: [project], updateTask });
+        const { getByRole, getByText, queryByText, container } = renderWithProviders(<ReviewView />);
+        expect(getByText('Review due tail')).toBeInTheDocument();
+        expect(queryByText('Later tail')).not.toBeInTheDocument();
+        expect(queryByText(/Later in sequence/)).not.toBeInTheDocument();
+        fireEvent.click(getByRole('button', { name: 'All open tasks' }));
+        expect(getByText('Waiting head')).toBeInTheDocument();
+        const disclosure = getByRole('button', { name: 'Later in sequence (2)' });
+        expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+        expect(queryByText('Later tail')).not.toBeInTheDocument();
+        fireEvent.click(disclosure);
+        expect(getByText('Later tail')).toBeInTheDocument();
+        expect(container.querySelector('[data-task-id="tail"]')).toBeInTheDocument();
+        fireEvent.click(disclosure);
+        expect(queryByText('Later tail')).not.toBeInTheDocument();
+        expect(updateTask).not.toHaveBeenCalled();
+        expect(useTaskStore.getState()._allTasks).toEqual(tasks);
+        fireEvent.click(disclosure);
+        fireEvent.doubleClick(getByText('Later tail'));
+        expect(useUiStore.getState().editingTaskId).toBe('tail');
+    });
+
+    it('keeps manual later sequence order when the ordinary review list uses title sort', () => {
+        const project = makeProject('sequence', { isSequential: true });
+        const tasks = [
+            makeTask('head', { projectId: project.id, status: 'waiting', order: 0 }),
+            makeTask('zulu', { projectId: project.id, title: 'Zulu comes first', order: 1 }),
+            makeTask('alpha', { projectId: project.id, title: 'Alpha comes later', order: 2 }),
+        ];
+        useTaskStore.setState({ _allTasks: tasks, tasks, _allProjects: [project], projects: [project], settings: { taskSortBy: 'title' } });
+        const { getByRole, getByText, container } = renderWithProviders(<ReviewView />);
+        fireEvent.click(getByRole('button', { name: 'All open tasks' }));
+        fireEvent.click(getByRole('button', { name: 'Select' }));
+        fireEvent.click(getByRole('button', { name: 'Select All' }));
+        expect(getByText('1 selected - 1 tasks')).toBeInTheDocument();
+        expect(getByRole('button', { name: 'Select All' })).toBeDisabled();
+        fireEvent.click(getByRole('button', { name: 'Later in sequence (2)' }));
+        expect(Array.from(container.querySelectorAll('[data-task-id]')).map((row) => row.getAttribute('data-task-id'))).toEqual(['head', 'zulu', 'alpha']);
     });
 
     it('renders the review list with a guide button', () => {
@@ -217,6 +266,92 @@ describe('ReviewView', () => {
         fireEvent.click(getByRole('button', { name: 'Done tasks' }));
         expect(getByText('Completed task')).toBeInTheDocument();
         expect(queryByText('Due reminder')).not.toBeInTheDocument();
+    });
+
+    it.each([
+        { reviewOffset: undefined, groupBy: 'none' },
+        { reviewOffset: 1, groupBy: 'none' },
+        { reviewOffset: undefined, groupBy: 'status' },
+    ])('reveals and scrolls to a deferred search target outside Due ($reviewOffset, $groupBy)', async ({ reviewOffset, groupBy }) => {
+        const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
+        window.localStorage.setItem('mindwtr:view:review:v1', JSON.stringify({ filterStatus: 'all', groupBy }));
+        const target = makeTask('deferred', {
+            title: 'Deferred search target',
+            startTime: dateStringFromToday(7),
+            reviewAt: reviewOffset === undefined ? undefined : dateStringFromToday(reviewOffset),
+        });
+        const due = makeTask('due', { title: 'Due reminder', reviewAt: dateStringFromToday(0) });
+        const tasks = [target, due];
+        useTaskStore.setState({ tasks, _allTasks: tasks });
+        expect(resolveTaskNavigationView(target)).toBe('review');
+
+        useTaskStore.getState().setHighlightTask(target.id);
+        const { getByRole, getByText, queryByText } = renderWithProviders(<ReviewView />);
+
+        expect(getByText(target.title)).toBeInTheDocument();
+        expect(document.querySelector(`[data-task-id="${target.id}"]`)).toBeInTheDocument();
+        expect(getByRole('button', { name: 'All open tasks' })).toHaveAttribute('aria-pressed', 'true');
+        expect(scrollIntoView.mock.instances.some((element) => element instanceof Element && element.getAttribute('data-task-id') === target.id)).toBe(true);
+        expect(useTaskStore.getState().tasks).toEqual(tasks);
+
+        scrollIntoView.mockClear();
+        const reselectionClock = vi.spyOn(Date, 'now').mockReturnValue(useTaskStore.getState().highlightTaskAt! + 1);
+        act(() => useTaskStore.getState().setHighlightTask(target.id));
+        reselectionClock.mockRestore();
+        expect(scrollIntoView.mock.instances.some((element) => element instanceof Element && element.getAttribute('data-task-id') === target.id)).toBe(true);
+
+        fireEvent.click(getByRole('button', { name: 'Due for review' }));
+        expect(queryByText(target.title)).not.toBeInTheDocument();
+        expect(getByText(due.title)).toBeInTheDocument();
+        act(() => useTaskStore.setState({ tasks: [...tasks] }));
+        expect(getByRole('button', { name: 'Due for review' })).toHaveAttribute('aria-pressed', 'true');
+
+
+        const highlightAt = useTaskStore.getState().highlightTaskAt!;
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(highlightAt + 1);
+        act(() => useTaskStore.getState().setHighlightTask(target.id));
+        clock.mockRestore();
+        await waitFor(() => expect(getByText(target.title)).toBeInTheDocument());
+        scrollIntoView.mockRestore();
+    });
+
+    it('keeps Due selected when the deferred search target is already due for review', () => {
+        const target = makeTask('deferred-due', {
+            title: 'Deferred due target',
+            startTime: dateStringFromToday(7),
+            reviewAt: dateStringFromToday(0),
+        });
+        useTaskStore.setState({ tasks: [target], _allTasks: [target] });
+        expect(resolveTaskNavigationView(target)).toBe('review');
+        useTaskStore.getState().setHighlightTask(target.id);
+        const { getByRole, getByText } = renderWithProviders(<ReviewView />);
+
+        expect(getByText(target.title)).toBeInTheDocument();
+        expect(getByRole('button', { name: 'Due for review' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('clears only filters that hide a new search target and allows later filter changes', () => {
+        const target = makeTask('deferred', { title: 'Deferred search target', startTime: dateStringFromToday(7) });
+        useTaskStore.setState({ tasks: [target], _allTasks: [target] });
+        const { getByRole, getByText, queryByText } = renderWithProviders(<ReviewView />);
+        fireEvent.click(getByRole('button', { name: 'All open tasks' }));
+        fireEvent.click(getByRole('button', { name: 'Done tasks' }));
+        fireEvent.change(getByRole('textbox', { name: 'Search...' }), { target: { value: 'unrelated' } });
+        act(() => useTaskStore.getState().setHighlightTask(target.id));
+
+        expect(getByText(target.title)).toBeInTheDocument();
+        expect(getByRole('textbox', { name: 'Search...' })).toHaveValue('');
+        fireEvent.click(getByRole('combobox', { name: 'Status' }));
+        fireEvent.click(getByRole('option', { name: 'Next (1)' }));
+        fireEvent.change(getByRole('textbox', { name: 'Search...' }), { target: { value: 'Deferred' } });
+        act(() => useTaskStore.getState().setHighlightTask(null));
+        act(() => useTaskStore.getState().setHighlightTask(target.id));
+        expect(getByRole('combobox', { name: 'Status' })).toHaveTextContent('Next (1)');
+        expect(getByRole('textbox', { name: 'Search...' })).toHaveValue('Deferred');
+
+        fireEvent.change(getByRole('textbox', { name: 'Search...' }), { target: { value: 'unrelated' } });
+        expect(queryByText(target.title)).not.toBeInTheDocument();
+        expect(getByRole('textbox', { name: 'Search...' })).toHaveValue('unrelated');
     });
 
     it('marks selected due reminders reviewed after the write succeeds', async () => {

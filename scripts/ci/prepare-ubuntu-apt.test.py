@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Exercise the real CI preparation command without touching host APT sources."""
 import pathlib
 import shutil
 import subprocess
@@ -68,7 +67,8 @@ class PrepareUbuntuAptTest(unittest.TestCase):
         e2e = workflow.split("name: E2E (Web)", 1)[1].split("- name: Run E2E tests", 1)[0]
         for job in (desktop, e2e):
             self.assertIn("sudo python3 scripts/ci/prepare-ubuntu-apt.py", job)
-        self.assertIn("python3 scripts/ci/prepare-ubuntu-apt.test.py", workflow)
+        governance = (SCRIPT.parents[2] / "scripts/ci/governance.sh").read_text()
+        self.assertIn("python3 scripts/ci/prepare-ubuntu-apt.test.py", governance)
 
     @unittest.skipUnless(shutil.which("apt-get"), "APT integration runs on Ubuntu CI")
     def test_apt_no_longer_requests_vendor_indexes(self):
@@ -83,7 +83,7 @@ class PrepareUbuntuAptTest(unittest.TestCase):
             (sources / "microsoft.sources").write_text(
                 "Types: deb\nURIs: https://packages.microsoft.com/ubuntu/24.04/prod\n"
                 "Suites: noble\nComponents: main\n")
-            # --print-uris uses APT's real parser without fetching or installing.
+
             command = ["apt-get", "-o", f"Dir::Etc::sourcelist={root / 'sources.list'}",
                        "-o", f"Dir::Etc::sourceparts={sources}",
                        "-o", f"Dir::State={root / 'state'}", "--print-uris", "update"]

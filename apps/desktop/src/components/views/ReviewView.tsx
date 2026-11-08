@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { ReviewHeader, ReviewListControls } from './review/ReviewHeader';
 import { ReviewFiltersBar } from './review/ReviewFiltersBar';
@@ -12,7 +12,7 @@ import { TaskBulkOrganizeModal } from './list/TaskBulkOrganizeModal';
 import { DailyReviewGuideModal } from './review/DailyReviewModal';
 import { WeeklyReviewGuideModal } from './review/WeeklyReviewModal';
 
-import { collectBulkTaskTokens, flushPendingSave, getReviewOverviewTasks, isTaskDueForReview, shallow, sortTasksBy, useTaskStore, type BulkOrganizeTaskUpdateInput, type ReviewOverviewScope, type Task, type TaskStatus } from '@mindwtr/core';
+import { collectBulkTaskTokens, flushPendingSave, getReviewOverviewGroups, getReviewOverviewTasks, isTaskDueForReview, shallow, sortTasksBy, useTaskStore, type BulkOrganizeTaskUpdateInput, type ReviewOverviewScope, type Task, type TaskStatus } from '@mindwtr/core';
 
 import { PromptModal } from '../PromptModal';
 import { TokenPickerModal } from '../TokenPickerModal';
@@ -57,10 +57,11 @@ function sanitizeReviewViewState(value: unknown, fallback: ReviewPersistedViewSt
 
 export function ReviewView() {
     const perf = usePerformanceMonitor('ReviewView');
-    const { tasks, projects, areas, settings, updateSettings, batchMoveTasks, batchDeleteTasks, batchUpdateTasks, restoreTask, highlightTaskId } = useTaskStore(
+    const { tasks, projects, sections, areas, settings, updateSettings, batchMoveTasks, batchDeleteTasks, batchUpdateTasks, restoreTask, highlightTaskId, highlightTaskAt } = useTaskStore(
         (state) => ({
             tasks: state.tasks,
             projects: state.projects,
+            sections: state.sections,
             areas: state.areas,
             settings: state.settings,
             updateSettings: state.updateSettings,
@@ -69,6 +70,7 @@ export function ReviewView() {
             batchUpdateTasks: state.batchUpdateTasks,
             restoreTask: state.restoreTask,
             highlightTaskId: state.highlightTaskId,
+            highlightTaskAt: state.highlightTaskAt,
         }),
         shallow
     );
@@ -94,6 +96,7 @@ export function ReviewView() {
         }));
     }, [setPersistedViewState]);
     const [searchQuery, setSearchQuery] = useState('');
+    const [showLaterInSequence, setShowLaterInSequence] = useState(false);
     const [scope, setScope] = useState<ReviewOverviewScope>('due');
     const [nowTick, setNowTick] = useState(() => Date.now());
     const [reviewSavePending, setReviewSavePending] = useState(false);
@@ -171,7 +174,47 @@ export function ReviewView() {
             };
         });
     }, [filterStatus, normalizedSearchQuery, nowTick, scope, sortBy, tasks, visibility]);
-    const filteredTaskIds = useMemo(() => filteredTasks.map((task) => task.id), [filteredTasks]);
+    const revealedHighlightRef = useRef<{ id: string; at: number | null } | null>(null);
+    useEffect(() => {
+        if (!highlightTaskId) {
+            revealedHighlightRef.current = null;
+            return;
+        }
+        const previous = revealedHighlightRef.current;
+        if (previous?.id === highlightTaskId && previous.at === highlightTaskAt) return;
+        const target = tasksById[highlightTaskId];
+        if (!target) return;
+
+        revealedHighlightRef.current = { id: highlightTaskId, at: highlightTaskAt };
+        if (getReviewOverviewTasks([target], 'all').length === 0) return;
+        const revealInAll = scope === 'all' || !isTaskDueForReview(target, new Date(nowTick));
+        if (revealInAll) {
+            setScope('all');
+            if (filterStatus !== 'all' && filterStatus !== target.status) setFilterStatus('all');
+        }
+        if (normalizedSearchQuery && !target.title.toLowerCase().includes(normalizedSearchQuery)) setSearchQuery('');
+    }, [filterStatus, highlightTaskAt, highlightTaskId, normalizedSearchQuery, nowTick, scope, setFilterStatus, tasksById]);
+    const sequenceLaterTasks = useMemo(() => getReviewOverviewGroups({
+        tasks,
+        projects,
+        sections,
+        orderedAreas: areas,
+        areaFilter: { included: [], excluded: [] },
+        sortBy,
+        scope,
+        now: new Date(nowTick),
+    }).flatMap((area) => area.projectGroups.flatMap((project) => project.laterTasks)), [areas, nowTick, projects, scope, sections, sortBy, tasks]);
+    const laterTaskIds = useMemo(() => new Set(sequenceLaterTasks.map((task) => task.id)), [sequenceLaterTasks]);
+    const currentReviewTasks = useMemo(() => filteredTasks.filter((task) => !laterTaskIds.has(task.id)), [filteredTasks, laterTaskIds]);
+    const laterReviewTasks = useMemo(() => {
+        const visibleIds = new Set(filteredTasks.map((task) => task.id));
+        return sequenceLaterTasks.filter((task) => visibleIds.has(task.id));
+    }, [filteredTasks, sequenceLaterTasks]);
+    const renderedReviewTasks = useMemo(() => showLaterInSequence ? [...currentReviewTasks, ...laterReviewTasks] : currentReviewTasks, [currentReviewTasks, laterReviewTasks, showLaterInSequence]);
+    useEffect(() => {
+        if (highlightTaskId && laterTaskIds.has(highlightTaskId)) setShowLaterInSequence(true);
+    }, [highlightTaskAt, highlightTaskId, laterTaskIds]);
+    const filteredTaskIds = useMemo(() => renderedReviewTasks.map((task) => task.id), [renderedReviewTasks]);
     const {
         activeAction,
         allVisibleTasksSelected,
@@ -200,10 +243,18 @@ export function ReviewView() {
         undoNotificationsEnabled: settings?.undoNotificationsEnabled !== false,
     });
     const groupedTasks = useMemo<TaskGroup[]>(
-        () => groupTasks(groupBy, { tasks: filteredTasks, areas, projectMap: projectMapById, t, theme: settings?.theme }),
-        [areas, filteredTasks, groupBy, projectMapById, settings?.theme, t],
+        () => groupTasks(groupBy, { tasks: currentReviewTasks, areas, projectMap: projectMapById, t, theme: settings?.theme }),
+        [areas, currentReviewTasks, groupBy, projectMapById, settings?.theme, t],
+    );
+    const laterGroupedTasks = useMemo<TaskGroup[]>(
+        () => groupTasks(groupBy, { tasks: laterReviewTasks, areas, projectMap: projectMapById, t, theme: settings?.theme }),
+        [areas, groupBy, laterReviewTasks, projectMapById, settings?.theme, t],
     );
     const isGrouping = groupBy !== 'none' && filteredTasks.length > 0;
+    useEffect(() => {
+        if (!isGrouping || !highlightTaskId || !filteredTaskIds.includes(highlightTaskId)) return;
+        document.querySelector<HTMLElement>(`[data-task-id="${highlightTaskId}"]`)?.scrollIntoView?.({ block: 'start' });
+    }, [filteredTaskIds, highlightTaskAt, highlightTaskId, isGrouping]);
 
     const bulkStatuses: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'reference', 'done'];
 
@@ -211,10 +262,10 @@ export function ReviewView() {
         exitSelectionMode();
     }, [filterStatus, exitSelectionMode]);
 
-    // Grouping reorders the rows, so the keyboard walks the grouped order.
+
     const keyboardVisibleTasks = useMemo(
-        () => (isGrouping ? groupedTasks.flatMap((group) => group.tasks) : filteredTasks),
-        [filteredTasks, groupedTasks, isGrouping],
+        () => (isGrouping ? [...groupedTasks, ...(showLaterInSequence ? laterGroupedTasks : [])].flatMap((group) => group.tasks) : renderedReviewTasks),
+        [groupedTasks, isGrouping, laterGroupedTasks, renderedReviewTasks, showLaterInSequence],
     );
     const [selectedTaskIndex, setSelectedTaskIndex] = useState(0);
     useTaskListScope({
@@ -340,8 +391,8 @@ export function ReviewView() {
                         aria-label={t('common.search')}
                         value={searchQuery}
                         onChange={(event) => setSearchQuery(event.target.value)}
-                        // lg:min-w-48: beside the filter cluster the box needs a floor, or the
-                        // cluster keeps its full width and squeezes it down to its padding.
+
+
                         className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 lg:min-w-48"
                     />
                     <div className="flex flex-wrap items-center gap-2 lg:justify-end">
@@ -375,7 +426,7 @@ export function ReviewView() {
                     <div className="space-y-3">
                         <BulkSelectionToolbar
                             selectionCount={selectedIdsArray.length}
-                            totalCount={filteredTasks.length}
+                            totalCount={renderedReviewTasks.length}
                             allSelected={allVisibleTasksSelected}
                             onSelectAll={selectAllVisibleTasks}
                             onClearSelection={clearTaskSelection}
@@ -416,17 +467,59 @@ export function ReviewView() {
                             />
                         )}
                     />
-                ) : (
+                ) : currentReviewTasks.length > 0 || laterReviewTasks.length === 0 ? (
                     <ReviewTaskList
-                        tasks={filteredTasks}
+                        tasks={currentReviewTasks}
                         showListDetails={showListDetails}
                         selectionMode={selectionMode}
                         multiSelectedIds={multiSelectedIds}
                         highlightTaskId={highlightTaskId}
+                        highlightTaskAt={highlightTaskAt}
                         onToggleSelect={toggleMultiSelect}
                         emptyMessage={normalizedSearchQuery ? t('filters.noMatch') : t(scope === 'due' ? 'review.dueEmpty' : 'review.overviewEmpty')}
                         t={t}
                     />
+                ) : null}
+
+                {laterReviewTasks.length > 0 && (
+                    <div>
+                        <button
+                            type="button"
+                            aria-expanded={showLaterInSequence}
+                            onClick={() => setShowLaterInSequence((expanded) => !expanded)}
+                            className="flex items-center gap-2 py-2 text-sm text-muted-foreground hover:text-foreground"
+                        >
+                            <span aria-hidden="true">{showLaterInSequence ? '▾' : '▸'}</span>
+                            {t('projects.laterInSequence')} ({laterReviewTasks.length})
+                        </button>
+                        {showLaterInSequence && (isGrouping ? (
+                            <GroupedTaskSections
+                                groups={laterGroupedTasks}
+                                renderTask={(task) => (
+                                    <StoreTaskItem
+                                        key={task.id}
+                                        taskId={task.id}
+                                        compactMetaEnabled={showListDetails}
+                                        showProjectBadgeInActions={false}
+                                        selectionMode={selectionMode}
+                                        isMultiSelected={multiSelectedIds.has(task.id)}
+                                        onToggleSelectId={toggleMultiSelect}
+                                    />
+                                )}
+                            />
+                        ) : (
+                            <ReviewTaskList
+                                tasks={laterReviewTasks}
+                                showListDetails={showListDetails}
+                                selectionMode={selectionMode}
+                                multiSelectedIds={multiSelectedIds}
+                                highlightTaskId={highlightTaskId}
+                                highlightTaskAt={highlightTaskAt}
+                                onToggleSelect={toggleMultiSelect}
+                                t={t}
+                            />
+                        ))}
+                    </div>
                 )}
 
                 {showGuide && (

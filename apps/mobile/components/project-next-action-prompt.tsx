@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
-import { flushPendingSave, getProjectNextActionPromptData, isNaturalLanguageDatesEnabled, normalizeClockTimeInput, parseProjectNextActionInput, shallow, tFallback, useTaskStore } from '@mindwtr/core';
+import { buildQuickAddParseOptions, flushPendingSave, getProjectNextActionPromptData, parseProjectNextActionInput, shallow, tFallback, useTaskStore } from '@mindwtr/core';
 import type { Task } from '@mindwtr/core';
 
 import { useLanguage } from '../contexts/language-context';
@@ -18,7 +18,7 @@ export function logNextActionSavedForEditing() {
     })).catch(() => undefined);
 }
 
-/** Keep the editor above task rows so completing a row cannot dismiss it. */
+
 export function ProjectNextActionEditor({ taskId, onClose }: { taskId: string; onClose: () => void }) {
     const task = useTaskStore((state) => state._tasksById.get(taskId));
     const updateTask = useTaskStore((state) => state.updateTask);
@@ -66,15 +66,16 @@ export function buildProjectNextActionPromptState(completedTask: Task): ProjectN
         ...completedTask,
         status: 'done',
     };
+    const allSections = Array.isArray(storeState.sections) ? storeState.sections : [];
     const promptData = getProjectNextActionPromptData(
         completedSnapshot,
         getAllTasksForPrompt(completedSnapshot, allTasks),
         allProjects,
+        allSections,
     );
 
     if (!promptData) return null;
 
-    const allSections = Array.isArray(storeState.sections) ? storeState.sections : [];
     return {
         candidates: promptData.candidates,
         projectId: promptData.project.id,
@@ -121,7 +122,7 @@ export function ProjectNextActionPromptProvider({ children }: { children: React.
     }, []);
 
     const presentPrompt = useCallback((completedTask: Task) => {
-        // Do not replace a draft or put another native modal over its editor.
+
         if (addingRef.current || pendingEditorId || editingTaskId) return false;
         const nextPrompt = buildProjectNextActionPromptState(completedTask);
         if (!nextPrompt) return false;
@@ -170,9 +171,8 @@ export function ProjectNextActionPromptProvider({ children }: { children: React.
         if (!prompt || isSubmitting) return;
         const { projectId } = prompt;
         setIsSubmitting(true);
-        // Archiving completes the project's remaining tasks in core and is
-        // reversible from the editor (Reactivate); no confirmation, matching
-        // the Archive button.
+
+
         void settleStoreAction(() => useTaskStore.getState().updateProject(projectId, { status: 'archived' }))
             .then((outcome) => {
                 if (!outcome.ok) {
@@ -191,24 +191,20 @@ export function ProjectNextActionPromptProvider({ children }: { children: React.
         addingRef.current = true;
         const owner = promptOwnerRef.current;
         setIsSubmitting(true);
-        // Same quick-add grammar as the capture sheet, so "/waiting" and
-        // friends work from this prompt too (#859).
+
+
         const state = useTaskStore.getState();
         const { title, props } = parseProjectNextActionInput(rawTitle, {
             projectId: prompt.projectId,
             sectionId: prompt.sectionId,
             projects: state.projects,
             areas: state.areas,
-            parseOptions: {
-                defaultScheduleTime: normalizeClockTimeInput(state.settings.gtd?.defaultScheduleTime) || undefined,
-                preserveText: state.settings.quickAddAutoClean !== true,
-                naturalLanguageDates: isNaturalLanguageDatesEnabled(state.settings),
-            },
+            parseOptions: buildQuickAddParseOptions(state.settings, state),
         });
         void settleStoreAction(async () => {
             if (createdTaskRef.current) {
-                // A failed flush leaves an optimistic task. Retry that same
-                // snapshot, never create a duplicate or silently change its title.
+
+
                 await useTaskStore.getState().persistSnapshot();
                 await flushPendingSave();
                 return { success: true, id: createdTaskRef.current };
@@ -231,7 +227,7 @@ export function ProjectNextActionPromptProvider({ children }: { children: React.
                 }
                 if (editAfterSave && outcome.result?.id) logNextActionSavedForEditing();
                 if (editAfterSave && outcome.result?.id && Platform.OS === 'ios') {
-                    // UIKit cannot present the editor until the prompt finishes dismissing.
+
                     setPendingEditorId(outcome.result.id);
                 } else {
                     closePrompt();

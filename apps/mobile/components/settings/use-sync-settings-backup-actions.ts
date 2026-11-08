@@ -2,14 +2,25 @@ import { useCallback } from 'react';
 import { Alert } from 'react-native';
 import Constants from 'expo-constants';
 import {
+    buildAreaImportResultMessage,
+    buildBackupPreviewSummary,
+    buildDgtPreviewSummary,
+    buildMergeResultMessage,
+    buildMindwtrCsvPreviewSummary,
+    buildMindwtrCsvResultMessage,
+    buildOmniFocusPreviewSummary,
+    buildOmniFocusResultMessage,
+    buildTickTickPreviewSummary,
+    buildTodoistPreviewSummary,
+    buildTodoistResultMessage,
     createImportDiagnostic,
     createImportDiagnostics,
     formatImportDiagnostic,
+    formatRecoverySnapshotLabel as formatCoreRecoverySnapshotLabel,
     getBackupSourceFileDiagnostic,
     getInMemoryAppDataSnapshot,
     summarizeBackupMerge,
     type ImportDiagnostic,
-    type ImportDiagnosticSeverity,
 } from '@mindwtr/core';
 import type {
     BackupValidation,
@@ -51,6 +62,9 @@ import {
 import { clearLog, ensureLogFilePath, logInfo } from '@/lib/app-log';
 import { logSyncEncryptionDiagnosticsBlock } from '@/lib/sync-encryption-state';
 import { logSettingsError } from '@/lib/settings-utils';
+
+
+const failureText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export type BackupAction =
     | null
@@ -96,11 +110,6 @@ export function useSyncSettingsBackupActions({
     t,
     updateSettings,
 }: UseSyncSettingsBackupActionsParams) {
-    const formatImportMessages = useCallback((
-        messages: readonly string[],
-        severity: ImportDiagnosticSeverity = 'warning',
-    ): string[] => createImportDiagnostics(messages, severity)
-        .map((diagnostic) => formatImportDiagnostic(diagnostic, tr)), [tr]);
     const formatImportError = useCallback((
         diagnostics: readonly ImportDiagnostic[],
         fallback: string,
@@ -114,176 +123,19 @@ export function useSyncSettingsBackupActions({
     ), [tr]);
     const formatThrownBackupError = useCallback((error: unknown): string => {
         const diagnostic = getBackupSourceFileDiagnostic(error);
-        return diagnostic ? formatImportDiagnostic(diagnostic, tr) : String(error);
+        return diagnostic ? formatImportDiagnostic(diagnostic, tr) : failureText(error);
     }, [tr]);
-    const formatRecoverySnapshotLabel = useCallback((fileName: string): string => {
-        const match = fileName.match(
-            /^data\.(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})(?:\.(\d{3})(?:\.\d+)?)?\.snapshot\.json$/i,
-        );
-        if (!match) return fileName;
-        const [, datePart, hour, minute, second, milliseconds = '000'] = match;
-        const localDate = new Date(`${datePart}T${hour}:${minute}:${second}.${milliseconds}Z`);
-        return `${localDate.toLocaleDateString()} ${localDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    }, []);
+    const formatRecoverySnapshotLabel = useCallback((fileName: string): string => formatCoreRecoverySnapshotLabel(fileName), []);
 
-    // Restore and merge preview the same file identically; only the sentence about what the
-    // action does to local data differs.
     const buildBackupSummary = useCallback((
         validation: Awaited<ReturnType<typeof inspectBackupDocument>>,
         effect: string,
-    ) => {
-        const details = [
-            validation.metadata?.backupAt
-                ? tr('settings.backupMobile.backupDateLabel', { backupDate: new Date(validation.metadata.backupAt).toLocaleString() })
-                : validation.metadata?.fileName
-                    ? tr('settings.backupMobile.fileLabel', { fileName: validation.metadata.fileName })
-                    : null,
-            tr('settings.backupMobile.backupPreviewCounts', { taskCount: validation.metadata?.taskCount ?? 0, projectCount: validation.metadata?.projectCount ?? 0 }),
-            effect,
-            ...(() => {
-                const warningDiagnostics = validation.diagnostics
-                    ?? createImportDiagnostics(validation.warnings, 'warning');
-                const warnings = warningDiagnostics
-                    .filter((diagnostic) => diagnostic.severity === 'warning')
-                    .map((diagnostic) => formatImportDiagnostic(diagnostic, tr));
-                return warnings.length > 0 ? ['', ...warnings] : [];
-            })(),
-        ].filter(Boolean);
-        return details.join('\n');
-    }, [tr]);
-
-    const buildTodoistSummary = useCallback((preview: NonNullable<TodoistImportParseResult['preview']>) => {
-        const projectLines = preview.projects
-            .slice(0, 4)
-            .map((project) => `• ${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) {
-            projectLines.push(tr('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        }
-        const details = [
-            tr('settings.backupMobile.importTodoistTasksFromProjects', { taskCount: preview.taskCount, projectCount: preview.projectCount }),
-            preview.sectionCount > 0
-                ? tr('settings.backupMobile.sectionsWillBePreserved', { sectionCount: preview.sectionCount })
-                : null,
-            preview.checklistItemCount > 0
-                ? tr('settings.backupMobile.subtasksWillBecomeChecklistItems', { subtaskCount: preview.checklistItemCount })
-                : null,
-            ...(projectLines.length > 0 ? ['', ...projectLines] : []),
-            ...(preview.warnings.length > 0 ? ['', ...formatImportMessages(preview.warnings)] : []),
-        ].filter(Boolean);
-        return details.join('\n');
-    }, [formatImportMessages, tr]);
-
-    const buildTickTickSummary = useCallback((preview: NonNullable<TickTickImportParseResult['preview']>) => {
-        const projectLines = preview.projects
-            .slice(0, 4)
-            .map((project) => `• ${project.areaName ? `${project.areaName} / ` : ''}${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) {
-            projectLines.push(tr('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        }
-        const details = [
-            tr('settings.backupMobile.importTasksFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.areaCount > 0
-                ? tr('settings.backupMobile.ticktickAreasWillBeCreated', { areaCount: preview.areaCount })
-                : null,
-            preview.projectCount > 0
-                ? tr('settings.backupMobile.ticktickProjectsWillBeCreated', { projectCount: preview.projectCount })
-                : null,
-            preview.checklistItemCount > 0
-                ? tr('settings.backupMobile.checklistItemsWillBePreserved', { checklistItemCount: preview.checklistItemCount })
-                : null,
-            preview.recurringCount > 0
-                ? tr('settings.backupMobile.recurringTasksWillKeepSupportedRepeatRules', { taskCount: preview.recurringCount })
-                : null,
-            ...(projectLines.length > 0 ? ['', ...projectLines] : []),
-            ...(preview.warnings.length > 0 ? ['', ...formatImportMessages(preview.warnings)] : []),
-        ].filter(Boolean);
-        return details.join('\n');
-    }, [formatImportMessages, tr]);
-
-    const buildDgtSummary = useCallback((preview: NonNullable<DgtImportParseResult['preview']>) => {
-        const projectLines = preview.projects
-            .slice(0, 4)
-            .map((project) => `• ${project.areaName ? `${project.areaName} / ` : ''}${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) {
-            projectLines.push(tr('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        }
-        const details = [
-            tr('settings.backupMobile.importTasksFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.areaCount > 0
-                ? tr('settings.backupMobile.dgtAreasWillBeCreated', { areaCount: preview.areaCount })
-                : null,
-            preview.projectCount > 0
-                ? tr('settings.backupMobile.projectsWillBeCreated', { projectCount: preview.projectCount })
-                : null,
-            preview.checklistItemCount > 0
-                ? tr('settings.backupMobile.checklistItemsWillBePreserved', { checklistItemCount: preview.checklistItemCount })
-                : null,
-            preview.standaloneTaskCount > 0
-                ? tr('settings.backupMobile.tasksWillStayOutsideProjects', { taskCount: preview.standaloneTaskCount })
-                : null,
-            ...(projectLines.length > 0 ? ['', ...projectLines] : []),
-            ...(preview.warnings.length > 0 ? ['', ...formatImportMessages(preview.warnings)] : []),
-        ].filter(Boolean);
-        return details.join('\n');
-    }, [formatImportMessages, tr]);
-
-    const buildOmniFocusSummary = useCallback((preview: NonNullable<OmniFocusImportParseResult['preview']>) => {
-        const projectLines = preview.projects
-            .slice(0, 4)
-            .map((project) => `• ${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) {
-            projectLines.push(tr('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        }
-        const details = [
-            tr('settings.backupMobile.importTaskCountFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.projectCount > 0
-                ? tr('settings.backupMobile.projectsWillBeCreatedWhenNeeded', { projectCount: preview.projectCount })
-                : null,
-            preview.areaCount > 0
-                ? tr('settings.backupMobile.omnifocusAreasWillBeCreated', { areaCount: preview.areaCount })
-                : null,
-            preview.checklistItemCount > 0
-                ? tr('settings.backupMobile.nestedTasksWillBecomeChecklistItems', { taskCount: preview.checklistItemCount })
-                : null,
-            preview.standaloneTaskCount > 0
-                ? tr('settings.backupMobile.tasksWillStayOutsideProjects', { taskCount: preview.standaloneTaskCount })
-                : null,
-            tr('settings.backupMobile.importedTasksKeepOmnifocusNotesDatesTagsRecurrenceAndChecklist'),
-            ...(projectLines.length > 0 ? ['', ...projectLines] : []),
-            ...(preview.warnings.length > 0 ? ['', ...formatImportMessages(preview.warnings)] : []),
-        ].filter(Boolean);
-        return details.join('\n');
-    }, [formatImportMessages, tr]);
-
-    const buildMindwtrCsvSummary = useCallback((preview: NonNullable<MindwtrCsvImportParseResult['preview']>) => {
-        const projectLines = preview.projects
-            .slice(0, 4)
-            .map((project) => `• ${project.areaName ? `${project.areaName} / ` : ''}${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) {
-            projectLines.push(tr('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        }
-        const details = [
-            tr('settings.backupMobile.importTasksFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.areaCount > 0
-                ? tr('settings.backupMobile.mindwtrCsvAreasWillBeCreated', { areaCount: preview.areaCount })
-                : null,
-            preview.projectCount > 0
-                ? tr('settings.backupMobile.projectsWillBeCreatedWhenNeeded', { projectCount: preview.projectCount })
-                : null,
-            preview.sectionCount > 0
-                ? tr('settings.backupMobile.mindwtrCsvSectionsWillBeCreated', { sectionCount: preview.sectionCount })
-                : null,
-            preview.checklistItemCount > 0
-                ? tr('settings.backupMobile.checklistItemsWillBePreserved', { checklistItemCount: preview.checklistItemCount })
-                : null,
-            preview.standaloneTaskCount > 0
-                ? tr('settings.backupMobile.tasksWillStayOutsideProjects', { taskCount: preview.standaloneTaskCount })
-                : null,
-            ...(projectLines.length > 0 ? ['', ...projectLines] : []),
-            ...(preview.warnings.length > 0 ? ['', ...formatImportMessages(preview.warnings)] : []),
-        ].filter(Boolean);
-        return details.join('\n');
-    }, [formatImportMessages, tr]);
+    ) => buildBackupPreviewSummary(validation, effect, tr), [tr]);
+    const buildTodoistSummary = useCallback((preview: NonNullable<TodoistImportParseResult['preview']>) => buildTodoistPreviewSummary(preview, tr), [tr]);
+    const buildTickTickSummary = useCallback((preview: NonNullable<TickTickImportParseResult['preview']>) => buildTickTickPreviewSummary(preview, tr), [tr]);
+    const buildDgtSummary = useCallback((preview: NonNullable<DgtImportParseResult['preview']>) => buildDgtPreviewSummary(preview, tr), [tr]);
+    const buildOmniFocusSummary = useCallback((preview: NonNullable<OmniFocusImportParseResult['preview']>) => buildOmniFocusPreviewSummary(preview, tr), [tr]);
+    const buildMindwtrCsvSummary = useCallback((preview: NonNullable<MindwtrCsvImportParseResult['preview']>) => buildMindwtrCsvPreviewSummary(preview, tr), [tr]);
 
     const handleBackup = useCallback(async () => {
         setBackupAction('export');
@@ -309,8 +161,7 @@ export function useSyncSettingsBackupActions({
         }
     }, [tr, setBackupAction, showSettingsErrorToast]);
 
-    // `undo` only swaps the copy: an undo IS a snapshot restore, so it keeps the
-    // same destructive-confirmation weight and the same restore path.
+
     const handleExportTaskNotes = useCallback(async () => {
         setBackupAction('export:tasknotes');
         try {
@@ -348,7 +199,7 @@ export function useSyncSettingsBackupActions({
                             });
                         } catch (error) {
                             logSettingsError(error);
-                            showSettingsErrorToast(tr('settings.backupMobile.restoreFailed'), String(error), 5200);
+                            showSettingsErrorToast(tr('settings.backupMobile.restoreFailed'), formatThrownBackupError(error), 5200);
                         } finally {
                             setBackupAction(null);
                         }
@@ -356,7 +207,7 @@ export function useSyncSettingsBackupActions({
                 },
             ]
         );
-    }, [formatRecoverySnapshotLabel, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [formatRecoverySnapshotLabel, formatThrownBackupError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const confirmRestoreBackup = useCallback(async (validation: BackupValidation) => {
         if (!validation.data) return;
@@ -374,11 +225,11 @@ export function useSyncSettingsBackupActions({
             });
         } catch (error) {
             logSettingsError(error);
-            showSettingsErrorToast(tr('settings.backupMobile.restoreFailed'), String(error), 5200);
+            showSettingsErrorToast(tr('settings.backupMobile.restoreFailed'), formatThrownBackupError(error), 5200);
         } finally {
             setBackupAction(null);
         }
-    }, [handleRestoreRecoverySnapshot, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [formatThrownBackupError, handleRestoreRecoverySnapshot, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const handleRestoreBackup = useCallback(async () => {
         setBackupAction('restore');
@@ -428,14 +279,9 @@ export function useSyncSettingsBackupActions({
         try {
             const { snapshotName, result } = await mergeDataFromBackup(validation.data);
             await refreshRecoverySnapshots();
-            const merged = summarizeBackupMerge(result);
-            const details = [
-                tr('settings.mergeBackupSummary', { addedCount: merged.added, updatedCount: merged.updated }),
-                tr('settings.backupMobile.recoverySnapshotSaved', { snapshotName }),
-            ];
             showToast({
                 title: tr('settings.mergeBackup'),
-                message: details.join('\n'),
+                message: buildMergeResultMessage(summarizeBackupMerge(result), snapshotName, tr),
                 tone: 'success',
                 durationMs: 5600,
                 actionLabel: tr('settings.undoImport'),
@@ -443,11 +289,11 @@ export function useSyncSettingsBackupActions({
             });
         } catch (error) {
             logSettingsError(error);
-            showSettingsErrorToast(tr('settings.mergeBackupFailed'), String(error), 5200);
+            showSettingsErrorToast(tr('settings.mergeBackupFailed'), formatThrownBackupError(error), 5200);
         } finally {
             setBackupAction(null);
         }
-    }, [handleRestoreRecoverySnapshot, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [formatThrownBackupError, handleRestoreRecoverySnapshot, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const handleMergeBackup = useCallback(async () => {
         setBackupAction('merge');
@@ -491,17 +337,9 @@ export function useSyncSettingsBackupActions({
         try {
             const { snapshotName, result } = await importTodoistData(parsedProjects);
             await refreshRecoverySnapshots();
-            const details = [
-                tr('settings.backupMobile.importedTodoistTasksIntoProjects', { taskCount: result.importedTaskCount, projectCount: result.importedProjectCount }),
-                result.importedChecklistItemCount > 0
-                    ? tr('settings.backupMobile.subtasksBecameChecklistItems', { subtaskCount: result.importedChecklistItemCount })
-                    : null,
-                tr('settings.backupMobile.recoverySnapshotSaved', { snapshotName }),
-                ...(result.warnings.length > 0 ? ['', ...formatImportMessages(result.warnings)] : []),
-            ].filter(Boolean);
             showToast({
                 title: tr('settings.backupMobile.importComplete'),
-                message: details.join('\n'),
+                message: buildTodoistResultMessage(result, snapshotName, tr),
                 tone: 'success',
                 durationMs: 5600,
                 actionLabel: tr('settings.undoImport'),
@@ -513,24 +351,16 @@ export function useSyncSettingsBackupActions({
         } finally {
             setBackupAction(null);
         }
-    }, [handleRestoreRecoverySnapshot, formatImportMessages, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [handleRestoreRecoverySnapshot, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const confirmTickTickImport = useCallback(async (parsedData: ParsedTickTickImportData) => {
         setBackupAction('import:ticktick');
         try {
             const { snapshotName, result } = await importTickTickData(parsedData);
             await refreshRecoverySnapshots();
-            const details = [
-                tr('settings.backupMobile.importedTaskProjectAreaCounts', { taskCount: result.importedTaskCount, projectCount: result.importedProjectCount, areaCount: result.importedAreaCount }),
-                result.importedChecklistItemCount > 0
-                    ? tr('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: result.importedChecklistItemCount })
-                    : null,
-                tr('settings.backupMobile.recoverySnapshotSaved', { snapshotName }),
-                ...(result.warnings.length > 0 ? ['', ...formatImportMessages(result.warnings)] : []),
-            ].filter(Boolean);
             showToast({
                 title: tr('settings.backupMobile.importComplete'),
-                message: details.join('\n'),
+                message: buildAreaImportResultMessage(result, snapshotName, tr),
                 tone: 'success',
                 durationMs: 6200,
                 actionLabel: tr('settings.undoImport'),
@@ -542,24 +372,16 @@ export function useSyncSettingsBackupActions({
         } finally {
             setBackupAction(null);
         }
-    }, [handleRestoreRecoverySnapshot, formatImportMessages, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [handleRestoreRecoverySnapshot, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const confirmDgtImport = useCallback(async (parsedData: ParsedDgtImportData) => {
         setBackupAction('import:dgt');
         try {
             const { snapshotName, result } = await importDgtData(parsedData);
             await refreshRecoverySnapshots();
-            const details = [
-                tr('settings.backupMobile.importedTaskProjectAreaCounts', { taskCount: result.importedTaskCount, projectCount: result.importedProjectCount, areaCount: result.importedAreaCount }),
-                result.importedChecklistItemCount > 0
-                    ? tr('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: result.importedChecklistItemCount })
-                    : null,
-                tr('settings.backupMobile.recoverySnapshotSaved', { snapshotName }),
-                ...(result.warnings.length > 0 ? ['', ...formatImportMessages(result.warnings)] : []),
-            ].filter(Boolean);
             showToast({
                 title: tr('settings.backupMobile.importComplete'),
-                message: details.join('\n'),
+                message: buildAreaImportResultMessage(result, snapshotName, tr),
                 tone: 'success',
                 durationMs: 6200,
                 actionLabel: tr('settings.undoImport'),
@@ -571,30 +393,16 @@ export function useSyncSettingsBackupActions({
         } finally {
             setBackupAction(null);
         }
-    }, [handleRestoreRecoverySnapshot, formatImportMessages, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [handleRestoreRecoverySnapshot, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const confirmOmniFocusImport = useCallback(async (parsedData: ParsedOmniFocusImportData) => {
         setBackupAction('import:omnifocus');
         try {
             const { snapshotName, result } = await importOmniFocusData(parsedData);
             await refreshRecoverySnapshots();
-            const details = [
-                tr('settings.backupMobile.importedTaskProjectCounts', { taskCount: result.importedTaskCount, projectCount: result.importedProjectCount }),
-                result.importedAreaCount > 0
-                    ? tr('settings.backupMobile.omnifocusAreasCreated', { areaCount: result.importedAreaCount })
-                    : null,
-                result.importedChecklistItemCount > 0
-                    ? tr('settings.backupMobile.nestedTasksBecameChecklistItems', { taskCount: result.importedChecklistItemCount })
-                    : null,
-                result.importedStandaloneTaskCount > 0
-                    ? tr('settings.backupMobile.tasksStayedOutsideProjects', { taskCount: result.importedStandaloneTaskCount })
-                    : null,
-                tr('settings.backupMobile.recoverySnapshotSaved', { snapshotName }),
-                ...(result.warnings.length > 0 ? ['', ...formatImportMessages(result.warnings)] : []),
-            ].filter(Boolean);
             showToast({
                 title: tr('settings.backupMobile.importComplete'),
-                message: details.join('\n'),
+                message: buildOmniFocusResultMessage(result, snapshotName, tr),
                 tone: 'success',
                 durationMs: 6200,
                 actionLabel: tr('settings.undoImport'),
@@ -606,29 +414,16 @@ export function useSyncSettingsBackupActions({
         } finally {
             setBackupAction(null);
         }
-    }, [handleRestoreRecoverySnapshot, formatImportMessages, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [handleRestoreRecoverySnapshot, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const confirmMindwtrCsvImport = useCallback(async (parsedData: ParsedMindwtrCsvImportData) => {
         setBackupAction('import:mindwtr-csv');
         try {
             const { snapshotName, result } = await importMindwtrCsvData(parsedData);
             await refreshRecoverySnapshots();
-            const details = [
-                tr('settings.backupMobile.importedTaskProjectSectionAreaCounts', {
-                    taskCount: result.importedTaskCount,
-                    projectCount: result.importedProjectCount,
-                    sectionCount: result.importedSectionCount,
-                    areaCount: result.importedAreaCount,
-                }),
-                result.importedChecklistItemCount > 0
-                    ? tr('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: result.importedChecklistItemCount })
-                    : null,
-                tr('settings.backupMobile.recoverySnapshotSaved', { snapshotName }),
-                ...(result.warnings.length > 0 ? ['', ...formatImportMessages(result.warnings)] : []),
-            ].filter(Boolean);
             showToast({
                 title: tr('settings.backupMobile.importComplete'),
-                message: details.join('\n'),
+                message: buildMindwtrCsvResultMessage(result, snapshotName, tr),
                 tone: 'success',
                 durationMs: 6200,
                 actionLabel: tr('settings.undoImport'),
@@ -640,7 +435,7 @@ export function useSyncSettingsBackupActions({
         } finally {
             setBackupAction(null);
         }
-    }, [handleRestoreRecoverySnapshot, formatImportMessages, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
+    }, [handleRestoreRecoverySnapshot, formatThrownImportError, tr, refreshRecoverySnapshots, setBackupAction, showSettingsErrorToast, showToast]);
 
     const handleImportTodoist = useCallback(async () => {
         setBackupAction('import:todoist');
@@ -823,9 +618,8 @@ export function useSyncSettingsBackupActions({
     }, [settings.diagnostics, updateSettings]);
 
     const handleShareLog = useCallback(async () => {
-        // Stamp the current encryption posture into the log before it leaves the device: a
-        // shared log has to answer "what state was this device in" even when the user never
-        // opened the Encryption block and only turned Debug logging on after the failure.
+
+
         await logSyncEncryptionDiagnosticsBlock().catch(() => undefined);
         const path = await ensureLogFilePath();
         if (!path) {

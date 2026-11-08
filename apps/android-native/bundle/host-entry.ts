@@ -1,6 +1,30 @@
+import { exact, record, isNativeJsonWithinBytes } from '../../../packages/core/src/native-json';
+import { readNativeIosDropboxConfiguration, type NativeIosDropboxCapability } from './host-ios-dropbox';
+import { createNativeGmail } from './host-gmail';
+import { discoverNativeAITextModels, discoverNativeVoiceModels } from '../../../packages/core/src/native-ai-model-discovery';
+import { readNativeAIExtraBodyInput } from '../../../packages/core/src/native-host-contract-ai';
+import { readWatchOpenAIRuntime, buildWatchOpenAITranscription, decodeWatchOpenAITranscription, buildWatchOpenAIParse, decodeWatchOpenAIParse } from './ios-watch-openai';
+import { ingestIOSWatchBatch, readIOSWatchBatchOutcome, ingestIOSWatchAudio, readIOSWatchAudioOutcome, readIOSWatchAudioNeedsTranscript } from './ios-watch-ingest';
+import { createNativeShareCaptureMethods } from '../../../packages/core/src/native-share-capture';
+import { readIOSShareCaptureDraft } from './ios-share-capture';
 import {
     DEFAULT_GLOBAL_SEARCH_FILTERS,
+    getOnboardingGuideUrl,
+    ONBOARDING_TOPIC_COPY,
+    formatOpenAIExtraBodyParams,
+    getSelectedMobileWhisperModel,
+    normalizeSpeechLanguage,
+    WHISPER_MODEL_BASE_URLS,
+    buildNativePomodoroPanel,
+    buildWatchApplicationContext,
+    WATCH_FOCUS_TASK_LIMIT,
+    createPomodoroState,
+    sanitizePomodoroDurations,
+    isTaskActionable,
+    isTaskCancelled,
+    readNativePomodoroPresentation,
     NativeReceiptSqliteAdapter,
+    warmTaskRowEntries,
     PENDING_CAPTURES_DIRECTORY,
     PENDING_CAPTURE_LAST_APPLIED_STORAGE_KEY,
     NATIVE_HOST_CONTRACT_VERSION,
@@ -9,6 +33,7 @@ import {
     SYNC_BACKEND_KEY,
     generateUUID,
     NATIVE_REMINDER_STATE_STORAGE_KEY,
+    PERSISTENT_CAPTURE_STORAGE_KEY,
     REMINDER_ALARM_MAP_STORAGE_KEY,
     REMINDER_NOTIFICATION_CHANNEL_NAME,
     REMINDER_STORE_RESCHEDULE_DELAY_MS,
@@ -16,7 +41,7 @@ import {
     nameNotifyListener,
     STATUS_COLORS_BY_THEME,
     type SqliteAdapter,
-    TASK_PRIORITY_COLORS,
+    getTaskPriorityColors,
     consoleLogger,
     createDiagnosticsLog,
     createFeedbackDiagnosticsBuffer,
@@ -31,12 +56,27 @@ import {
     buildFeedbackDiagnosticsSnapshot,
     buildImmediateNotificationDetails,
     buildShortcutsSnapshot,
+    createWidgetPayloadProjection,
+    createPublishedWidgetProjection,
+    iosWidgetProjectionOptions,
+    IOS_WIDGET_FAMILY_CACHE_ITEMS,
+    getFocusWidgetFilter,
+    setFocusWidgetFilter,
+    type NativeFocusView,
+    focusWidgetFilterKey,
+    buildNativeBackupDocumentFailure,
     buildNativeBackupDocumentResult,
     buildNativeBackupSnapshotRestoreConfirmation,
+    buildNativeBackupNoUndoConfirmation,
     commitNativeBackupDocument,
+    holdNativeBackupUndoAttachments,
     inspectNativeBackupDocument,
     prepareNativeBackupDocument,
     readNativeBackupDocumentOutcome,
+    sortRecoverySnapshotNames,
+    serializeBackupData,
+    validateMergedSyncData,
+    type AppData,
     validateNativeAttachmentDraftBegin,
     validateNativeAttachmentDraftLineage,
     prepareNativeAttachmentDraftAdd,
@@ -68,6 +108,9 @@ import {
     diagnosticsEntryFromLogPayload,
     getGeneralSettingsDeviceWrites,
     getPersistenceStatus,
+    runSerializedSyncDocumentWriteOperation,
+    setStorageTimeoutMs,
+    getStorageTimeoutMs,
     getNextFutureStartRevealAt,
     compareAppVersions,
     fetchAppStoreInfo,
@@ -79,12 +122,17 @@ import {
     isSupportedLanguage,
     isDiagnosticsLoggingEnabled,
     isSandboxMode,
+    buildLastRouteSnapshot,
+    LAST_ROUTE_STORAGE_KEY,
+    parseRestorableLastRoute,
     isEntityOpenUrl,
     parseEntityOpenUrl,
     resolveEntityOpenTarget,
+    resolveMobileAppLockRelockDelayMinutes,
     isWorkspaceTransitionActive,
     legacyImportMismatch,
     assertNativeLegacyBackupSafe,
+    countSqliteCopyRepairs,
     loadNativeRequestReceipts,
     logInfo,
     logWarn,
@@ -119,22 +167,63 @@ import {
     webdavPutFile,
     webdavPutJson,
 } from '@mindwtr/core';
+import { countTasksForIconBadge } from '../../../packages/core/src/task-icon-badge';
+import { syncPassphraseBytes } from '../../../packages/core/src/sync-crypto';
 import { createNativeAbout } from './host-about';
+import { createNativeAppSearch, type AppSearchCall } from './host-app-search';
 import { createNativeAI } from './host-ai';
+import { createIOSTaskAI } from './host-ios-task-ai';
+import { createIOSInboxAI } from './host-ios-inbox-ai';
+import { createIOSReviewAI } from './host-ios-review-ai';
+import { isAIKeyRequired } from '../../../packages/core/src/ai-config';
+import type { NativeAIHost } from '../../../packages/core/src/native-host-contract-ai';
 import { createIOSCalendarHost, type CalendarCall } from '../../ios-native/bundle/host-calendar';
+import { createNativeCloudKitRecords } from '../../ios-native/bundle/host-cloudkit';
+import { createNativeCloudKitAssets, type NativeCloudKitTransportCall } from '../../ios-native/bundle/host-cloudkit-assets';
 import type { NativeCalendarPushLifecycle } from '../../../packages/core/src/native-host-contract-settings-calendar';
+import { createCalendarFeeds, createNativeCalendar } from './host-calendar';
+import { createNativeVoice, managedAttachmentsDirectory, persistIntoManagedStorage, type VoiceCaptureLine } from './host-voice';
+import { createWidgetAudioPort } from './host-widget-audio';
+import { createAIKeyStore } from '../../../packages/core/src/ai-config';
+import { createSyncSecretVault } from '../../../packages/core/src/sync-secret-storage';
 import { createNativeLocalAttachmentsForHost, nativeFileChannels, prepareNativeTaskAttachmentAvailabilityPreflight,
-    prepareNativeTaskAttachmentAvailability, prepareNativeProjectFileAvailability, nativeProjectFileAvailabilityInitialURL,
+    prepareNativeTaskAttachmentAvailability, nativeTaskAttachmentPreparationUsesCloudKit, prepareNativeProjectFileAvailability, nativeProjectFileAvailabilityInitialURL,
     createNativeReadOnlySelfHostedAttachments, assertNativeSelfHostedAttachmentEncryptionAdmission } from './host-attachments';
 import { PROJECT_SQLITE_COLUMNS } from '../../../packages/core/src/project-sync-schema';
+import { TASK_SQLITE_COLUMNS, taskToSqliteRow } from '../../../packages/core/src/task-sync-schema';
+import { normalizeTaskForLoad } from '../../../packages/core/src/task-status';
+import { hasRawReadRow, rawReadRow } from '../../../packages/core/src/sqlite-raw-snapshot';
+import { taskEditValuesEqual } from '../../../packages/core/src/json-value-equality';
+import { ensureDeviceId, stripSensitiveSettings } from '../../../packages/core/src/store-helpers';
+import { resolveDefaultNewTaskAreaId } from '../../../packages/core/src/area-utils';
+import { getTaskReminderDefault } from '../../../packages/core/src/task-reminder-policy';
+import { classifyAppleReminderForImport, normalizeAppleRemindersImportSettings } from '../../../packages/core/src/apple-reminders-import-model';
+import { prepareNativeAppleReminderImportItem, validatePreparedNativeAppleReminderImportItem,
+    type NativeAppleReminderImportRequest } from '../../../packages/core/src/native-apple-reminders-import-item';
+import { createNativeAppleReminderImportOwner } from '../../../packages/core/src/native-apple-reminders-import-owner';
+import { nativePomodoroOwedTaskIds, prepareNativePomodoroTransition, validatePreparedNativePomodoroTransition,
+    MAX_NATIVE_POMODORO_PLAN_BYTES, parseNativeWatchPomodoroSource, type NativePomodoroRequest } from '../../../packages/core/src/native-pomodoro-session';
+import { NativePomodoroTransitionRefusal } from '../../../packages/core/src/native-request-receipts';
+import { buildNativePomodoroAlarmIntent, buildNativePomodoroLegacyAlert, NATIVE_POMODORO_LATE_LIMIT_MS } from '../../../packages/core/src/native-pomodoro-alarm';
+import { planNativePomodoroAlarmEffects, prepareNativePomodoroAlarmDispatch } from '../../../packages/core/src/native-pomodoro-alarm-effects';
+import { buildNativeAISettingsProjection } from '../../../packages/core/src/native-ai-settings-projection';
+import { createNativeAITextConfigurationMethods, nativeAITextConfigurationConsentTarget, readNativeAITextConfigurationRequestV2 } from '../../../packages/core/src/native-ai-text-configuration';
+import { createNativeVoiceMethods } from '../../../packages/core/src/native-voice';
+import { buildRemoteGeminiSpeechRequest, decodeRemoteGeminiSpeechResponse, type GeminiSpeechRequestConfig } from '../../../packages/core/src/speech-to-task';
+import { createDateFormatter } from '../../../packages/core/src/date';
+import { createNativeAIRequestTimeoutMethods } from '../../../packages/core/src/native-ai-request-timeout';
+import { createNativeAIReasoningEffortMethods } from '../../../packages/core/src/native-ai-reasoning-effort';
+import { createNativeAIGeminiThinkingBudgetMethods } from '../../../packages/core/src/native-ai-gemini-thinking-budget';
+import { readNativeAIProviderDeviceState } from '../../../packages/core/src/native-ai-provider-device-state';
 import { createPreparedProjectAvailabilityMethods, createProjectAvailabilityMethods } from '../../../packages/core/src/native-host-contract-project-availability';
 import { SYNC_ENCRYPTION_STATE_KEY } from '../../../packages/core/src/sync-storage-keys';
 import { createNativeReminders } from './host-reminders';
 import { createIosReminderMethods, createIosReminderSnoozeMethods } from './host-ios-reminders';
-import { createNativeSync, createHostSyncCrypto, isNativeIosSelfHostedProvider, type NativeSync, type NativeSyncBindings } from './host-sync';
+import { createIosDirectoryFileSync, createIosFileSync, createNativeSync, createHostSyncCrypto, isNativeIosSelfHostedProvider, type NativeSync, type NativeSyncBindings } from './host-sync';
 import { createWidgetPublisher, type WidgetInputs } from './host-widgets';
 
 type NativeBridge = {
+    cloudKitAvailable?(): boolean;
     sqlRun(sql: string, params: string): string | null;
     sqlAll(sql: string, params: string): string;
     sqlExec(sql: string): string | null;
@@ -142,40 +231,56 @@ type NativeBridge = {
     randomBytes(length: number): string;
     log(line: string): void;
     rnStateCommit(change: string): string | null;
-    /** RN's diagnostics log file (files/logs/mindwtr.log): one operation of core's DiagnosticsLogFile, as text. */
+
     logFile(operation: string, text: string): string;
     fileList(path: string): string;
     fileRead(path: string): string;
     fileDelete(path: string): string | null;
-    /** RN's AsyncStorage (RnKeyValue.kt): reads answer JSON; a write is on disk when it returns. */
+
     kvGet(key: string): string;
     kvSet(key: string, value: string): string | null;
     kvRemove(key: string): string | null;
     kvMultiGet(keysJson: string): string;
     kvMultiSet(pairsJson: string): string | null;
     kvMultiRemove(keysJson: string): string | null;
-    /** iOS only: fixed calendar choice and private mutation proof, admitted by its journal owner. */
+
     calendarSettingRead?(): string;
     calendarSubscriptionRead?(): string;
     calendarSettingCAS?(expectedJson: string, nextJson: string): string | null;
-    /** Private iOS admission notification; the native owner later invokes the shared run. */
+
     calendarPushDue?(idsJSON: string): string | null;
-    /** An event for Kotlin (CoreHost's event listener): sync's badge and cycle count, an automatic sync's warning. */
+
     hostEvent(json: string): string | null;
-    /** Android only: opens an android.os.Trace section named `name`, or closes the open one for "". */
+
     trace?(name: string): void;
-    /** Reminder alarms (Reminders.kt): core's plan applied in core's order; the notification permission; RN's alarms cancelled once. */
-    alarmApply?(planJson: string): string | null;
+
+    alarmApply?(planJson: string): number | string | null;
     notificationsAllowed?(): boolean | string;
     rnAlarmCleanup?(): number | string;
     reminderReceiverCounts?(): string;
     reminderLedger?(): string;
-    /** RN's widget module on Android (HostWidgets.kt): the publication's device inputs as JSON, and the payload to write and draw. */
+
     widgetInputs?(): string;
     widgetPublish?(payload: string): string | null;
     widgetAppState?(): string;
-    /** Android only (BackgroundSync.kt): the background sync job kept scheduled (true) or cancelled (false), as core decides. */
+
     bgSyncSchedule?(on: boolean): string | null;
+
+
+    dataRead?(handle: string): string;
+    dataWrite?(handle: string, chunk: string): string | null;
+    dataClose?(handle: string): string;
+
+    appSearchInfo?(): string;
+
+    gmailFile?(op: string, name: string, to: string): string;
+    gmailSql?(name: string, sql: string, paramsJson: string): string;
+
+    debugProp?(name: string): string;
+
+    memProbe?(label: string): string | null;
+    gmailFile?(op: string, name: string, to: string): string;
+    gmailSql?(name: string, sql: string, paramsJson: string): string;
 };
 
 declare const globalThis: Record<string, unknown> & { MindwtrHost?: unknown; fetch: typeof fetch };
@@ -185,19 +290,82 @@ const native = (): NativeBridge => {
     return bridge;
 };
 
-// Kotlin returns a storage exception as a marked string (see CoreHost.guarded):
-// a Java exception thrown across the QuickJS JNI boundary aborts the process.
+
 const NATIVE_ERROR = '!MindwtrNativeError:';
 const checked = <T,>(value: T): T => {
     if (typeof value === 'string' && value.startsWith(NATIVE_ERROR)) throw new Error(value.slice(NATIVE_ERROR.length));
     return value;
 };
 
-/**
- * Boot steps as trace sections for startup profiling (Perfetto): each call closes the step before it and opens `name`
- * ("" only closes). A host without the trace call (iOS) ignores it. A boot that throws leaves its step open; that host is
- * closed anyway.
- */
+
+const channelRead = (handle: string): string => {
+    const bridge = native();
+    const parts: string[] = [];
+    for (;;) {
+        const reply = checked(bridge.dataRead!(handle));
+        if (reply === 'E') return parts.join('');
+        if (reply[0] !== 'D') throw new Error('DATA_IO');
+        parts.push(reply.slice(1));
+    }
+};
+const channelClose = (handle: string): { bytes: number; sha256: string } => JSON.parse(checked(native().dataClose!(handle))) as { bytes: number; sha256: string };
+
+const CHANNEL_UNITS = 512 * 1024;
+
+const channelPieces = function* (text: string): Generator<string> {
+    for (let start = 0; start < text.length;) {
+        let end = Math.min(text.length, start + CHANNEL_UNITS);
+        const last = text.charCodeAt(end - 1);
+        if (end < text.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+        yield text.slice(start, end);
+        start = end;
+    }
+};
+const channelWrite = (handle: string, text: string): void => {
+    const bridge = native();
+    for (const piece of channelPieces(text)) checked(bridge.dataWrite!(handle, piece));
+};
+
+const base64Pieces = function* (text: string): Generator<string> {
+    for (let start = 0; start < text.length; start += 4 * 256 * 1024) yield text.slice(start, start + 4 * 256 * 1024);
+};
+const channelWriteBase64 = (handle: string, text: string): void => {
+    const bridge = native();
+    for (const piece of base64Pieces(text)) checked(bridge.dataWrite!(handle, piece));
+};
+
+
+const debugProp = (name: string): string => {
+    const read = (globalThis.__mindwtrNative as NativeBridge | undefined)?.debugProp;
+    return read ? String(checked(read(name)) ?? '') : '';
+};
+const debugControl = (name: string): boolean => debugProp('d1c_control') === name || debugProp('d1c_control') === 'pre-d1c' && name === 'no-storage-budget';
+const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
+
+let fullReads = 0;
+
+const channelWriteFile = async (handle: string, text: string, base64: boolean): Promise<void> => {
+    const delay = Number(debugProp('channel_write_delay_ms'));
+    if (!(delay > 0)) { if (base64) channelWriteBase64(handle, text); else channelWrite(handle, text); return; }
+    const bridge = native();
+    let first = true;
+    for (const piece of base64 ? base64Pieces(text) : channelPieces(text)) {
+        checked(bridge.dataWrite!(handle, piece));
+        if (first) { first = false; await pause(delay); }
+    }
+};
+
+
+let storageBudget: { baseMs: number; msPerMiB: number } | null = null;
+const sizeStorageTimeout = async (adapter: { libraryBytes(): Promise<number> }): Promise<void> => {
+    if (!storageBudget || debugControl('no-storage-budget')) return;
+    setStorageTimeoutMs(storageBudget.baseMs + Math.ceil(await adapter.libraryBytes() / (1024 * 1024)) * storageBudget.msPerMiB);
+};
+
+const channelCode = (error: unknown): string | null =>
+    error instanceof Error && /^DATA_[A-Z0-9]+$/u.test(error.message) ? error.message : null;
+
+
 let tracedStep = false;
 const traceStep = (name: string) => {
     const bridge = native();
@@ -206,15 +374,22 @@ const traceStep = (name: string) => {
     tracedStep = name !== '';
     if (tracedStep) bridge.trace(name);
 };
-// Core's own trace sections (perf-trace.ts: the sync cycle's steps) go to the same bridge call.
+
 if ((globalThis.__mindwtrNative as NativeBridge | undefined)?.trace) {
     globalThis.__mindwtrTraceSection = (name: string) => { native().trace?.(name); };
 }
 
 const sqlite: SqliteClient = {
     run: async (sql, params) => { checked(native().sqlRun(sql, JSON.stringify(params ?? []))); },
-    all: async <T,>(sql: string, params?: unknown[]): Promise<T[]> =>
-        JSON.parse(checked(native().sqlAll(sql, JSON.stringify(params ?? [])))) as T[],
+    all: async <T,>(sql: string, params?: unknown[]): Promise<T[]> => {
+
+        if (sql.startsWith('SELECT rowid as _rowid, * FROM tasks WHERE rowid > ?') && params?.[0] === 0) {
+            fullReads += 1;
+            const delay = Number(debugProp('sql_read_delay_ms'));
+            if (delay > 0 && fullReads > (Number(debugProp('sql_read_delay_skip')) || 0)) await pause(delay);
+        }
+        return JSON.parse(checked(native().sqlAll(sql, JSON.stringify(params ?? [])))) as T[];
+    },
     get: async <T,>(sql: string, params?: unknown[]): Promise<T | undefined> =>
         (JSON.parse(checked(native().sqlAll(sql, JSON.stringify(params ?? [])))) as T[])[0],
     exec: async (sql) => {
@@ -222,10 +397,7 @@ const sqlite: SqliteClient = {
     },
 };
 
-/**
- * RN's AsyncStorage, in place (RKStorage, RnKeyValue.kt): RN's device keys under RN's names, as AsyncStorage's calls take and
- * answer them. A write has reached the disk when its promise resolves.
- */
+
 const keyValue = {
     get: async (key: string): Promise<string | null> => (JSON.parse(checked(native().kvGet(key))) as [string | null])[0],
     set: async (key: string, value: string): Promise<void> => { checked(native().kvSet(key, value)); },
@@ -236,10 +408,7 @@ const keyValue = {
     multiRemove: async (keys: readonly string[]): Promise<void> => { checked(native().kvMultiRemove(JSON.stringify(keys))); },
 };
 
-/**
- * RN's diagnostics log on Kotlin's file bridge: core decides every write (diagnostics-log.ts: the Debug logging switch or a
- * forced line, the JSON line, the size cap, one write at a time); Kotlin appends each line in one write, so a kill keeps it.
- */
+
 const logFile = (operation: string, text = ''): string => checked(native().logFile(operation, text));
 const nativeLogFile: DiagnosticsLogFile = {
     path: async () => logFile('path') || null,
@@ -260,41 +429,38 @@ const diagnosticsFileLog = createDiagnosticsLog({
     files: [nativeLogFile],
 });
 const feedbackDiagnosticsBuffer = createFeedbackDiagnosticsBuffer();
-// Keep the current session before the file gate, as RN's app-log does. The file
-// log retains its existing serialization, rotation and detailed-logging policy.
+
+
 const diagnosticsLog = {
     ...diagnosticsFileLog,
     append: (...args: Parameters<typeof diagnosticsFileLog.append>) => {
-        // Every host (iOS's feedback, Android's About feedback) keeps the session, as RN's app-log appendLogLine does.
+
         try {
             const entry = feedbackDiagnosticEntry(args[0]);
             if (entry) feedbackDiagnosticsBuffer.record(entry);
-        } catch { /* Volatile feedback capture cannot change ordinary logging. */ }
+        } catch {                                                                 }
         return diagnosticsFileLog.append(...args);
     },
     clear: () => { feedbackDiagnosticsBuffer.clear(); return diagnosticsFileLog.clear(); },
     clearChecked: () => { feedbackDiagnosticsBuffer.clear(); return diagnosticsFileLog.clearChecked(); },
 };
-// Core's logger, as RN's _layout.tsx bridges it: logcat (the console), then the log file with RN's line.
+
 setLogger((payload) => {
     consoleLogger(payload);
     try {
         void diagnosticsLog.append(diagnosticsEntryFromLogPayload(payload), { force: payload.force });
-    } catch { /* a diagnostic line must never fail its caller */ }
+    } catch {                                                    }
 });
-/**
- * RN's collectFeedbackDiagnostics: the saved log's recent part and the buffer, failures first, within 20,000 characters, ending
- * with the snapshot of the recent app flow. RN's retained JavaScript crash has no native counterpart.
- */
+
+
 const collectFeedbackDiagnostics = async (): Promise<string | null> => {
     const snapshot = buildFeedbackDiagnosticsSnapshot({
         debugLoggingEnabled: isDiagnosticsLoggingEnabled(useTaskStore.getState().settings), breadcrumbs: getBreadcrumbs() });
-    // Each saved line through the sanitizer again, as iOS's feedback does.
+
     return buildFeedbackDiagnostics([sanitizeSavedFeedbackLog(await diagnosticsLog.read()), feedbackDiagnosticsBuffer.read()], snapshot, 20_000);
 };
 
-// The pending-captures queue under the app's files folder (Kotlin's HostFiles), and the record of the last queued command
-// applied to each task in RN's RKStorage (Kotlin's RnKeyValue), durable before kvSet returns: core's ingestPendingCaptures ports.
+
 const QUEUE = `files/${PENDING_CAPTURES_DIRECTORY}`;
 const pendingCaptureQueue = {
     list: async () => JSON.parse(checked(native().fileList(QUEUE))) as string[] | null,
@@ -309,29 +475,20 @@ const lastAppliedRecord = {
 type LoadedData = Awaited<ReturnType<SqliteAdapter['getData']>>;
 const ENTITY_TABLES = ['tasks', 'projects', 'sections', 'areas', 'people'] as const;
 type EntityTable = typeof ENTITY_TABLES[number];
-// Core's receipt adapter: a write's request receipt commits in the same transaction as its data.
-class ValidatedSqliteAdapter extends NativeReceiptSqliteAdapter {
-    latestData: LoadedData | null = null;
 
-    override async getData(options?: { rawTasks?: true }): Promise<LoadedData> {
-        const data = await super.getData(options);
-        await this.validate((table) => data[table].length, data.settings);
-        if (!options?.rawTasks) this.latestData = data;
-        return data;
+
+class ValidatedSqliteAdapter extends NativeReceiptSqliteAdapter {
+    protected override afterReadNow(loaded: (table: EntityTable) => number, settings: LoadedData['settings']): Promise<void> {
+        return this.validate(loaded, settings);
     }
 
-    /**
-     * After activation and its flush: the database holds exactly the store's rows, by id, per entity table, and its settings
-     * row and saved filters map whole. Core reads row versions instead of whole rows and refreshes the deletion baseline from
-     * them (the rowids of rows activation's save created) under the epoch its last full read accepted; after another
-     * connection's commit, a full validated read instead.
-     */
+
     async verifyActivation(store: Record<EntityTable, readonly { id: string }[]>): Promise<void> {
+
         const light = await this.readRowBaseline();
         let ids: Record<EntityTable, readonly string[]>;
         if (light) {
             ids = light.ids;
-            await this.validate((table) => light.ids[table].length, light.settings);
         } else {
             const data = await this.getData();
             ids = Object.fromEntries(ENTITY_TABLES.map((table) => [table, data[table].map((row) => row.id)])) as Record<EntityTable, string[]>;
@@ -351,13 +508,10 @@ class ValidatedSqliteAdapter extends NativeReceiptSqliteAdapter {
                 scope: ios ? 'native-ios' : 'native-android', category: 'storage',
                 context: { releaseCheck: 'v1.3.4/native-startup-activation-check', outcome: light ? 'row-versions' : 'full-read' },
             });
-        } catch { /* a diagnostic line never fails the boot */ }
+        } catch {                                              }
     }
 
-    /**
-     * A read against the database: each entity table's rows against the rows the read mapped ([loaded]), the settings row
-     * against the settings core mapped from it, and the saved filters' rows against the mapped list.
-     */
+
     private async validate(loaded: (table: EntityTable) => number, settingsLoaded: LoadedData['settings']): Promise<void> {
         for (const table of ENTITY_TABLES) {
             const rows = await sqlite.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`);
@@ -388,7 +542,7 @@ class ValidatedSqliteAdapter extends NativeReceiptSqliteAdapter {
 type Pending = { done: boolean; value?: unknown; error?: string; controller: AbortController };
 const pending = new Map<number, Pending>();
 let nextId = 1;
-/** Runs [work] as one host operation; [work]'s signal fires if the operation outlives its deadline (MindwtrHost.cancel). */
+
 const submit = (work: (signal: AbortSignal) => Promise<unknown>): string => {
     const id = nextId++;
     const slot: Pending = { done: false, controller: new AbortController() };
@@ -400,11 +554,7 @@ const submit = (work: (signal: AbortSignal) => Promise<unknown>): string => {
     return String(id);
 };
 
-/**
- * Automatic Sync belongs to the Android host. iOS foreground Sync is explicitly
- * bound on demand; device storage alone never activates Sync, AI or attachment ownership.
- */
-/** The Android build's flavor (D8, CoreHost's BuildConfig.FOSS; absent elsewhere): as RN's FOSS_BUILD, it hides Dropbox and defaults speech to Whisper. */
+
 const isFossBuild = globalThis.__mindwtrFossBuild === true;
 const nativeSyncBindings: NativeSyncBindings = {
     keyValue,
@@ -419,7 +569,7 @@ const nativeSyncBindings: NativeSyncBindings = {
     },
     networkState: () => networkState,
     appendLog: async (entry, force) => {
-        try { native().log(`${entry.level}: [${entry.scope}] ${entry.message}${entry.context ? ` ${JSON.stringify(entry.context)}` : ''}`); } catch { /* logcat is best effort */ }
+        try { native().log(`${entry.level}: [${entry.scope}] ${entry.message}${entry.context ? ` ${JSON.stringify(entry.context)}` : ''}`); } catch {                             }
         return diagnosticsLog.append(entry, { force });
     },
     translate: (key) => {
@@ -427,18 +577,88 @@ const nativeSyncBindings: NativeSyncBindings = {
         return result.ok ? result.value.strings[key] ?? key : key;
     },
     emit: (event) => { checked(native().hostEvent(JSON.stringify(event))); },
-    trace: (line) => { try { native().log(line); } catch { /* logcat is best effort */ } },
+    trace: (line) => { try { native().log(line); } catch {                             } },
     scheduleBackgroundSync: (on) => { const bridge = native(); if (bridge.bgSyncSchedule) checked(bridge.bgSyncSchedule(on)); },
     isFossBuild,
+
+    listRecoverySnapshots: async () => sortRecoverySnapshotNames((JSON.parse(checked(native().fileList('files/snapshots'))) as string[] | null) ?? []),
 };
-// kvMultiGet, not kvGet: the gates' stand-in bridge has kvGet and kvSet for the queue's record, and no sync.
-// iOS device storage is not permission to replace its local attachment owner or start Sync/AI.
+
+
 const nativeSync: NativeSync | null = globalThis.__mindwtrHostPlatform !== 'ios'
     && typeof (globalThis.__mindwtrNative as { kvMultiGet?: unknown } | undefined)?.kvMultiGet === 'function'
     ? createNativeSync(nativeSyncBindings)
     : null;
 let iosManualSync: NativeSync | null = null;
 let iosCleanupCallback: ((requestJSON: string) => unknown) | null = null;
+let iosDirectorySync: ReturnType<typeof createIosDirectoryFileSync> | null = null;
+const iosCloudKitAvailable = () => globalThis.__mindwtrHostPlatform === 'ios'
+    && native().cloudKitAvailable?.() === true && typeof globalThis.__mindwtrCloudKitCall === 'function';
+let iosSelectedCloudKitSource: ((metadataJSON: string, plaintextBase64: string) => string) | null = null;
+let iosCloudKitTail: Promise<unknown> = Promise.resolve();
+const iosCloudKitCall: NativeCloudKitTransportCall = (request, signal) => {
+    const selectedOwner = iosSelectedCloudKitSource, cleanupOwner = iosCleanupCallback;
+    const result = iosCloudKitTail.then(() => {
+        const selected = selectedOwner !== null && iosSelectedCloudKitSource === selectedOwner;
+        const cleanup = cleanupOwner !== null && iosCleanupCallback === cleanupOwner;
+        if ((!selected && !cleanup) || !iosCloudKitAvailable()
+            || (selected && request.op !== 'fetchAttachmentAsset')) throw new Error('CloudKit requires an owned foreground invocation');
+        if (signal?.aborted) throw signal.reason ?? new Error('CloudKit operation cancelled');
+        return (globalThis.__mindwtrCloudKitCall as NativeCloudKitTransportCall)(request, signal);
+    });
+    iosCloudKitTail = result.catch(() => {});
+    return result;
+};
+const iosCloudKitRecords = createNativeCloudKitRecords(iosCloudKitCall);
+let iosDropboxControl: ((requestJSON: string) => unknown) | null = null;
+let iosDropboxRequestId: string | null = null;
+let iosDropboxSignal: AbortSignal | undefined;
+const iosDropboxReply = (phase: 'configuration' | 'assertCurrent'): unknown => {
+    const control = iosDropboxControl;
+    if (!control || iosDropboxSignal?.aborted) throw new Error('NOT_READY: Dropbox requires its current foreground owner');
+    const reply = control(JSON.stringify({ phase }));
+    if (typeof reply !== 'string' || new TextEncoder().encode(reply).length > 4096 || reply.startsWith('!MindwtrNativeError:'))
+        throw new Error('NOT_READY: Dropbox foreground ownership is unavailable');
+    try { return JSON.parse(reply) as unknown; } catch { throw new Error('NOT_READY: Dropbox foreground ownership is invalid'); }
+};
+const iosDropboxCapability: NativeIosDropboxCapability = {
+    configuration: () => readNativeIosDropboxConfiguration(iosDropboxControl ? iosDropboxReply('configuration') : null),
+    assertCurrent: () => { const reply = iosDropboxReply('assertCurrent');
+        if (!reply || typeof reply !== 'object' || Array.isArray(reply) || Object.keys(reply).length !== 1 || (reply as { current?: unknown }).current !== true)
+            throw new Error('NOT_READY: Dropbox foreground owner changed'); },
+    authorizationRequestId: () => { iosDropboxCapability.assertCurrent(); if (!iosDropboxRequestId) throw new Error('NOT_READY: Dropbox authorization requires its original Connect request'); return iosDropboxRequestId; },
+    authorize: request => { iosDropboxCapability.assertCurrent(); if (request.requestId !== iosDropboxRequestId) throw new Error('NOT_READY: Dropbox authorization request changed'); const call = (globalThis as { __mindwtrDropboxCall?: (input: unknown, signal?: AbortSignal) => Promise<unknown> }).__mindwtrDropboxCall;
+        if (!call) throw new Error('NOT_READY: Dropbox authorization is unavailable'); return call(request, iosDropboxSignal); },
+};
+const ensureIosManualSync = (): NativeSync => iosManualSync ??= createNativeSync({ ...nativeSyncBindings, dropbox: iosDropboxCapability,
+                    ...(iosCloudKitAvailable() ? { cloudKit: {
+                        ...iosCloudKitRecords, isAvailable: iosCloudKitAvailable,
+                        getAccountStatus: () => iosCloudKitRecords.accountStatus(),
+                        assets: createNativeCloudKitAssets(iosCloudKitCall),
+                    } } : {}),
+                    performFileSync: (path, options) => {
+                        if (!iosDirectorySync) throw new Error('Directory File Sync requires an explicit manual action');
+                        return iosDirectorySync.performFileSync(path, options);
+                    },
+                    pickSyncFolder: () => {
+                        if (!iosDirectorySync) throw new Error('Directory selection requires an explicit manual action');
+                        return iosDirectorySync.pickSyncFolder();
+                    }, emit: () => {}, trace: () => {}, scheduleBackgroundSync: () => {},
+                    retireLocalAttachment: async (attachmentID, targetURI, keep) => {
+                        if (keep()) return false;
+                        const requestID = generateUUID();
+                        try {
+                            if (!iosCleanupCallback) throw new NativeAttachmentCleanupUnconfirmedError();
+                            const reply = iosCleanupCallback(JSON.stringify({ version: 1, requestID, attachmentID, targetURI }));
+                            if (typeof reply !== 'string' || new TextEncoder().encode(reply).byteLength > 1024) throw new Error();
+                            const result = JSON.parse(reply) as Record<string, unknown>;
+                            if (!result || typeof result !== 'object' || Array.isArray(result)
+                                || Object.keys(result).length !== 3 || result.version !== 1 || result.requestID !== requestID
+                                || !['removed', 'absent', 'retained'].includes(result.outcome as string)) throw new Error();
+                            return result.outcome !== 'retained';
+                        } catch { throw new NativeAttachmentCleanupUnconfirmedError(); }
+                    },
+                });
 let iosProjectAttachmentDownload = false;
 let iosRelocatedProjectAvailability = false;
 let iosCachedProjectAvailability = false;
@@ -446,16 +666,16 @@ let iosSelfHostedProjectAttachments: ReturnType<typeof createNativeReadOnlySelfH
 let iosTaskAttachmentPreparation = false;
 let iosProjectFilePreparation = false;
 let iosForegroundFailure: NativeAttachmentCleanupUnconfirmedError | null = null;
-/** The device's network state as Kotlin last reported it (HostNetwork.kt); unknown until then, which never reads as offline. */
+
 let networkState: { isConnected: boolean | null; isInternetReachable: boolean | null } = { isConnected: null, isInternetReachable: null };
 const requireSync = (): NativeSync => {
     if (!nativeSync) throw new Error('Sync is not available on this host');
     return nativeSync;
 };
 
-/** The language Kotlin last passed to setLanguage (RN's `mindwtr-language`), which the widgets' language falls back on as RN's does. */
+
 let storedLanguage: string | null = null;
-/** The home-screen widgets (host-widgets.ts), on a host with RN's widget module (Android); none on iOS or the gates' bridge. */
+let iosVoiceSystemLocale: string | null = null;
 const widgets = typeof (globalThis.__mindwtrNative as { widgetPublish?: unknown } | undefined)?.widgetPublish === 'function'
     ? createWidgetPublisher({
         ready: () => bootAdapter !== null,
@@ -466,10 +686,26 @@ const widgets = typeof (globalThis.__mindwtrNative as { widgetPublish?: unknown 
     })
     : null;
 
-/** Settings › AI and the AI actions (host-ai.ts), on the same host: RN's AsyncStorage and SecureStore hold what RN's do. */
+const cacheIOSFocusWidgetFilter = (focus: NativeFocusView): void => {
+    if (globalThis.__mindwtrHostPlatform !== 'ios') return;
+    const filter = focus.controls?.widgetFilter;
+    if (filter) setFocusWidgetFilter({ criteria: filter.criteria, sortBy: filter.sortBy, sortOrder: filter.sortOrder ?? undefined });
+};
+
 const nativeAI = nativeSync ? createNativeAI(keyValue, () => globalThis.__mindwtrSecrets as HostSecrets, isFossBuild) : null;
-/** Settings › About, the heartbeat and the store review prompt (host-about.ts), on the host Kotlin describes in `__mindwtrAppInfo`. */
+let iosCaptureAIHost: NativeAIHost | null = null;
+let iosTaskAI: ReturnType<typeof createIOSTaskAI> | null = null;
+let iosInboxAI: ReturnType<typeof createIOSInboxAI> | null = null;
+let iosReviewAI: ReturnType<typeof createIOSReviewAI> | null = null;
+let iosConfigurationAIHost: NativeAIHost | null = null;
+let iosConfigurationAIActive = false;
+let iosCaptureAIQuestion: { revision: string; request: { title: string; contexts: string[]; tags: string[] };
+    settings: ReturnType<typeof useTaskStore.getState>['settings']; language: string } | null = null;
 const nativeAbout = nativeSync ? createNativeAbout(globalThis.__mindwtrAppInfo, keyValue, generateUUID, collectFeedbackDiagnostics) : null;
+
+
+const nativeAppSearch = nativeSync && typeof native().appSearchInfo === 'function'
+    ? createNativeAppSearch(native().appSearchInfo!(), globalThis.__mindwtrAppSearchCall as AppSearchCall | undefined, keyValue) : null;
 
 const localAttachments = nativeSync ? null : createNativeLocalAttachmentsForHost();
 const attachmentsHost = nativeSync?.attachmentsHost ?? localAttachments?.contractHost;
@@ -500,7 +736,7 @@ const iosCalendar = globalThis.__mindwtrHostPlatform === 'ios' && calendarCall ?
         },
         requestPartialSync: (ids: string[]) => {
             try { checked(native().calendarPushDue!(JSON.stringify(ids))); }
-            catch { /* Native admission owns refusal and any required full retry. */ }
+            catch {                                                                  }
         },
     } } : {}),
     log: {
@@ -512,8 +748,28 @@ const iosCalendar = globalThis.__mindwtrHostPlatform === 'ios' && calendarCall ?
 if (calendarPushAvailable && iosCalendar) {
     iosCalendar.bindPushLifecycle = (lifecycle) => { iosCalendarPushLifecycle = lifecycle; };
 }
-const contract = createNativeHostContract({ reminderPlatform: globalThis.__mindwtrHostPlatform === 'ios' ? 'ios' : 'android', get syncSettings() { return nativeSync?.settingsHost ?? iosManualSync?.settingsHost; }, ...(nativeAI ? { ai: nativeAI } : {}),
-    calendar: iosCalendar,
+
+
+const persistentCapture = nativeSync ? {
+    read: () => (JSON.parse(checked(native().kvGet(PERSISTENT_CAPTURE_STORAGE_KEY))) as [string | null])[0] === 'true',
+    write: (enabled: boolean) => {
+        if (enabled) checked(native().kvSet(PERSISTENT_CAPTURE_STORAGE_KEY, 'true'));
+        else checked(native().kvRemove(PERSISTENT_CAPTURE_STORAGE_KEY));
+    },
+} : null;
+
+const nativeCalendar = nativeSync && typeof globalThis.__mindwtrCalendarCall === 'function'
+    ? createNativeCalendar(keyValue, () => globalThis.__mindwtrCalendarCall as never, () => globalThis.__mindwtrFileCall as never, () => {
+        if (!bootAdapter || getStorageAdapter() !== bootAdapter) throw new Error('Native storage is not loaded yet');
+        return bootAdapter;
+    })
+    : null;
+let readSyncSettingsRetirementStatus: (() => { pending: boolean; uncertain: boolean }) | null = null;
+const contract = createNativeHostContract({
+    ...(globalThis.__mindwtrHostPlatform === 'ios' ? {
+        registerSyncSettingsRetirementStatus: (read: () => { pending: boolean; uncertain: boolean }) => { readSyncSettingsRetirementStatus = read; },
+    } : {}), reminderPlatform: globalThis.__mindwtrHostPlatform === 'ios' ? 'ios' : 'android', get syncSettings() { return nativeSync?.settingsHost ?? iosManualSync?.settingsHost; }, get ai() { return nativeAI ?? iosTaskAI?.host ?? iosInboxAI?.host ?? iosReviewAI?.host ?? iosCaptureAIHost ?? iosConfigurationAIHost ?? undefined; },
+    calendar: iosCalendar ?? nativeCalendar ?? undefined,
     get attachments() {
         const selected = iosProjectAttachmentDownload ? iosSelfHostedProjectAttachments?.contractHost ?? iosManualSync?.attachmentsHost : attachmentsHost;
         if (!iosRelocatedProjectAvailability || !selected) return selected ?? undefined;
@@ -523,7 +779,131 @@ const contract = createNativeHostContract({ reminderPlatform: globalThis.__mindw
             return { status: result?.status === 'generation-conflict' ? 'generation-conflict' as const : 'unavailable' as const };
         } };
     },
-    ...(nativeAbout ? { about: nativeAbout } : {}) });
+    ...(nativeAbout ? { about: nativeAbout } : {}),
+    ...(persistentCapture ? { persistentCapture } : {}) });
+
+const calendarFeeds = nativeCalendar ? createCalendarFeeds({
+    load: (input) => contract.loadExternalCalendarFeed(input) as never,
+    changed: (slot, feed) => {
+        try {
+
+            logInfo('Native Android external calendars loaded', { scope: 'calendar', context: { releaseCheck: 'v1.3.5/native-android-calendar-feeds', slot,
+                outcome: feed.status, calendarCount: String(feed.calendars?.length ?? 0), eventCount: String(feed.status === 'ready' ? feed.events.length : 0) } });
+            checked(native().hostEvent(JSON.stringify({ type: 'calendarFeed', slot })));
+        } catch {                                                  }
+    },
+}) : null;
+
+
+const nativeGmail = nativeSync && typeof globalThis.__mindwtrGmailCall === 'function' && typeof native().gmailFile === 'function'
+    ? createNativeGmail({
+        call: globalThis.__mindwtrGmailCall as (request: { op: string; path?: string }) => Promise<unknown>,
+        file: (op, name, to = '') => checked(native().gmailFile!(op, name, to)),
+        sql: (name, sql, params) => checked(native().gmailSql!(name, sql, params)),
+        addTasks: (items) => useTaskStore.getState().addTasks(items),
+        flushPendingSave,
+
+        requireSaved: () => requireSaved(),
+        sandbox: isSandboxMode,
+        logInfo,
+        logWarn,
+        statusChanged: (status) => { checked(native().hostEvent(JSON.stringify({ type: 'gmailStatus', status }))); },
+    })
+    : null;
+
+
+const speechKeys = nativeAI ? (() => {
+    const ai = nativeAI;
+    return createAIKeyStore({
+        storage: ai.storage,
+        secrets: { getItem: (key) => ai.secrets.get(key), setItem: (key, value) => ai.secrets.set(key, value), deleteItem: (key) => ai.secrets.delete(key) },
+        vault: createSyncSecretVault({ isAvailable: async () => true }),
+    });
+})() : null;
+const widgetAudioPort = (() => {
+    const channels = nativeAI && nativeSync ? nativeFileChannels() : null;
+    if (!channels || !speechKeys) return null;
+    const keys = speechKeys;
+    return createWidgetAudioPort({
+        documentDirectory: channels.directories.document,
+        readBytes: async (uri) => await channels.files({ op: 'readBytes', uri }) as Uint8Array,
+        deleteFile: (path) => { checked(native().fileDelete(path)); },
+        loadKey: (provider) => keys.load(provider),
+        isFossBuild,
+        logWaiting: (outcome) => {
+            try {
+                logInfo('Native Android widget recording waits for transcription', { scope: 'capture',
+                    context: { releaseCheck: 'v1.3.8/native-widget-audio-ingest', outcome } });
+            } catch {                                                 }
+        },
+    });
+})();
+
+
+const nativeVoice = (() => {
+    const call = (globalThis as { __mindwtrVoiceCall?: (request: Record<string, unknown>) => Promise<unknown> }).__mindwtrVoiceCall;
+    const channels = nativeAI && nativeSync && call ? nativeFileChannels() : null;
+    const host = attachmentsHost;
+    if (!channels || !speechKeys || !call || !host) return null;
+    const keys = speechKeys;
+    const documents = channels.directories.document;
+    const managed = managedAttachmentsDirectory(documents);
+    const recordings = `${documents}voice-captures/`;
+    const voiceLine = (line: VoiceCaptureLine) => {
+        try {
+
+
+            const failed = line.outcome === 'failed';
+
+            const force = failed || line.outcome === 'saved' || line.outcome === 'applied' || line.outcome === 'kept';
+            if (line.kind === 'capture') {
+                (failed ? logWarn : logInfo)('Native Android voice capture', { scope: 'capture', force, context: { releaseCheck: 'v1.3.8/native-voice-capture',
+                    outcome: line.outcome, provider: line.provider, ...('durationMs' in line && line.durationMs ? { durationMs: line.durationMs } : {}),
+                    ...('errorKind' in line ? { errorKind: line.errorKind } : {}), ...('copied' in line ? { copied: line.copied } : {}) } });
+            } else {
+                (failed ? logWarn : logInfo)('Native Android voice transcription', { scope: 'capture', force,
+                    context: { releaseCheck: 'v1.3.8/native-voice-transcribe', outcome: line.outcome, provider: line.provider,
+                        ...(line.errorKind ? { errorKind: line.errorKind } : {}) } });
+            }
+        } catch {                                                 }
+    };
+    return createNativeVoice({
+        recorder: {
+            permission: async () => (await call({ op: 'permission' }) === 'granted' ? 'granted' : 'denied'),
+            start: async (format) => await call({ op: 'start', format }) as { id: string },
+            stop: async (id) => await call({ op: 'stop', id }) as { uri: string; size: number },
+            cancel: async (id) => { await call({ op: 'cancel', id }); },
+        },
+        settings: () => useTaskStore.getState().settings,
+        store: useTaskStore,
+        isFossBuild,
+        loadKey: (provider) => keys.load(provider),
+
+        whisperModelReady: () => false,
+        persistAttachment: (attachment) => persistIntoManagedStorage(attachment, {
+            persist: (entry) => host.persistAttachmentLocally(entry),
+            getInfo: async (uri) => await channels.files({ op: 'getInfo', uri }) as { exists?: boolean; isDirectory?: boolean } | null,
+            managedDirectory: managed,
+        }),
+        submit: (input) => contract.submitQuickCaptureAudio(input),
+        readBytes: async (uri) => await channels.files({ op: 'readBytes', uri }) as Uint8Array,
+        deleteFile: (uri) => {
+
+            if (uri.startsWith(managed)) void channels.files({ op: 'delete', uri }).catch(() => undefined);
+            else if (uri.startsWith(recordings) && !uri.slice(recordings.length).includes('/')) checked(native().fileDelete(`files/${uri.slice(documents.length)}`));
+        },
+        label: () => unwrap(contract.getStrings({ keys: ['quickAdd.audioNoteTitle'] })).strings['quickAdd.audioNoteTitle'] ?? 'Audio note',
+        newId: generateUUID,
+        log: voiceLine,
+    });
+})();
+
+const gmailLifecycle = (work: () => void) => {
+    try { work(); } catch { logWarn('Native Android Gmail capture lifecycle failed', { scope: 'gmail-capture' }); }
+};
+
+const withCalendar = <T,>(input: T): T => (calendarFeeds ? calendarFeeds.calendar(input) : input);
+const withReview = <T extends Record<string, unknown>>(slot: 'weeklyReview' | 'dailyReview', input: T): T => (calendarFeeds ? calendarFeeds.review(slot, input) : input);
 
 const projectAvailabilityDeps = (projectId: string): Parameters<typeof createPreparedProjectAvailabilityMethods>[0] => ({
     readiness: () => {
@@ -540,23 +920,20 @@ const projectAvailabilityDeps = (projectId: string): Parameters<typeof createPre
     },
 });
 const preparedProjectAvailability = (projectId: string, backend: string = 'cloud') => {
-    if (backend !== 'cloud' && backend !== 'webdav') throw new Error('NOT_READY: Project download is unavailable');
+    if (backend !== 'cloud' && backend !== 'webdav' && backend !== 'dropbox') throw new Error('NOT_READY: Project download is unavailable');
     return createPreparedProjectAvailabilityMethods({
     ...projectAvailabilityDeps(projectId), translate: (key) => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key,
-}, backend === 'webdav' ? 'webdav' : 'strict');
+}, backend === 'webdav' ? 'webdav' : backend === 'dropbox' ? 'dropbox' : 'strict');
 };
 
-/**
- * Reminder alarms (host-reminders.ts), on a host with the alarm bridges (Android). The iOS host and the gates' stand-in bridge have
- * none, so they plan no alarms, as before.
- */
+
 const reminders = typeof (globalThis.__mindwtrNative as { alarmApply?: unknown } | undefined)?.alarmApply === 'function'
     ? createNativeReminders({
         plan: (input) => contract.planReminderAlarms(input),
         planSnooze: (input) => contract.planReminderSnooze(input),
         readStored: async () => ({ alarms: await keyValue.get(REMINDER_ALARM_MAP_STORAGE_KEY), state: await keyValue.get(NATIVE_REMINDER_STATE_STORAGE_KEY) }),
         permissionGranted: () => checked(native().notificationsAllowed!()) === true,
-        apply: (planJson) => { checked(native().alarmApply!(planJson)); },
+        apply: (planJson) => Number(checked(native().alarmApply!(planJson)) ?? 0),
         cleanupRn: () => Number(checked(native().rnAlarmCleanup!())),
         receiverCounts: () => JSON.parse(String(checked(native().reminderReceiverCounts!()))) as { dropped: number; notQueued: number },
         ledger: () => JSON.parse(String(checked(native().reminderLedger!()))) as { fired: number[]; shown: number[] },
@@ -572,15 +949,31 @@ const unwrap = <T>(result: { ok: true; value: T } | { ok: false; error: { code: 
 };
 const editorJson = (json: string): unknown => {
     try { if (json.length <= 2_000_000) return JSON.parse(json); }
-    catch { /* Never expose a parser's excerpt of a credential-bearing URL. */ }
+    catch {                                                                    }
     throw new Error('Invalid bounded editor request');
 };
-// Typed bridge assertions only select each contract method's request type.
-// Its readRequest/readPrepared parser still validates the untrusted JSON value.
+
+
 const completionJson = (json: string, limit: number): unknown => {
     try { if (json.length <= limit) return JSON.parse(json); }
-    catch { /* Do not expose a parser excerpt of task text or a link. */ }
+    catch {                                                              }
     throw new Error('Invalid bounded completion request');
+};
+const taskCompletionJson = (json: string, limit: number): unknown => {
+    const input = completionJson(json, limit);
+    if (globalThis.__mindwtrHostPlatform !== 'ios') {
+        const field = (value: unknown, name: string): unknown => value !== null && typeof value === 'object'
+            && !Array.isArray(value) ? Reflect.get(value, name) : undefined;
+        const prepared = field(input, 'prepared');
+        const requests = [input, field(input, 'request'), field(field(input, 'completion'), 'request'),
+            field(field(prepared, 'completion'), 'request'),
+            field(field(field(input, 'origin'), 'envelope'), 'request'),
+            field(field(field(prepared, 'origin'), 'envelope'), 'request')];
+        if (requests.some(request => field(request, 'source') === 'row')
+            || ['rowComplete', 'rowCompleteUndo'].includes(String(field(prepared, 'kind'))))
+            throw new Error('INVALID_INPUT: Row completion requires iOS');
+    }
+    return input;
 };
 const taskAttachmentInput = (json: string, fields: string[], optional: string[] = []): Record<string, unknown> => {
     const input = editorJson(json);
@@ -611,24 +1004,30 @@ const projectAttachmentInput = (json: string, withAttachmentId = false): { proje
         })) throw new Error('Invalid project attachment request');
     return input as { projectId: string; attachmentId?: string };
 };
-type MenuCommand = 'activateProject' | 'somedayMove' | 'somedayUndo' | 'somedayTask' | 'somedaySection' | 'taskListSort' | 'archiveAction' | 'contextsAction' | 'trashAction' | 'reviewAction' | 'reviewTask' | 'calendarAction' | 'calendarCreate' | 'boardAction' | 'boardCreate'
-    | 'bulkAction' | 'focusGroup' | 'focusSave' | 'focusCriterion' | 'focusDelete' | 'focusReorder' | 'bulkCreate' | 'mindSweepAdd' | 'savedSearchDelete'
+type MenuCommand = 'activateProject' | 'somedayMove' | 'somedayProjectMove' | 'taskDestinationMove' | 'taskDatesSave' | 'taskSwipeFocus' | 'taskRowChecklistEdit' | 'somedayUndo' | 'somedayTask' | 'somedaySection' | 'taskListSort' | 'archiveAction' | 'contextsAction' | 'trashAction' | 'reviewAction' | 'reviewTask' | 'calendarAction' | 'calendarCreate' | 'boardAction' | 'boardCreate'
+    | 'bulkAction' | 'focusGroup' | 'focusSave' | 'focusCriterion' | 'focusDelete' | 'focusReorder' | 'bulkCreate' | 'mindSweepAdd' | 'taskCompletedAt' | 'areaOrder' | 'areaColor' | 'areaRename' | 'projectNextAction' | 'savedSearchDelete' | 'savedSearchSort'
     | 'generalSetting' | 'gtdSetting' | 'manageEditor' | 'manageDelete' | 'somedayRename' | 'somedayReorder' | 'somedayDelete' | 'dataSetting'
-    | 'syncPreference' | 'setAISetting' | SyncScreenCommand | AIScreenCommand | AttachmentCommand | ProjectDetailCommand;
-/** Settings › Sync's screen commands: never journaled (core's NATIVE_UNJOURNALED_COMMANDS), sent by CoreHost.syncCommand. */
+    | 'syncPreference' | 'setAISetting' | 'notificationsSetting' | 'calendarSetting' | SyncScreenCommand | AIScreenCommand | CalendarScreenCommand | AttachmentCommand | ProjectDetailCommand | TaskEditorCommand | DataCommand | StartupPromptCommand;
+
+type DataCommand = 'gettingStarted';
+
+type StartupPromptCommand = 'supportPromptShown';
+
 type SyncScreenCommand = 'openSyncSettings' | 'closeSyncSettings' | 'selectSyncBackend' | 'saveSyncBackend' | 'syncNow' | 'testSyncConnection'
-    | 'pickSyncFolder' | 'connectDropbox' | 'disconnectDropbox' | 'runSyncEncryptionAction';
-/**
- * Settings › AI's screen writes, sent by AISettings.kt itself: its open (journaled; target-state), and a key or a base URL (never
- * journaled: core's NATIVE_UNJOURNALED_COMMANDS, a key or a URL that may hold a password).
- */
+    | 'pickSyncFolder' | 'connectDropbox' | 'disconnectDropbox' | 'runSyncEncryptionAction' | 'answerSyncMissingFiles';
+
+
 type AIScreenCommand = 'openAISettings' | 'setAIKey' | 'setAIEndpoint';
-/** Attachments' writes, sent by Attachments.kt (the editor's draft list, a project's list written at once). */
+
+type CalendarScreenCommand = 'calendarFeedAdd';
+
 type AttachmentCommand = 'attachmentAddFile' | 'attachmentLinks' | 'attachmentRemove';
-/** Project details' edit, sent by ProjectDetails.kt (journaled ahead): core's runProjectEdit. */
+
 type ProjectDetailCommand = 'projectEdit';
-type Command = 'create' | 'complete' | 'update' | 'saveTaskDraft' | 'resetChecklist' | 'taskFocus' | 'projectFocus' | 'createProject' | 'areaFilter'
-    | 'saveSearch' | 'inboxCommit' | 'inboxSkip' | 'quickCapture' | 'quickCaptureLines' | 'quickCapturePicker' | 'captureModal' | 'captureModalLines' | 'ingest' | 'reminderDone' | 'reminderSnooze' | MenuCommand;
+
+type TaskEditorCommand = 'taskEditorAction';
+type Command = 'create' | 'complete' | 'completeUndo' | 'update' | 'saveTaskDraft' | 'resetChecklist' | 'taskFocus' | 'projectFocus' | 'createProject' | 'areaFilter'
+    | 'saveSearch' | 'inboxCommit' | 'inboxSkip' | 'inboxDecisionUndo' | 'quickCapture' | 'quickCaptureLines' | 'quickCapturePicker' | 'captureModal' | 'captureModalLines' | 'ingest' | 'reminderDone' | 'reminderSnooze' | MenuCommand;
 const taskResult = <T>(operation: Command, result: Parameters<typeof unwrap<T>>[0]): T => {
     const ios = globalThis.__mindwtrHostPlatform === 'ios';
     const meta = {
@@ -640,33 +1039,22 @@ const taskResult = <T>(operation: Command, result: Parameters<typeof unwrap<T>>[
         const message = ios ? 'Native iOS task command' : 'Native Android task command';
         if (result.ok) logInfo(message, meta);
         else logWarn(message, meta);
-    } catch { /* a diagnostic sink must not change a durable acknowledgment */ }
+    } catch {                                                                  }
     return unwrap(result);
 };
 
 type LegacyState = { jsonAhead: boolean; reconciled: boolean; backupVersion: string | null; backupPresent: boolean };
 
-/**
- * The React Native app's AsyncStorage backup, imported as RN's next launch would
- * (core's planLegacyJsonImport). Runs after the validated load. RN's own state
- * (the json-ahead marker, the reconcile flag) changes only after the validated
- * re-read holds every imported row and the settings exactly.
- *
- * If that RN state change fails, the boot fails closed: no activation, so no
- * native edit can exist while the marker is still set. Core's merge can let a
- * tombstone beat a newer live row, so re-importing a stale backup over native
- * edits could discard them. The next boot plans again, finds the import already
- * saved, writes nothing to SQLite, and retries only the RN state change.
- */
-const importLegacyJson = async (adapter: ValidatedSqliteAdapter, state: LegacyState, backup: string): Promise<void> => {
-    const loaded = adapter.latestData;
-    if (!loaded) throw new Error('Native storage load was not validated');
+
+const importLegacyJson = async (adapter: ValidatedSqliteAdapter, loaded: LoadedData, state: LegacyState, backup: string): Promise<void> => {
     const plan = planLegacyJsonImport({
         jsonAhead: state.jsonAhead,
         reconciled: state.reconciled,
         backupVersion: state.backupVersion,
         backupJson: state.backupPresent ? backup : null,
-    }, loaded, await sqliteHasAnyData(sqlite));
+    }, loaded, await adapter.withConnection(() => sqliteHasAnyData(sqlite)));
+
+    if (plan.repairs && countSqliteCopyRepairs(plan.repairs) > 0) logLegacyCopyRepair(plan);
     if (plan.merged && legacyImportMismatch(plan.merged, loaded)) {
         await adapter.saveData(plan.merged);
         const mismatch = legacyImportMismatch(plan.merged, await adapter.getData());
@@ -687,6 +1075,18 @@ const importLegacyJson = async (adapter: ValidatedSqliteAdapter, state: LegacySt
     if (rnState === 'failed') throw new Error(`Cannot update the previous app version's saved state: ${rnFailure}`);
 };
 
+
+const logLegacyCopyRepair = (plan: ReturnType<typeof planLegacyJsonImport>): void => {
+    const ios = globalThis.__mindwtrHostPlatform === 'ios';
+    const context: Record<string, string> = { releaseCheck: 'v1.3.8/native-legacy-copy-repair', path: plan.path ?? '' };
+    for (const [name, count] of Object.entries(plan.repairs ?? {})) context[name] = String(count);
+    try {
+        logWarn(ios ? 'Native iOS legacy JSON copy repaired' : 'Native Android legacy JSON copy repaired', {
+            scope: ios ? 'native-ios' : 'native-android', category: 'storage', force: true, context,
+        });
+    } catch {                                                }
+};
+
 const logLegacyImport = (plan: ReturnType<typeof planLegacyJsonImport>, rnState: string): void => {
     const ios = globalThis.__mindwtrHostPlatform === 'ios';
     const extra: Record<string, string> = {
@@ -699,14 +1099,40 @@ const logLegacyImport = (plan: ReturnType<typeof planLegacyJsonImport>, rnState:
         const message = ios ? 'Native iOS legacy JSON import' : 'Native Android legacy JSON import';
         if (rnState === 'failed') logWarn(message, meta);
         else logInfo(message, meta);
-    } catch { /* a diagnostic sink must not fail the boot */ }
+    } catch {                                                }
 };
 
-// After a failed save the store holds changes that are not on disk. Reads
-// wait for the exact retry, so no screen treats those changes as stored.
+
 const requireSaved = () => {
     const failure = useTaskStore.getState().persistenceFailure;
     if (failure) throw new Error('SAVE_FAILED: Previous changes could not be saved; retry before continuing');
+};
+
+const iosGmail = globalThis.__mindwtrHostPlatform === 'ios' && typeof globalThis.__mindwtrGmailCall === 'function'
+    && typeof native().gmailFile === 'function' && typeof native().gmailSql === 'function'
+    ? createNativeGmail({
+        platform: 'ios',
+        call: globalThis.__mindwtrGmailCall as (request: { op: string; path?: string }) => Promise<unknown>,
+        file: (op, name, to = '') => checked(native().gmailFile!(op, name, to)),
+        sql: (name, sql, params) => checked(native().gmailSql!(name, sql, params)),
+        addTasks: (items) => useTaskStore.getState().addTasks(items),
+        flushPendingSave,
+        requireSaved: () => requireSaved(),
+        sandbox: isSandboxMode,
+        logInfo,
+        logWarn,
+        statusChanged: () => {},
+        setTimer: (() => 0) as unknown as typeof setTimeout,
+        clearTimer: () => {},
+        maxRoundsPerCycle: 1,
+    })
+    : null;
+let iosGmailStarted = false;
+const requireIosGmail = () => {
+    if (!iosGmail || !bootAdapter || getStorageAdapter() !== bootAdapter || isSandboxMode() || isWorkspaceTransitionActive()) {
+        throw new Error('NOT_READY: Gmail capture is unavailable');
+    }
+    return iosGmail;
 };
 
 const deviceCalendarStorage = {
@@ -764,20 +1190,14 @@ const calendarSubscriptionBindings: Parameters<typeof createCalendarSubscription
 const calendarSubscriptionSettings = createCalendarSubscriptionSettingsMethods(calendarSubscriptionBindings);
 const calendarSubscriptionAdd = createCalendarSubscriptionAddMethods(calendarSubscriptionBindings);
 
-/** host-polyfills.js's secret calls (SecretStore.kt). */
+
 type HostSecrets = {
     getSecret(key: string): Promise<string | null>;
     setSecret(key: string, value: string, accessibility?: 'after-first-unlock' | 'when-unlocked'): Promise<void>;
     deleteSecret(key: string): Promise<void>;
 };
 
-/**
- * Debug builds only (CoreHost.netCheck): check-net-device.mjs's server at http://127.0.0.1:<port> (adb reverse). Core's
- * WebDAV calls (PUT, GET, HEAD, bytes both ways, MKCOL answered 409 then PROPFIND, a refused and a followed redirect,
- * DELETE, five damaged bodies), an abort, core's timeout, AbortSignal.timeout, and a secret round trip, each step's outcome
- * in the answer.
- * It touches no task data.
- */
+
 const runNetCheck = async (port: string) => {
     if (!/^\d{4,5}$/.test(port)) throw new Error('INVALID_INPUT: net check port');
     const base = `http://127.0.0.1:${port}`;
@@ -805,15 +1225,14 @@ const runNetCheck = async (port: string) => {
     await step('redirectPut', () => webdavPutJson(`${base}/dav/redirect.json`, doc));
     await step('redirectGet', () => webdavGetJson(`${base}/dav/moved.json`));
     await step('delete', () => webdavDeleteFile(`${base}/dav/data.json`));
-    // A HEAD answered with `Content-Encoding: gzip` has no body to decode (cloud's HEAD lets OkHttp ask for gzip).
+
     await step('headGzipDav', async () => (await webdavHeadFile(`${base}/gz/data.json`)).etag);
     await step('headGzipCloud', async () => (await cloudHeadJson(`${base}/gz/data.json`)).etag);
-    // Truncation: a body cut short, reset mid-chunk, over the size limit (declared or streamed), or a broken gzip stream.
-    // Core's sync document read must throw: an empty or partial body would read as a missing remote, which sync writes over.
-    // A body that is not UTF-8 must throw too, not read as other text (E2 alone once read as a space, so an empty body).
+
+
     for (const cut of ['half', 'reset', 'oversize', 'stream', 'gzip', 'utf8']) await step(`cut-${cut}`, () => webdavGetSyncDocument(`${base}/cut/${cut}.json`));
-    // D9 A2: bodies through the real bridge, each read back as bytes (hex) and, when it is UTF-8, as text: a NUL, text that
-    // starts like a bridge error, astral characters, a BOM, and bytes that are not UTF-8.
+
+
     await step('bodies', async () => {
         const out: Record<string, { hex: string; text?: string }> = {};
         for (const name of ['nul', 'marker', 'astral', 'bom', 'invalid']) {
@@ -830,7 +1249,7 @@ const runNetCheck = async (port: string) => {
         setTimeout(() => controller.abort(), 500);
         return webdavGetJson(`${base}/slow/abort`, { signal: controller.signal });
     });
-    // An abort after the headers arrived, while the body is still coming: the host must still cancel the request.
+
     await step('abortBody', () => {
         const controller = new AbortController();
         setTimeout(() => controller.abort(), 500);
@@ -842,19 +1261,14 @@ const runNetCheck = async (port: string) => {
     const key = 'mindwtr_native_net_check';
     await step('secretSet', () => secrets.setSecret(key, doc.text));
     await step('secretGet', () => secrets.getSecret(key));
-    // The server reads the app's SecureStore file (adb run-as) while the secret is saved, then answers.
+
     await step('secretStored', async () => (await fetch(`${base}/secret-stored`)).json());
     await step('secretDelete', () => secrets.deleteSecret(key));
     await step('secretGone', () => secrets.getSecret(key));
     return steps;
 };
 
-/**
- * Debug builds only (CoreHost.netCheck): an operation that outlives its deadline. A GET the server never answers, sent
- * without the operation's signal so only the host's cancel stops it; then a write, which the host must refuse while the
- * operation drains. In `stuck` mode it also waits on a timer longer than the drain, so the host must stop instead.
- * The outcome is logged here: the host reports only that the operation timed out.
- */
+
 const runNetDeadline = async (port: string, mode: string, signal: AbortSignal) => {
     if (!/^\d{4,5}$/.test(port) || !['drain', 'stuck'].includes(mode)) throw new Error('INVALID_INPUT: net deadline');
     const base = `http://127.0.0.1:${port}`;
@@ -877,13 +1291,7 @@ const runNetDeadline = async (port: string, mode: string, signal: AbortSignal) =
     return events;
 };
 
-/**
- * Debug builds only (`debug.mindwtr.native.intl_check=1`: CoreHost sets `__mindwtrIntlCheck` before this bundle runs): the
- * host's Intl (host-polyfills.js over IcuDateTimeFormat.kt) on core's option sets (calendar-view-model.ts,
- * recurrence-constants.ts, date.ts, widget-payload.ts, ics.ts, ticktick-import.ts, then defaults, hour cycles and styles),
- * in four locales and the device's own (no locale). One log line per case (logcat keeps about 4 KB a line) for
- * check-intl-device.mjs, which compares each with Node's Intl. check-boot-gates.mjs runs the same option sets. Touches no data.
- */
+
 const INTL_CHECK_OPTIONS = [{ year: 'numeric', month: 'long' }, { month: 'short', day: 'numeric' }, { weekday: 'short', month: 'long', day: 'numeric' },
     { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }, { weekday: 'short', month: 'short', day: 'numeric' },
     { weekday: 'long', month: 'long', day: 'numeric' }, { weekday: 'long' }, { weekday: 'short' }, { weekday: 'narrow' },
@@ -917,15 +1325,20 @@ const runIntlCheck = () => {
         };
         native().log(`Native Android intl check ${index + 1}/${cases.length} ${JSON.stringify(result)}`);
     });
+
+
+    PASSPHRASE_CHECK_CASES.forEach((passphrase, index) => {
+        const bytes = attempt(() => Array.from(syncPassphraseBytes(passphrase), (byte) => byte.toString(16).padStart(2, '0')).join(''));
+        native().log(`Native Android passphrase check ${index + 1}/${PASSPHRASE_CHECK_CASES.length} ${JSON.stringify({ index, bytes })}`);
+    });
 };
 
+
+const PASSPHRASE_CHECK_CASES = ['cafe\u0301 \u00e9t\u00e9', '\u1112\u1161\u11ab\uae00', 'A\u030a \u212b \u00c5 \u212a', 'pass \ud83d\ude00 \u0130 \u1e9b\u0323', '\u00f1\u006e\u0303\ufb01'];
+
 type Reply = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } };
-/**
- * A tap on one of this app's notifications (CoreNotifications.kt sends the notification's data): RN's payload as its notification
- * event reads it (notification-service-local.ts), routed by core's routeNotificationOpen, then opened as RN's open handler pushes
- * each route (use-root-layout-notification-open-handler.ts), in the entry point's shape. A task's or project's tap plans the alarms
- * again shortly after, as RN's event does.
- */
+
+
 const isNotificationTap = (input: unknown): input is { kind: 'notification'; data?: unknown } => (input as { kind?: unknown } | null)?.kind === 'notification';
 const notificationEntry = (input: { data?: unknown }): Reply => {
     const data = (input?.data && typeof input.data === 'object' ? input.data : {}) as Record<string, unknown>;
@@ -948,23 +1361,19 @@ const notificationEntry = (input: { data?: unknown }): Reply => {
     else if (route.type === 'weekly-review') entry.route = '/weekly-review';
     return { ok: true, value: entry };
 };
-/** What an entry point opened, by kind only: never its URL, route text, or shared text. */
+
 const logEntryPoint = (input: { kind?: unknown }, result: Reply): Reply => {
-    const entry = result.ok ? result.value as { route: string | null; taskId: string | null; projectId: string | null; search: unknown; capture: unknown; captureModal: unknown; notice: unknown } : null;
-    const outcome = !entry ? 'refused' : entry.captureModal ? 'captureModal' : entry.capture ? 'capture' : entry.notice ? 'notice' : entry.taskId ? 'task' : entry.projectId ? 'project'
+    const entry = result.ok ? result.value as { route: string | null; taskId: string | null; projectId: string | null; search: unknown; capture: unknown; captureModal: unknown; notice: unknown; contextAutomation?: unknown } : null;
+    const outcome = !entry ? 'refused' : entry.contextAutomation ? 'contextAutomation' : entry.captureModal ? 'captureModal' : entry.capture ? 'capture' : entry.notice ? 'notice' : entry.taskId ? 'task' : entry.projectId ? 'project'
         : entry.search ? 'search' : entry.route ? 'screen' : 'nothing';
     const kind = ['link', 'share', 'createNote', 'notification'].includes(input?.kind as string) ? input.kind as string : 'other';
     try {
         logInfo('Native Android entry point', { scope: 'native-android', context: { releaseCheck: 'v1.3.3/native-android-entry-point', kind, outcome } });
-    } catch { /* a diagnostic sink must not change what the entry opens */ }
+    } catch {                                                              }
     return result;
 };
-/**
- * The Menu tab's reads (native-host-contract-menu-views.ts; History's tabs, Archive, Contexts and Trash from the list views
- * block; the Review screen and the Weekly and Daily Review from native-host-contract-review-views.ts; the Calendar and the
- * Board from native-host-contract-calendar.ts and native-host-contract-board.ts; Settings from native-host-contract-settings.ts):
- * each passes Kotlin's input to the contract method unchanged. The composer's open and edit write nothing, so they are reads.
- */
+
+
 const MENU_READS: Record<string, (input: never) => Reply> = {
     more: () => contract.getMoreMenu(),
     projects: (input) => contract.getFilteredProjects(input),
@@ -972,44 +1381,69 @@ const MENU_READS: Record<string, (input: never) => Reply> = {
     projectTaskOrderView: (input) => contract.getProjectTaskOrderView(input),
     projectDetailFilterView: (input) => contract.getProjectDetailFilterView(input),
     projectDetailFilterOptions: (input) => contract.getProjectDetailFilterOptions(input),
+
+    projectTaskSortOptions: (input) => contract.getProjectTaskSortOptions(input),
+
+
+    projectAreaManager: () => contract.getProjectAreaManager(),
+    areaRenameCheck: (input) => contract.checkAreaRename(input),
     waiting: (input) => contract.getWaitingView(input),
     someday: (input) => contract.getSomedayView(input),
     reference: (input) => contract.getReferenceView(input),
     done: (input) => contract.getDoneView(input),
     collection: (input) => contract.getMenuViewCollection(input),
     moveDialog: (input) => contract.getSomedayMoveDialog(input),
+
+    taskDestination: (input) => contract.getTaskDestinationPicker(input),
+    taskDates: (input) => contract.getTaskDatesSheet(input),
+    taskRowChecklist: (input) => contract.getTaskRowChecklist(input),
     history: (input) => contract.getHistoryView(input),
     archive: (input) => contract.getArchiveView(input),
     contexts: (input) => contract.getContextsView(input),
     trash: (input) => contract.getTrashView(input),
     review: (input) => contract.getReviewOverview(input),
     reviewOverview: (input) => contract.getReviewOverview(input),
-    weekly: (input) => contract.getWeeklyReview(input),
-    weeklyReview: (input) => contract.getWeeklyReview(input),
-    weeklyList: (input) => contract.getWeeklyReviewList(input),
-    weeklyReviewList: (input) => contract.getWeeklyReviewList(input),
-    daily: (input) => contract.getDailyReview(input),
-    dailyReview: (input) => contract.getDailyReview(input),
-    calendar: (input) => contract.getCalendarView(input),
-    calendarSheet: (input) => contract.getCalendarItemSheet(input),
-    calendarItem: (input) => contract.getCalendarItemSheet(input),
-    calendarComposer: (input) => contract.openCalendarComposer(input),
-    calendarEdit: (input) => contract.editCalendarComposer(input),
+    reviewProjectCompletionOptions: (input) => contract.getReviewProjectCompletionOptions(input),
+    weekly: (input) => contract.getWeeklyReview(withReview('weeklyReview', input)),
+    weeklyReview: (input) => contract.getWeeklyReview(withReview('weeklyReview', input)),
+    weeklyList: (input) => contract.getWeeklyReviewList(withReview('weeklyReview', input)),
+    weeklyReviewList: (input) => contract.getWeeklyReviewList(withReview('weeklyReview', input)),
+    daily: (input) => contract.getDailyReview(withReview('dailyReview', input)),
+    dailyReview: (input) => contract.getDailyReview(withReview('dailyReview', input)),
+    calendar: (input) => (calendarFeeds ? calendarFeeds.calendarView(input, (read) => contract.getCalendarView(read)) : contract.getCalendarView(input)),
+    calendarSheet: (input) => contract.getCalendarItemSheet(withCalendar(input)),
+    calendarItem: (input) => contract.getCalendarItemSheet(withCalendar(input)),
+
+    calendarEvent: (input) => {
+        const id = (input as { eventId?: unknown } | null)?.eventId;
+        const found = calendarFeeds && typeof id === 'string' ? calendarFeeds.event(id) : null;
+        if (!found) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: 'The event is no longer shown' } };
+        const sheet = contract.getCalendarItemSheet(found);
+        return sheet.ok ? { ok: true, value: { ...sheet.value, event: found.event } } : sheet;
+    },
+    calendarComposer: (input) => contract.openCalendarComposer(withCalendar(input)),
+    calendarEdit: (input) => contract.editCalendarComposer(withCalendar(input)),
     calendarPreferences: () => contract.getCalendarPreferences(),
     board: (input) => contract.getBoardView(input),
     boardList: (input) => contract.getBoardList(input),
-    // The Inbox tab and its filter sheet's tokens, Archive's tokens, a list's selection mode, and Focus's sheet lists.
+
     inbox: (input) => contract.getInboxView(input),
     inboxTokens: (input) => contract.getInboxFilterTokens(input),
     archiveTokens: (input) => contract.getArchiveFilterTokens(input),
     bulk: (input) => contract.getBulkActions(input),
-    focus: (input) => contract.getFocus(input),
+    focus: (input) => {
+        const reply = contract.getFocus(input);
+        if (reply.ok) cacheIOSFocusWidgetFilter(reply.value);
+        return reply;
+    },
     focusSection: (input) => contract.getFocusSectionWindow(input),
     focusList: (input) => contract.getFocusControlsList(input),
     focusControls: (input) => contract.getFocusControlsList(input),
-    // Settings (native-host-contract-settings.ts): the menu, General, GTD, Manage and its lists, and Manage's Someday sections.
+
     settingsMenu: (input) => contract.getSettingsMenu(input),
-    generalSettings: (input) => contract.getGeneralSettings(input),
+
+    generalSettings: (input) => contract.getGeneralSettings(nativeAppSearch
+        ? { ...(input as Parameters<typeof contract.getGeneralSettings>[0]), appSearch: nativeAppSearch.device() } : input),
     gtdSettings: (input) => contract.getGtdSettings(input),
     manageSettings: (input) => contract.getManageSettings(input),
     manageList: (input) => contract.getManageSettingsList(input),
@@ -1025,74 +1459,105 @@ const MENU_READS: Record<string, (input: never) => Reply> = {
     },
     somedaySections: (input) => contract.getSomedaySections(input),
     dataSettings: () => contract.getDataSettings(),
-    // Settings › About (native-host-contract-about.ts): the screen, and the feedback modal's state for the draft as typed.
+
+    archiveRetentionReview: (input) => contract.getArchiveRetentionReview(input),
+
+    projectNextActionPrompt: (input) => contract.getProjectNextActionPrompt(input),
+
+    completedAtPicker: (input) => contract.getCompletedAtPicker(input),
+    pickedCompletedAtLabel: (input) => contract.getPickedCompletedAtLabel(input),
+
     aboutInstallerSource: (input) => contract.getAboutInstallerSource(input),
     aboutSettings: (input) => contract.getAboutSettings(input),
     aboutFeedbackCheck: (input) => contract.checkAboutFeedback(input),
+
+    notificationsSettings: () => contract.getNotificationsSettings(),
+    persistentCaptureNotification: () => contract.getPersistentCaptureNotification(),
+
     dataBackup: () => contract.getDataBackup(),
     dataCsvExport: () => contract.getDataBackup('csv'),
     dataTaskNotesExport: () => contract.getDataBackup('tasknotes'),
-    // Settings › Sync's view (native-host-contract-settings-sync.ts) for the form's typed URL and token.
+
     syncSettings: (input) => contract.getSyncSettings(input),
-    // Mind Sweep and a saved search's screen.
+
+    calendarSettings: (input) => contract.getCalendarSettings(input),
+    calendarSettingsClose: () => {
+        const closed = contract.closeCalendarSettings();
+        return closed.ok ? { ok: true, value: {} } : closed;
+    },
+
     mindSweep: (input) => contract.getMindSweep(input),
     savedSearch: (input) => contract.getSavedSearchView(input),
-    // A link, text share or assistant note (native-host-contract-entry-points.ts), and the capture popup's Import .txt.
+
+    widgetList: (input) => contract.getWidgetListView(input),
+
     entryPoint: (input) => logEntryPoint(input, isNotificationTap(input) ? notificationEntry(input) : contract.resolveNativeEntryPoint(input)),
     captureImport: (input) => contract.planQuickCaptureImport(input),
-    // The capture screen an entry opens (native-host-contract-capture-modal.ts): its open, its edits and its Cancel write nothing.
+
     captureModalOpen: (input) => contract.openCaptureModal(input),
     captureModalView: (input) => contract.getCaptureModalView(input),
     captureModalEdit: (input) => contract.editCaptureModal(input),
     captureModalDiscard: (input) => contract.discardCaptureModal(input),
-    // Settings › AI's view for this visit and its close, and the editor's AI parts (native-host-contract-ai.ts): none writes.
+
     aiSettings: () => contract.getAISettings(),
     aiSettingsClose: () => contract.closeAISettings(),
     taskEditorAI: (input) => contract.getTaskEditorAI(input),
-    // The editor's and the project screen's attachment rows, the link sheet's line check, and a task download's answer applied
-    // to the editor's draft list.
+
+
     attachmentList: (input) => contract.getAttachmentList(input),
     attachmentLinkCheck: (input) => contract.getAttachmentLinkCheck(input),
     attachmentUpdate: (input) => {
         const applied = contract.applyAttachmentUpdate(input);
         return applied.ok ? { ok: true, value: { attachments: applied.value } } : applied;
     },
-    // Project details (ProjectDetails.kt): the values its panel and pickers show (a project's options; none writes), and core's
-    // blocks for the notes as typed.
+
+
     projectStatusOptions: (input) => contract.getProjectStatusOptions(input),
-    projectFlowOptions: (input) => contract.getProjectFlowOptions(input),
+
+    projectFlowOptions: (input: { projectId: string }) => contract.getProjectFlowOptions({ ...input, flowMode: true }),
     projectNotesOptions: (input) => contract.getProjectNotesEditOptions(input),
     projectAreaOptions: (input) => contract.getProjectAreaOptions(input),
     projectTagsOptions: (input) => contract.getProjectTagsEditOptions(input),
     projectDateOptions: (input) => contract.getProjectDateOptions(input),
-    projectSectionOrderOptions: (input) => contract.getProjectSectionOrderOptions(input),
+    projectSectionOrderOptions: (input: { projectId: string }) => contract.getProjectSectionOrderOptions({ ...input, sectionFlow: true }),
     projectNotesPreview: (input) => contract.getProjectNotesPreview(input),
+
+    projectToSectionOptions: (input) => contract.getProjectToSectionOptions(input),
+    weeklyProjectCompletion: (input) => {
+        const read = contract.getWeeklyReviewProjectCompletion(input);
+        return read.ok ? { ok: true, value: { completion: read.value } } : read;
+    },
+
+    taskShare: (input) => contract.getTaskShare(input),
+
+
+    taskChecklistProjectBlock: (input) => contract.getTaskChecklistProjectBlock(input),
+
+
+    markdownToolbarActions: () => contract.getMarkdownToolbarActions(),
+    markdownToolbarApply: (input) => contract.applyMarkdownToolbar(input),
 };
-/**
- * The attachments' long calls (native-host-contract-attachments.ts): Download and Open wait on the network (a synced file's bytes),
- * so CoreHost.attachmentRequest waits for them without holding the engine; the draft settlement after Save or Discard deletes only
- * the editor's own copies. None is a store command a journal replays: a project download writes its availability fields, as React
- * Native's does, identity-guarded and run again by the next Download or sync.
- */
+
+
 const draftOnly = (input: never, command: () => Promise<Reply>): Promise<Reply> => ((input as { owner?: { kind?: unknown } } | null)?.owner?.kind === 'task'
     ? command()
     : Promise.resolve({ ok: false, error: { code: 'INVALID_INPUT', message: 'Only a task draft attachment command runs here' } }));
 const ATTACHMENT_REQUESTS: Record<string, (input: never) => Promise<Reply>> = {
-    // A task draft's Add file and Add photo, link Save and Remove: they answer the draft's next list and write nothing, so they are
-    // never journaled (a replay would copy a file no draft owns). A project's go through MENU_COMMANDS, journaled.
+
+
     draftAddFile: (input) => draftOnly(input, () => contract.addAttachmentFile(input)),
     draftLinks: (input) => draftOnly(input, () => contract.submitAttachmentLinks(input)),
     draftRemove: (input) => draftOnly(input, () => contract.removeAttachment(input)),
     downloadAttachment: (input) => contract.downloadAttachment(input),
     openAttachment: (input) => contract.openAttachment(input),
     settleTaskDraftAttachments: (input) => contract.settleTaskDraftAttachments(input),
+
+
+    prepareSharedFiles: (input) => contract.prepareSharedFiles(input),
 };
 const LOCAL_ATTACHMENT_REQUESTS = new Set(['draftAddFile', 'draftRemove', 'openAttachment', 'settleTaskDraftAttachments']);
-/**
- * The AI's requests (native-host-contract-ai.ts): each waits on the provider (up to RN's 5 min request timeout), so
- * CoreHost.aiRequest waits for it without holding the engine. None writes: an answer is a dialog whose buttons apply through the
- * screen's own edits and commands. The operation's signal goes down to the provider call: MindwtrHost.abort stops it.
- */
+
+
 const AI_REQUESTS: Record<string, (input: never, signal: AbortSignal) => Promise<Reply>> = {
     loadAIModels: (input, signal) => contract.loadAIModels(input, { signal }),
     requestTaskEditorCopilot: (input, signal) => contract.requestTaskEditorCopilot(input, { signal }),
@@ -1102,23 +1567,52 @@ const AI_REQUESTS: Record<string, (input: never, signal: AbortSignal) => Promise
     requestInboxClarify: (input, signal) => contract.requestInboxClarify(input, { signal }),
     requestWeeklyReviewAnalysis: (_input, signal) => contract.requestWeeklyReviewAnalysis({ signal }),
 };
-/**
- * Settings › About's network and device requests (native-host-contract-about.ts): an update check (GitHub's answer), a feedback
- * send, the day's heartbeat, the prompts' active day and the store review's gate. None is a store write, so none is journaled
- * (a replay would send feedback or a heartbeat again); CoreHost.aboutRequest waits for them without holding the engine.
- */
+
+
 const ABOUT_REQUESTS: Record<string, (input: never) => Promise<Reply>> = {
     isAboutUpdateCheckDue: (input) => contract.isAboutUpdateCheckDue(input),
     runAboutUpdateCheck: (input) => contract.runAboutUpdateCheck(input),
     submitAboutFeedback: (input) => contract.submitAboutFeedback(input),
     sendAboutHeartbeat: () => contract.sendAboutHeartbeat(),
-    recordAboutPromptActivity: () => contract.recordAboutPromptActivity(),
     attemptAboutStoreReview: (input) => contract.attemptAboutStoreReview(input),
+
+
+    beginStartupPrompts: (input) => contract.beginStartupPrompts(input),
+    startupPromptAction: (input) => contract.startupPromptAction(input),
 };
-/** The Menu tab's commands, by their diagnostic operation: each passes Kotlin's input (its request or capture UUID included) unchanged. */
+
+
+const CALENDAR_REQUESTS: Record<string, (input: never) => Promise<Reply> | Reply> = {
+    openCalendarSettings: () => contract.openCalendarSettings(),
+    grantDeviceCalendarAccess: () => contract.grantDeviceCalendarAccess(),
+    testCalendarFeeds: () => contract.testCalendarFeeds(),
+    refreshCalendarPushTargets: () => contract.refreshCalendarPushTargets(),
+    refreshCalendarFeed: (input) => {
+        const slot = (input as { slot?: unknown } | null)?.slot;
+        if (!calendarFeeds || (slot !== 'calendar' && slot !== 'weeklyReview' && slot !== 'dailyReview')) {
+            return { ok: false, error: { code: 'INVALID_INPUT', message: 'A screen slot is required' } };
+        }
+        const started = calendarFeeds.refresh(slot);
+
+        if (started.started) {
+            try { checked(native().hostEvent(JSON.stringify({ type: 'calendarFeed', slot }))); } catch {                                         }
+        }
+        return { ok: true, value: started };
+    },
+};
+
 const MENU_COMMANDS: Record<MenuCommand, (input: never) => Reply | Promise<Reply>> = {
     activateProject: (input) => contract.activateProject(input),
+
+    supportPromptShown: (input) => contract.supportPromptShown(input),
     somedayMove: (input) => contract.moveSomedayTasksToSection(input),
+
+    somedayProjectMove: (input) => contract.moveSomedayProjectToSection(input),
+
+    taskDestinationMove: (input) => contract.moveTaskToDestination(input),
+    taskDatesSave: (input) => contract.saveTaskDates(input),
+    taskSwipeFocus: (input) => contract.setTaskSwipeFocus(input),
+    taskRowChecklistEdit: (input) => contract.editTaskRowChecklist(input),
     somedayUndo: (input) => contract.undoSomedaySectionMove(input),
     somedayTask: (input) => contract.addSomedaySectionTask(input),
     somedaySection: (input) => contract.createSomedaySection(input),
@@ -1127,25 +1621,29 @@ const MENU_COMMANDS: Record<MenuCommand, (input: never) => Reply | Promise<Reply
     contextsAction: (input) => contract.runContextsAction(input),
     trashAction: (input) => contract.runTrashAction(input),
     reviewAction: (input) => contract.runReviewAction(input),
-    // The Weekly Review's project Add task: runReviewAction too, logged apart because its request is kept on disk.
+
     reviewTask: (input) => contract.runReviewAction(input),
-    // The Calendar's and the Board's actions; a create (a composer save, a Duplicate) is logged apart because its request is kept on disk.
-    calendarAction: (input) => contract.runCalendarAction(input),
-    calendarCreate: (input) => contract.runCalendarAction(input),
+
+    calendarAction: (input) => contract.runCalendarAction(withCalendar(input)),
+    calendarCreate: (input) => contract.runCalendarAction(withCalendar(input)),
     boardAction: (input) => contract.runBoardAction(input),
     boardCreate: (input) => contract.runBoardAction(input),
-    // A list's bulk bar (its delete's Undo too), and Focus's View options grouping, saved filters and Today's Focus order.
+
     bulkAction: (input) => contract.runBulkAction(input),
     focusGroup: (input) => contract.setFocusGroupBy(input),
     focusSave: (input) => contract.saveFocusFilter(input),
     focusCriterion: (input) => contract.removeFocusFilterCriterion(input),
     focusDelete: (input) => contract.deleteFocusFilter(input),
     focusReorder: (input) => contract.reorderFocus(input),
-    // Bulk organize's new project or area, Mind Sweep's Add, and a saved search's Delete.
+
     bulkCreate: (input) => contract.createBulkOrganizeDestination(input),
     mindSweepAdd: (input) => contract.addMindSweepItem(input),
+    projectNextAction: (input) => contract.runProjectNextAction(input),
+    taskCompletedAt: (input) => contract.setTaskCompletedAt(input),
     savedSearchDelete: (input) => contract.deleteSavedSearch(input),
-    // Settings: General's and GTD's controls, Manage's editor Save and Delete, and Manage's Someday section rename, reorder and delete.
+
+    savedSearchSort: (input) => contract.setSavedSearchSort(input),
+
     generalSetting: (input) => contract.setGeneralSetting(input),
     gtdSetting: (input) => contract.setGtdSetting(input),
     manageEditor: (input) => contract.saveManageEditor(input),
@@ -1153,9 +1651,12 @@ const MENU_COMMANDS: Record<MenuCommand, (input: never) => Reply | Promise<Reply
     somedayRename: (input) => contract.renameSomedaySection(input),
     somedayReorder: (input) => contract.reorderSomedaySections(input),
     somedayDelete: (input) => contract.deleteSomedaySection(input),
-    // Settings › Data's Debug logging switch.
+
     dataSetting: (input) => contract.setDataSetting(input),
-    // Settings › Sync: a sync option (journaled), and the screen's commands (never journaled: CoreHost.syncCommand).
+    gettingStarted: (input) => contract.seedGettingStarted(input),
+
+    notificationsSetting: (input) => contract.setNotificationsSetting(input),
+
     syncPreference: (input) => contract.setSyncPreference(input),
     openSyncSettings: () => contract.openSyncSettings(),
     closeSyncSettings: () => contract.closeSyncSettings(),
@@ -1167,26 +1668,43 @@ const MENU_COMMANDS: Record<MenuCommand, (input: never) => Reply | Promise<Reply
     connectDropbox: (input) => contract.connectDropbox(input),
     disconnectDropbox: (input) => contract.disconnectDropbox(input),
     runSyncEncryptionAction: (input) => contract.runSyncEncryptionAction(input),
-    // Settings › AI: a control's change (journaled, target-state), the screen's open (journaled), a key and a base URL (never journaled).
+    answerSyncMissingFiles: (input) => contract.answerSyncMissingFiles(input),
+
     setAISetting: (input) => contract.setAISetting(input),
     openAISettings: (input) => contract.openAISettings(input),
     setAIKey: (input) => contract.setAIKey(input),
     setAIEndpoint: (input) => contract.setAIEndpoint(input),
-    // Attachments (native-host-contract-attachments.ts): Add file and Add photo, the link sheet's Save, and Remove. A project's
-    // are written at once through receipts; a task's answer the editor's next draft list and write nothing.
+
+    calendarSetting: (input) => contract.setCalendarSetting(input),
+    calendarFeedAdd: (input) => contract.addCalendarFeed(input),
+
+
     attachmentAddFile: (input) => contract.addAttachmentFile(input),
     attachmentLinks: (input) => contract.submitAttachmentLinks(input),
     attachmentRemove: (input) => contract.removeAttachment(input),
-    // Project details (ProjectDetails.kt): the user's edit, journaled ahead of its send; core reads, prepares and commits it.
+
     projectEdit: (input) => contract.runProjectEdit(input),
+
+    areaOrder: (input) => contract.runAreaOrder(input),
+
+    areaColor: (input) => contract.runAreaColor(input),
+
+    areaRename: (input) => contract.runAreaRename(input),
+
+    taskEditorAction: (input) => contract.runTaskEditorAction(input),
 };
 
 let bootAdapter: ValidatedSqliteAdapter | null = null;
-/** A current, settled Settings-only read for device-key reconciliation; null never authorizes a mirror. */
+
+let saveWarmTasks: readonly Task[] | null = null;
+let saveWarmFrom = 0;
+
+const withHostConnection = <T,>(work: () => Promise<T>): Promise<T> => (bootAdapter ? bootAdapter.withConnection(work, { write: true }) : work());
+
 const savedSettingsIfSettled = async (settingsReference: unknown): Promise<Record<string, unknown> | null> => {
     const before = getPersistenceStatus();
     if (!bootAdapter || before.failed || before.queued || before.inFlight || before.immediate || before.retrying) return null;
-    const row = await sqlite.get<{ data: string }>('SELECT data FROM settings WHERE id = 1');
+    const row = await bootAdapter.withConnection(() => sqlite.get<{ data: string }>('SELECT data FROM settings WHERE id = 1'));
     let saved: unknown = {};
     if (row) {
         try { saved = JSON.parse(row.data); }
@@ -1213,29 +1731,44 @@ const activateAndVerify = async (adapter: ValidatedSqliteAdapter, recoveryLoad =
     traceStep('');
     return inbox;
 };
-const boot = (legacyState: string, legacyBackup: string, recoveryLoad = false, journaled = false): string => submit(async () => {
-    // A host that journals every write replays it after process death, so each write must carry its replay tokens.
+const boot = (legacyState: string, legacyBackup: string, recoveryLoad = false, journaled = false, budgetJSON = ''): string => submit(async () => {
+    if (budgetJSON && !debugControl('no-storage-budget')) {
+        const budget = JSON.parse(budgetJSON) as { baseMs: number; msPerMiB: number; storageTimeoutMs: number };
+        storageBudget = { baseMs: budget.baseMs, msPerMiB: budget.msPerMiB };
+        setStorageTimeoutMs(budget.storageTimeoutMs);
+    }
+
     setNativeReplayTokens(journaled ? 'required' : 'optional');
     const adapter = new ValidatedSqliteAdapter(sqlite, { rejectConcurrentWrites: true });
-    // Schema setup may write only after the native host's validated checkpoint.
+
     setStorageAdapter(adapter);
-    // Before the journal's replay (Kotlin, after boot): a landed request answers from its receipt. A host without
-    // a journal keeps its receipts in memory, as before.
+
+
     traceStep('js:receipts');
-    if (journaled) await loadNativeRequestReceipts(sqlite);
-    else await loadNativeRequestReceipts(sqlite, { durableCommands: ['appLock', 'notificationSetting', 'deviceCalendarSetting', 'calendarSubscriptionSetting', 'calendarSubscriptionAdd', 'reminderComplete', 'reminderSnooze', 'taskCompletion', 'taskCompletionUndo', 'archivedTaskRestore', 'archivedTasksRestore', 'doneTasksMove', 'doneTasksAddTag', 'doneTasksRemoveTag', 'archivedTasksDelete', 'archivedTasksDeleteUndo', 'doneTasksDelete', 'doneTasksDeleteUndo', 'referenceTasksDelete', 'referenceTasksDeleteUndo', 'referenceTasksMove', 'referenceTasksAddTag', 'referenceTasksRemoveTag', 'preparedProjectLifecycle', 'preparedTaskDelete', 'preparedProjectDelete', 'preparedTaskDeleteUndo', 'doneTaskStatus', 'referenceTaskNext', 'referenceTaskStatus', 'referenceTaskCompletion', 'referenceTaskCompletionUndo', 'referenceTaskBackdate', 'referenceTaskDestination', 'referenceProjectNextAction', 'doneTaskCompletedAt', 'archiveTaskCompletedAt', 'data', 'backupDocument'] });
-    // The legacy import plans from a validated full read. Any other boot needs only the schema here: the activation's own read
-    // is validated before anything saves.
+    if (journaled) await adapter.withConnection(() => loadNativeRequestReceipts(sqlite), { write: true });
+    else await adapter.withConnection(() => loadNativeRequestReceipts(sqlite, { durableCommands: [...(globalThis.__mindwtrHostPlatform === 'ios' ? ['rowTaskFocus', 'rowTaskDates', 'rowTaskDestination', 'taskChecklistMove', 'taskChecklistMoveUndo', 'rowTaskBackdate', 'projectTasksDelete', 'projectTasksDeleteUndo', 'projectOrganizeDestinationCreate', 'projectTasksOrganize', 'projectTasksRemoveTag', 'projectTasksAddTag', 'projectTasksMove', 'rowTaskCompletion', 'rowTaskCompletionUndo', 'iosRowQuickStatus', 'iosInlineChecklist', 'gettingStarted', 'voiceSettings', 'voiceCapture', 'voiceResult', 'review', 'weeklyReviewProjectTask', 'iosShareCapture', 'iosWidgetCompletion', 'iosWatchIngestItem', 'somedaySectionBulkMove', 'somedaySectionBulkMoveUndo', 'aiTextConfiguration', 'aiTextConfigurationV2', 'waitingTasksDelete', 'waitingTasksDeleteUndo', 'somedayTasksDelete', 'somedayTasksDeleteUndo', 'reviewTasksDelete', 'reviewTasksDeleteUndo', 'contextsTasksDelete', 'contextsTasksDeleteUndo'] : []), 'appLock', 'notificationSetting', 'aiRequestTimeout', 'aiReasoningEffort', 'aiGeminiThinkingBudget', 'deviceCalendarSetting', 'calendarSubscriptionSetting', 'calendarSubscriptionAdd', 'reminderComplete', 'reminderSnooze', 'taskCompletion', 'taskCompletionUndo', 'boardTaskCompletion', 'boardTaskCompletionUndo', 'boardTaskReactivate', 'boardTaskOrder', 'archivedTaskRestore', 'archivedTasksRestore', 'trashItemsRestore', 'trashItemsPurge', 'doneTasksMove', 'doneTasksAddTag', 'doneTasksRemoveTag', 'archivedTasksDelete', 'archivedTasksDeleteUndo', 'doneTasksDelete', 'doneTasksDeleteUndo', 'referenceTasksDelete', 'referenceTasksDeleteUndo', 'inboxTasksDelete', 'inboxTasksDeleteUndo', 'referenceTasksMove', 'inboxTasksMove', 'inboxTasksAddTag', 'inboxTasksRemoveTag', 'inboxTasksOrganize', 'inboxOrganizeDestinationCreate', 'inboxPreparedCommit', 'inboxUndo', 'referenceTasksAddTag', 'referenceTasksRemoveTag', 'preparedProjectLifecycle', 'preparedTaskDelete', 'preparedProjectDelete', 'preparedTaskDeleteUndo', 'doneTaskStatus', 'referenceTaskNext', 'referenceTaskStatus', 'referenceTaskCompletion', 'referenceTaskCompletionUndo', 'referenceTaskBackdate', 'referenceTaskDestination', 'referenceProjectNextAction', 'doneTaskCompletedAt', 'archiveTaskCompletedAt', 'data', 'backupDocument', 'pomodoroTransition', 'appleReminderImportItem'] }), { write: true });
     traceStep('js:schema');
-    if (legacyState) await adapter.getData(); else await adapter.ensureSchema();
+
+    let loaded: LoadedData | null = legacyState ? await adapter.getData() : null;
+    if (!legacyState) await adapter.ensureSchema();
     traceStep('');
-    if (legacyState) await importLegacyJson(adapter, JSON.parse(legacyState) as LegacyState, legacyBackup);
+    if (loaded) await importLegacyJson(adapter, loaded, JSON.parse(legacyState) as LegacyState, legacyBackup);
+    loaded = null;
     const result = await activateAndVerify(adapter, recoveryLoad);
     bootAdapter = adapter;
     return result;
 });
 
-// Reference and Done use the RN list's single tag-input and count policy.
+iosTaskAI = createIOSTaskAI({ contract, adapter: () => bootAdapter,
+    isIOS: () => globalThis.__mindwtrHostPlatform === 'ios',
+    otherAIActive: () => Boolean(iosCaptureAIHost || iosConfigurationAIHost || iosConfigurationAIActive || iosInboxAI?.active || iosReviewAI?.active), isFossBuild });
+iosInboxAI = createIOSInboxAI({ contract, adapter: () => bootAdapter,
+    isIOS: () => globalThis.__mindwtrHostPlatform === 'ios',
+    otherAIActive: () => Boolean(iosCaptureAIHost || iosConfigurationAIHost || iosConfigurationAIActive || iosTaskAI?.active || iosReviewAI?.active), isFossBuild });
+iosReviewAI = createIOSReviewAI({ contract, adapter: () => bootAdapter,
+    isIOS: () => globalThis.__mindwtrHostPlatform === 'ios',
+    otherAIActive: () => Boolean(iosCaptureAIHost || iosConfigurationAIHost || iosConfigurationAIActive || iosTaskAI?.active || iosInboxAI?.active), isFossBuild });
+
 const taskListBulkTagInput = (tag: string, changedCount: number): string => submit(async () => {
     requireSaved();
     if (typeof tag !== 'string' || tag.length > 2_000 || !Number.isInteger(changedCount) || changedCount < 0 || changedCount > 10_000) {
@@ -1246,8 +1779,7 @@ const taskListBulkTagInput = (tag: string, changedCount: number): string => subm
         : { title: t('common.done'), message: formatListItemCount(changedCount, 'task', t) } };
 });
 
-// New work uses contract readiness; recovery uses the validated boot adapter so an
-// acknowledged save whose reload failed can still prove/reload its durable receipt.
+
 const backupAdapter = (newWork = false) => {
     if (!bootAdapter || isSandboxMode() || isWorkspaceTransitionActive()) {
         throw new Error('NOT_READY: Backup requires validated storage in a stable personal workspace');
@@ -1259,26 +1791,670 @@ const backupJson = (json: string): unknown => {
     try { return JSON.parse(json) as unknown; }
     catch { throw new Error('INVALID_INPUT: Invalid backup document input'); }
 };
+
+const inspectBackup = (read: () => string, metadataJSON: string, format: string) => {
+    backupAdapter(true);
+    const pending = getPersistenceStatus();
+    if (pending.queued || pending.inFlight || pending.immediate || pending.retrying || pending.failed) {
+        throw new Error('NOT_READY: Backup inspection is unavailable while saving is pending');
+    }
+    if (format !== 'json' && format !== 'json-restore' && format !== 'csv' && format !== 'todoist' && format !== 'ticktick' && format !== 'dgt' && format !== 'omnifocus') throw new Error('INVALID_INPUT: Invalid backup document input');
+    return inspectNativeBackupDocument(read(), backupJson(metadataJSON) as Parameters<typeof inspectNativeBackupDocument>[1], backupTranslate, format);
+};
+
+const iosWatchReadiness = () => {
+    if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || getStorageAdapter() !== bootAdapter
+        || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+        throw new Error('NOT_READY: Watch intake requires current personal storage');
+};
+const iosShareCaptureMethods = createNativeShareCaptureMethods({ contract, current: () => {
+    if (globalThis.__mindwtrHostPlatform !== 'ios' || isSandboxMode() || isWorkspaceTransitionActive())
+        throw new Error('ACTION_FAILED: Native share waits for its original workspace');
+    requireSaved();
+} });
+const iosVoiceReadiness: Parameters<typeof createNativeVoiceMethods>[0]['readiness'] = () => {
+    if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || getStorageAdapter() !== bootAdapter
+        || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+        return { ok: false, error: { code: 'NOT_READY', message: 'Voice requires current personal storage' } };
+    return { ok: true, value: null };
+};
+const iosVoiceMethods = createNativeVoiceMethods({
+    readiness: iosVoiceReadiness,
+    save: async () => {
+        try { await flushPendingSave(); requireSaved(); return { ok: true, value: null }; }
+        catch { return { ok: false, error: { code: 'SAVE_FAILED', message: 'Voice save could not be confirmed' } }; }
+    },
+    t: () => backupTranslate, revision: now => `voice:${now.toISOString()}`,
+    requestIdPattern: /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+    formatDate: () => {
+        const settings = useTaskStore.getState().settings;
+        return createDateFormatter({ language: settings.language || unwrap(contract.getStrings({ keys: [] })).language,
+            dateFormat: settings.dateFormat, calendarSystem: settings.calendarSystem, timeFormat: settings.timeFormat,
+            systemLocale: iosVoiceSystemLocale });
+    },
+});
+const iosVoiceOwner = (owner: () => unknown, signal: AbortSignal) => {
+    unwrap(iosVoiceReadiness());
+    if (typeof owner !== 'function') throw new Error('INVALID_INPUT: Voice requires private owner authority');
+    const adapter = bootAdapter;
+    const current = () => {
+        unwrap(iosVoiceReadiness());
+        if (signal.aborted || bootAdapter !== adapter) throw new Error('STALE_REVISION: Voice owner is unavailable');
+        let reply: unknown;
+        try { reply = checked(owner()); } catch { throw new Error('STALE_REVISION: Voice owner is unavailable'); }
+        if (reply !== '') throw new Error('STALE_REVISION: Voice owner is unavailable');
+    };
+    current(); return current;
+};
+const iosVoiceJSON = (json: string, limit: number): unknown => {
+    if (typeof json !== 'string' || json.length > limit || new TextEncoder().encode(json).byteLength > limit)
+        throw new Error('INVALID_INPUT: Voice input exceeds its bound');
+    return completionJson(json, limit);
+};
+
+const aiTextConfigurationMethods = createNativeAITextConfigurationMethods({
+    readiness: () => {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || getStorageAdapter() !== bootAdapter
+            || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+            return { ok: false, error: { code: 'NOT_READY', message: 'AI text configuration requires current personal storage' } };
+        return { ok: true, value: null };
+    },
+    save: async () => {
+        try { await flushPendingSave(); requireSaved(); return { ok: true, value: null }; }
+        catch { return { ok: false, error: { code: 'SAVE_FAILED', message: 'AI text configuration save could not be confirmed' } }; }
+    },
+    t: () => backupTranslate,
+});
+const aiTextConfigurationOwner = (owner: () => unknown, signal: AbortSignal) => {
+    if (typeof owner !== 'function') throw new Error('INVALID_INPUT: AI text configuration needs private owner authority');
+    return () => {
+        if (signal.aborted || checked(owner()) !== '') throw new Error('STALE_REVISION: AI text configuration owner is unavailable');
+    };
+};
+type AITextConfigurationSession = {
+    id: string; provider: 'openai' | 'gemini' | 'anthropic'; version: 1 | 2; adapter: NonNullable<ReturnType<typeof getStorageAdapter>>; generation: number;
+    settings: ReturnType<typeof useTaskStore.getState>['settings']; frozen: unknown;
+    extraBodyAttempts: Map<string, { expected: unknown; pending: { authority: unknown[]; frozen: unknown } | null }>;
+    acceptedAdvance: { generation: number; settings: ReturnType<typeof useTaskStore.getState>['settings']; frozen: unknown } | null;
+};
+let iosAITextConfigurationSession: AITextConfigurationSession | null = null;
+type AIEndpointRetry = { session: string; requestId: string; expected: unknown; authority: unknown[]; frozen: unknown };
+let iosAITextEndpointRetry: AIEndpointRetry | null = null;
+const aiTextSnapshotReferences = () => {
+    const state = useTaskStore.getState();
+    return [state._allTasks, state._allProjects, state._allSections, state._allAreas, state._allPeople, state.settings];
+};
+const currentAITextConfigurationSession = (id: string, requireSettings = true, requirePersistence = true) => {
+    const session = iosAITextConfigurationSession, state = useTaskStore.getState(), status = getPersistenceStatus();
+    if (globalThis.__mindwtrHostPlatform !== 'ios' || !session || session.id !== id || bootAdapter !== session.adapter
+        || getStorageAdapter() !== session.adapter || status.generation !== session.generation || isSandboxMode()
+        || isWorkspaceTransitionActive() || state.isLoading || state.editLockCount > 0
+        || requireSettings && ((state.settings.ai?.provider ?? 'openai') !== session.provider || state.settings !== session.settings || !taskEditValuesEqual(state.settings, session.frozen))) {
+        iosAITextConfigurationSession = null;
+        throw new Error('STALE_REVISION: AI text configuration session changed');
+    }
+    if (requirePersistence) requireSaved(); return session;
+};
+const retainAITextConfigurationAdvance = (session: AITextConfigurationSession) => {
+    const state = useTaskStore.getState();
+    if (iosAITextConfigurationSession !== session || bootAdapter !== session.adapter || getStorageAdapter() !== session.adapter
+        || isSandboxMode() || isWorkspaceTransitionActive() || state.isLoading || state.editLockCount > 0)
+        throw new Error('STALE_REVISION: AI text configuration session changed');
+    session.acceptedAdvance = { generation: getPersistenceStatus().generation, settings: state.settings,
+        frozen: JSON.parse(JSON.stringify(state.settings)) };
+};
+const refreshAITextConfigurationSession = (id: string) => {
+    const retained = iosAITextConfigurationSession, advance = retained?.id === id ? retained.acceptedAdvance : null;
+    if (!retained || !advance) { currentAITextConfigurationSession(id); return; }
+    const state = useTaskStore.getState();
+    if (bootAdapter !== retained.adapter || getStorageAdapter() !== retained.adapter || isSandboxMode() || isWorkspaceTransitionActive()
+        || state.isLoading || state.editLockCount > 0 || getPersistenceStatus().generation !== advance.generation
+        || state.settings !== advance.settings || !taskEditValuesEqual(state.settings, advance.frozen)) {
+        iosAITextConfigurationSession = null;
+        throw new Error('STALE_REVISION: AI text configuration saved transition changed');
+    }
+    requireSaved();
+    retained.generation = advance.generation; retained.settings = advance.settings; retained.frozen = advance.frozen;
+    retained.acceptedAdvance = null;
+};
+
+const aiModelDiscoveryOwner = (owner: (json: string) => unknown) => {
+    const ask = (request: object): string => {
+        try {
+            const raw = checked(owner(JSON.stringify(request)));
+            if (typeof raw === 'string') return raw;
+        } catch { }
+        throw new Error('NOT_READY: AI model discovery owner is unavailable');
+    };
+    const readReply = (request: object): unknown => {
+        try { return completionJson(ask(request), 32 * 1024); }
+        catch { throw new Error('NOT_READY: AI model discovery metadata is unavailable'); }
+    };
+    return { ask, readReply };
+};
+
+const runAITextExtraBody = async (input: Record<string, unknown>, owner: (json: string) => unknown, signal: AbortSignal) => {
+    const saving = input.op === 'save-extra-body', sessionId = input.session as string;
+    const fields = saving ? ['session', 'op', 'expected', 'attempt', 'value'] : ['session', 'op', 'expected'];
+    if (!taskEditValuesEqual(Object.keys(input).sort(), fields.sort())
+        || saving && (typeof input.attempt !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(input.attempt)
+            || typeof input.value !== 'string' || !readNativeAIExtraBodyInput(input.value)))
+        throw new Error('INVALID_INPUT: AI extra body parameters are invalid');
+    const session = iosAITextConfigurationSession;
+    const admit = (phase = 'current') => {
+        const state = useTaskStore.getState();
+        if (signal.aborted || globalThis.__mindwtrHostPlatform !== 'ios' || !session || session.id !== sessionId
+            || session.version !== 2 || session.provider !== 'openai' || iosAITextConfigurationSession !== session
+            || bootAdapter !== session.adapter || getStorageAdapter() !== session.adapter
+            || isSandboxMode() || isWorkspaceTransitionActive() || state.isLoading || state.editLockCount > 0
+            || checked(owner(JSON.stringify({ phase }))) !== '')
+            throw new Error('STALE_REVISION: AI extra body editor changed');
+    };
+    admit();
+    if (!session) throw new Error('STALE_REVISION: AI extra body editor changed');
+    const attempt = input.attempt as string, value = input.value as string;
+    const retained = saving ? session.extraBodyAttempts.get(attempt) : undefined;
+    if (retained && !taskEditValuesEqual(retained.expected, input.expected))
+        throw new Error('STALE_REVISION: AI extra body attempt changed');
+    const unavailable = async (): Promise<never> => { throw new Error('NOT_READY: AI text configuration storage is private'); };
+    const host: NativeAIHost = { platform: { isFossBuild },
+        storage: { getItem: unavailable, setItem: unavailable, removeItem: unavailable },
+        secrets: { get: unavailable, set: unavailable, delete: unavailable }, fetch: unavailable };
+    iosConfigurationAIHost = host;
+    try {
+        const intent = { requestId: attempt, text: value };
+        if (saving) {
+            const saved = contract.probeAIExtraBodyParamsOutcome(intent);
+            if (saved) {
+                if (!saved.ok) throw new Error('INVALID_INPUT: AI extra body attempt changed');
+                if (!retained) throw new Error('STALE_REVISION: AI extra body attempt belongs to another editor');
+                admit(); return unwrap(saved);
+            }
+        }
+        const pending = retained?.pending;
+        const current = () => {
+            admit();
+            if (currentAITextConfigurationSession(sessionId, true, !pending) !== session
+                || pending && (!aiTextSnapshotReferences().every((value, index) => value === pending.authority[index])
+                    || !taskEditValuesEqual(pending.authority, pending.frozen)))
+                throw new Error('STALE_REVISION: AI extra body snapshot changed');
+        };
+        current();
+        if (retained && !pending) throw new Error('STALE_REVISION: AI extra body attempt has no saved proof');
+        if (!pending) {
+            const options = unwrap(await aiTextConfigurationMethods.optionsV2({}, current));
+            if (!taskEditValuesEqual(options.expected, input.expected))
+                throw new Error('STALE_REVISION: AI text configuration changed');
+        }
+        if (!saving) {
+            let parsed;
+            try { parsed = readNativeAIExtraBodyInput(formatOpenAIExtraBodyParams(session.settings.ai?.openAIExtraBodyParams)); }
+            catch { }
+            if (!parsed) throw new Error('INVALID_INPUT: AI extra body parameters are unavailable');
+            current(); return { value: parsed.formatted };
+        }
+        if (!retained && session.extraBodyAttempts.size >= 128)
+            throw new Error('NOT_READY: Reopen the AI extra body editor');
+        const record = retained ?? { expected: input.expected, pending: null };
+        current(); admit('extra-body-save');
+        session.extraBodyAttempts.set(attempt, record);
+        try {
+            let written = await contract.setAIExtraBodyParams(intent);
+            if (pending && !written.ok && written.error.code === 'SAVE_FAILED') {
+                current(); await useTaskStore.getState().persistSnapshot(); await flushPendingSave(); requireSaved();
+                admit();
+                if (!aiTextSnapshotReferences().every((value, index) => value === pending.authority[index])
+                    || !taskEditValuesEqual(pending.authority, pending.frozen))
+                    throw new Error('STALE_REVISION: AI extra body snapshot changed');
+                written = await contract.setAIExtraBodyParams(intent);
+            }
+            if (!written.ok) {
+                if (written.error.code === 'SAVE_FAILED') {
+                    const authority = aiTextSnapshotReferences();
+                    record.pending = { authority, frozen: JSON.parse(JSON.stringify(authority)) };
+                    session.generation = getPersistenceStatus().generation; session.settings = useTaskStore.getState().settings;
+                    session.frozen = JSON.parse(JSON.stringify(session.settings)); session.acceptedAdvance = null;
+                }
+                throw new Error('ACTION_FAILED: AI extra body save could not be confirmed');
+            }
+            record.pending = null;
+            retainAITextConfigurationAdvance(session); refreshAITextConfigurationSession(sessionId);
+            admit(); return written.value;
+        } catch {
+            throw new Error('ACTION_FAILED: AI extra body save could not be confirmed');
+        }
+    } finally { if (iosConfigurationAIHost === host) iosConfigurationAIHost = null; }
+};
+
+const runAITextConfigurationSensitive = async (json: string, owner: (json: string) => unknown, signal: AbortSignal, version: 1 | 2) => {
+    if (iosConfigurationAIActive) throw new Error('NOT_READY: AI text configuration is already active');
+    iosConfigurationAIActive = true;
+    try {
+            const input = completionJson(json, 64 * 1024);
+            if (!input || typeof input !== 'object' || Array.isArray(input) || !('session' in input) || typeof input.session !== 'string'
+                || !('op' in input) || !['read-endpoint', 'save-endpoint', 'save-credential', 'clear-credential', ...(version === 2 ? ['read-extra-body', 'save-extra-body'] : [])].includes(String(input.op))
+                || !('expected' in input) || typeof owner !== 'function' || iosConfigurationAIHost || iosCaptureAIHost || iosTaskAI?.active || iosInboxAI?.active || iosReviewAI?.active)
+                throw new Error('INVALID_INPUT: AI text configuration request is invalid');
+            if (input.op === 'read-extra-body' || input.op === 'save-extra-body')
+                return await runAITextExtraBody(input as Record<string, unknown>, owner, signal);
+            const op = input.op, sessionId = input.session;
+            const writing = op === 'save-endpoint' || op === 'save-credential';
+            if (!taskEditValuesEqual(Object.keys(input).sort(), (writing ? ['session', 'op', 'expected', 'value'] : ['session', 'op', 'expected']).sort())
+                || writing && (!('value' in input) || typeof input.value !== 'string'))
+                throw new Error('INVALID_INPUT: AI text configuration request is invalid');
+            const retry = op === 'save-endpoint' && iosAITextEndpointRetry?.session === sessionId ? iosAITextEndpointRetry : null;
+            if (retry && (!taskEditValuesEqual(retry.expected, input.expected)
+                || !aiTextSnapshotReferences().every((value, index) => value === retry.authority[index])
+                || !taskEditValuesEqual(retry.authority, retry.frozen)))
+                throw new Error('STALE_REVISION: AI text endpoint retry changed');
+            const session = currentAITextConfigurationSession(sessionId, true, !retry);
+            if (session.version !== version || (op === 'read-endpoint' || op === 'save-endpoint') && session.provider !== 'openai')
+                throw new Error('STALE_REVISION: AI text configuration provider changed');
+            const admit = (request: object) => {
+                if (checked(owner(JSON.stringify(request))) !== '') throw new Error('STALE_REVISION: AI text configuration owner changed');
+            };
+            const current = () => {
+                if (signal.aborted || currentAITextConfigurationSession(sessionId, true, !retry) !== session)
+                    throw new Error('STALE_REVISION: AI text configuration owner changed');
+                admit({ phase: 'current' });
+            };
+            if (!retry) {
+                const options = version === 2 ? unwrap(await aiTextConfigurationMethods.optionsV2({}, current))
+                    : unwrap(await aiTextConfigurationMethods.options({}, current));
+                if (!taskEditValuesEqual(options.expected, input.expected)) throw new Error('STALE_REVISION: AI text configuration changed');
+            }
+            current();
+            if (op === 'read-endpoint') {
+                const value = session.settings.ai?.baseUrl;
+                if (value !== undefined && (typeof value !== 'string' || value.length > 2000))
+                    throw new Error('INVALID_INPUT: AI text endpoint is unavailable');
+                return { value: value ?? '' };
+            }
+            const value = writing && 'value' in input && typeof input.value === 'string' ? input.value : '';
+            if (op === 'save-credential' && !value.trim()) throw new Error('INVALID_INPUT: Enter a replacement credential');
+            const unavailable = async (): Promise<never> => { throw new Error('NOT_READY: AI text configuration storage is private'); };
+            const host: NativeAIHost = {
+                platform: { isFossBuild }, storage: { getItem: unavailable, setItem: unavailable, removeItem: unavailable },
+                secrets: { get: unavailable, set: unavailable, delete: unavailable }, fetch: unavailable,
+                saveConfigurationKey: async (provider, replacement) => {
+                    current();
+                    if (provider !== session.provider) throw new Error('STALE_REVISION: AI text provider changed');
+                    admit({ phase: 'credential', value: replacement });
+                    current();
+                },
+            };
+            iosConfigurationAIHost = host;
+            const requestId = retry?.requestId ?? generateUUID();
+            try {
+                current();
+                let result;
+                if (op === 'save-endpoint') {
+                    const intent = { requestId, field: 'assistant', value } satisfies Parameters<typeof contract.setAIEndpoint>[0];
+                    let written = await contract.setAIEndpoint(intent);
+                    if (retry && !written.ok && written.error.code === 'SAVE_FAILED') {
+                        current();
+                        await useTaskStore.getState().persistSnapshot(); await flushPendingSave(); requireSaved();
+                        admit({ phase: 'current' });
+                        if (!aiTextSnapshotReferences().every((value, index) => value === retry.authority[index])
+                            || !taskEditValuesEqual(retry.authority, retry.frozen)) throw new Error('STALE_REVISION: AI text endpoint retry changed');
+                        retainAITextConfigurationAdvance(session); refreshAITextConfigurationSession(sessionId);
+                        current(); written = await contract.setAIEndpoint(intent);
+                    }
+                    result = unwrap(written);
+                } else result = unwrap(await contract.setAIKey({ requestId, field: 'assistant', provider: session.provider, value }));
+                admit({ phase: 'current' });
+                retainAITextConfigurationAdvance(session); refreshAITextConfigurationSession(sessionId);
+                if (op === 'save-endpoint') iosAITextEndpointRetry = null;
+                return op === 'save-endpoint' && 'changed' in result ? { changed: result.changed } : { completed: true };
+            } catch {
+                if (op === 'save-endpoint' && getPersistenceStatus().failed) {
+                    const authority = aiTextSnapshotReferences();
+                    iosAITextEndpointRetry = { session: sessionId, requestId, expected: input.expected, authority,
+                        frozen: JSON.parse(JSON.stringify(authority)) };
+                    session.generation = getPersistenceStatus().generation;
+                    session.settings = useTaskStore.getState().settings;
+                    session.frozen = JSON.parse(JSON.stringify(session.settings));
+                    session.acceptedAdvance = null;
+                }
+                throw new Error('ACTION_FAILED: AI text configuration could not be confirmed');
+            } finally { if (iosConfigurationAIHost === host) iosConfigurationAIHost = null; }
+    } finally { iosConfigurationAIActive = false; }
+};
+
+let iosVoiceEndpointSession: Omit<AITextConfigurationSession, 'provider' | 'version' | 'acceptedAdvance' | 'extraBodyAttempts'> | null = null;
+let iosVoiceEndpointRetry: AIEndpointRetry | null = null;
+const currentVoiceEndpointSession = (id: string, retry = false) => {
+    unwrap(iosVoiceReadiness());
+    const session = iosVoiceEndpointSession, state = useTaskStore.getState();
+    if (!session || session.id !== id || session.adapter !== bootAdapter || state.isLoading || state.editLockCount > 0
+        || state.settings.ai?.speechToText?.provider !== 'openai' || getPersistenceStatus().generation !== session.generation
+        || state.settings !== session.settings || !taskEditValuesEqual(state.settings, session.frozen))
+        throw new Error('STALE_REVISION: Voice endpoint session changed');
+    if (!retry) requireSaved();
+    return session;
+};
+const runVoiceEndpointSensitive = async (json: string, owner: (json: string) => unknown, signal: AbortSignal) => {
+    if (iosConfigurationAIActive || iosConfigurationAIHost || iosCaptureAIHost || iosTaskAI?.active || iosInboxAI?.active || iosReviewAI?.active)
+        throw new Error('NOT_READY: AI configuration is already active');
+    iosConfigurationAIActive = true;
+    try {
+        const input = iosVoiceJSON(json, 32 * 1024) as Record<string, unknown>;
+        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.session !== 'string'
+            || typeof owner !== 'function' || !['read-endpoint', 'save-endpoint'].includes(String(input.op))
+            || !taskEditValuesEqual(Object.keys(input).sort(), (input.op === 'save-endpoint'
+                ? ['expected', 'op', 'session', 'value'] : ['expected', 'op', 'session']).sort())
+            || input.op === 'save-endpoint' && (typeof input.value !== 'string' || input.value.length > 2000))
+            throw new Error('INVALID_INPUT: Voice endpoint request is invalid');
+        const id = input.session;
+        const retry = input.op === 'save-endpoint' && iosVoiceEndpointRetry?.session === id ? iosVoiceEndpointRetry : null;
+        const unchangedRetry = () => !retry || taskEditValuesEqual(input.expected, retry.expected)
+            && aiTextSnapshotReferences().every((value, index) => value === retry.authority[index])
+            && taskEditValuesEqual(retry.authority, retry.frozen);
+        if (!unchangedRetry()) throw new Error('STALE_REVISION: Voice endpoint retry changed');
+        const session = currentVoiceEndpointSession(id, Boolean(retry));
+        const admit = () => {
+            if (signal.aborted || checked(owner(JSON.stringify({ phase: 'current' }))) !== '')
+                throw new Error('STALE_REVISION: Voice endpoint owner changed');
+        };
+        const current = () => { currentVoiceEndpointSession(id, Boolean(retry)); admit(); };
+        current();
+        if (!retry && !taskEditValuesEqual(unwrap(await iosVoiceMethods.settingsOptions({}, current)).expected, input.expected))
+            throw new Error('STALE_REVISION: Voice settings changed');
+        if (input.op === 'read-endpoint') {
+            const value = session.settings.ai?.speechToText?.baseUrl;
+            if (value !== undefined && (typeof value !== 'string' || value.length > 4096))
+                throw new Error('INVALID_INPUT: Voice endpoint is unavailable');
+            return { value: value ?? '' };
+        }
+        const unavailable = async (): Promise<never> => { throw new Error('NOT_READY: Voice endpoint storage is private'); };
+        const host: NativeAIHost = { platform: { isFossBuild },
+            storage: { getItem: unavailable, setItem: unavailable, removeItem: unavailable },
+            secrets: { get: unavailable, set: unavailable, delete: unavailable }, fetch: unavailable };
+        const refresh = () => {
+            unwrap(iosVoiceReadiness()); admit();
+            if (iosVoiceEndpointSession !== session || bootAdapter !== session.adapter || useTaskStore.getState().editLockCount > 0
+                || useTaskStore.getState().isLoading || useTaskStore.getState().settings.ai?.speechToText?.provider !== 'openai')
+                throw new Error('STALE_REVISION: Voice endpoint session changed');
+            session.generation = getPersistenceStatus().generation;
+            session.settings = useTaskStore.getState().settings;
+            session.frozen = JSON.parse(JSON.stringify(session.settings));
+        };
+        const requestId = retry?.requestId ?? generateUUID();
+        iosConfigurationAIHost = host;
+        try {
+            current();
+            const intent = { requestId, field: 'speech', value: input.value as string } as const;
+            let written = await contract.setAIEndpoint(intent);
+            if (retry && !written.ok && written.error.code === 'SAVE_FAILED') {
+                current();
+                await useTaskStore.getState().persistSnapshot(); await flushPendingSave(); requireSaved(); admit();
+                if (!unchangedRetry()) throw new Error('STALE_REVISION: Voice endpoint retry changed');
+                refresh(); current(); written = await contract.setAIEndpoint(intent);
+            }
+            const result = unwrap(written);
+            refresh(); requireSaved(); iosVoiceEndpointRetry = null;
+            return { changed: result.changed };
+        } catch {
+            if (getPersistenceStatus().failed) {
+                const authority = aiTextSnapshotReferences();
+                iosVoiceEndpointRetry = { session: id, requestId, expected: input.expected, authority,
+                    frozen: JSON.parse(JSON.stringify(authority)) };
+                try { refresh(); } catch { }
+            }
+            throw new Error('ACTION_FAILED: Voice endpoint could not be confirmed');
+        } finally { if (iosConfigurationAIHost === host) iosConfigurationAIHost = null; }
+    } finally { iosConfigurationAIActive = false; }
+};
+
+const aiRequestTimeoutMethods = createNativeAIRequestTimeoutMethods({
+    readiness: () => {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || getStorageAdapter() !== bootAdapter
+            || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+            return { ok: false, error: { code: 'NOT_READY', message: 'AI timeout requires current personal storage' } };
+        return { ok: true, value: null };
+    },
+    save: async () => {
+        try { await flushPendingSave(); requireSaved(); return { ok: true, value: null }; }
+        catch { return { ok: false, error: { code: 'SAVE_FAILED', message: 'AI timeout save could not be confirmed' } }; }
+    },
+});
+const aiRequestTimeoutOwner = (owner: () => unknown, signal: AbortSignal) => {
+    if (typeof owner !== 'function') throw new Error('INVALID_INPUT: AI timeout needs private owner authority');
+    return () => {
+        if (signal.aborted || owner() !== '') throw new Error('STALE_REVISION: AI timeout owner is unavailable');
+    };
+};
+
+const aiReasoningEffortMethods = createNativeAIReasoningEffortMethods({
+    readiness: () => {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || getStorageAdapter() !== bootAdapter
+            || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+            return { ok: false, error: { code: 'NOT_READY', message: 'AI reasoning effort requires current personal storage' } };
+        return { ok: true, value: null };
+    },
+    save: async () => {
+        try { await flushPendingSave(); requireSaved(); return { ok: true, value: null }; }
+        catch { return { ok: false, error: { code: 'SAVE_FAILED', message: 'AI reasoning effort save could not be confirmed' } }; }
+    },
+});
+const aiReasoningEffortOwner = (owner: () => unknown, signal: AbortSignal) => {
+    if (typeof owner !== 'function') throw new Error('INVALID_INPUT: AI reasoning effort needs private owner authority');
+    return () => {
+        if (signal.aborted || owner() !== '') throw new Error('STALE_REVISION: AI reasoning effort owner is unavailable');
+    };
+};
+
+const aiGeminiThinkingBudgetMethods = createNativeAIGeminiThinkingBudgetMethods({
+    readiness: () => {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || getStorageAdapter() !== bootAdapter
+            || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+            return { ok: false, error: { code: 'NOT_READY', message: 'AI Gemini thinking budget requires current personal storage' } };
+        return { ok: true, value: null };
+    },
+    save: async () => {
+        try { await flushPendingSave(); requireSaved(); return { ok: true, value: null }; }
+        catch { return { ok: false, error: { code: 'SAVE_FAILED', message: 'AI Gemini thinking budget save could not be confirmed' } }; }
+    },
+});
+const aiGeminiThinkingBudgetOwner = (owner: () => unknown, signal: AbortSignal) => {
+    if (typeof owner !== 'function') throw new Error('INVALID_INPUT: AI Gemini thinking budget needs private owner authority');
+    return () => {
+        if (signal.aborted || owner() !== '') throw new Error('STALE_REVISION: AI Gemini thinking budget owner is unavailable');
+    };
+};
+
+
+let pomodoroWarmAdmission: { planJSON: string; assertCurrent: () => void } | null = null;
+const pomodoroJSON = (json: string, maximum = MAX_NATIVE_POMODORO_PLAN_BYTES): unknown => {
+    if (typeof json !== 'string' || json.length > maximum || new TextEncoder().encode(json).byteLength > maximum)
+        throw new Error('INVALID_INPUT: Invalid Pomodoro transport');
+    try { return JSON.parse(json) as unknown; } catch { throw new Error('INVALID_INPUT: Invalid Pomodoro transport'); }
+};
+const pomodoroAdapter = () => {
+
+    if ((globalThis.__mindwtrHostPlatform !== 'ios' && globalThis.__mindwtrHostPlatform !== 'android')
+        || !bootAdapter || getStorageAdapter() !== bootAdapter
+        || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+        throw new Error('NOT_READY: Pomodoro requires current validated personal storage');
+    return bootAdapter;
+};
+const readSavedNativePomodoro = async () => {
+    const adapter = pomodoroAdapter();
+    const ready = () => {
+        requireSaved(); unwrap(contract.getDataSettings());
+        const status = getPersistenceStatus();
+        if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying)
+            throw new Error('NOT_READY: Pomodoro presentation waits for saved data');
+    };
+    ready();
+    const before = useTaskStore.getState();
+    const requireBaseline = async () => {
+        if (!await adapter.readRowBaseline())
+            throw new Error('STALE_REVISION: Pomodoro saved data changed; reload before reading');
+    };
+    await requireBaseline();
+    const session = await adapter.readPomodoroSession();
+    await requireBaseline();
+    ready();
+    const current = useTaskStore.getState();
+    if (pomodoroAdapter() !== adapter || current.tasks !== before.tasks || current.settings !== before.settings)
+        throw new Error('STALE_REVISION: Pomodoro presentation changed; read again');
+    return { raw: session.raw, current };
+};
+const preparePomodoroRequest = async (requestJSON: string, watchSourceJSON?: string) => {
+    pomodoroWarmAdmission = null;
+    const adapter = pomodoroAdapter();
+    const stale = () => new Error('STALE_REVISION: Pomodoro preparation is no longer current');
+    const ready = () => {
+        if (pomodoroAdapter() !== adapter) throw stale();
+        requireSaved(); unwrap(contract.getDataSettings());
+        const status = getPersistenceStatus();
+        if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+            || useTaskStore.getState().editLockCount > 0 || useTaskStore.getState().isLoading) throw stale();
+        return status;
+    };
+    ready();
+    if (watchSourceJSON !== undefined) {
+        parseNativeWatchPomodoroSource(watchSourceJSON);
+        const saved = await adapter.readWatchPomodoroPlan(watchSourceJSON);
+        ready();
+        if (saved) return { kind: 'prepared', planJSON: JSON.stringify(saved) };
+    }
+    const status = ready(), state = useTaskStore.getState();
+    const references = [state._allTasks, state._allProjects, state._allSections, state._allAreas, state._allPeople, state.settings];
+    const frozen = JSON.parse(JSON.stringify(references)) as unknown;
+    const assertCurrent = () => {
+        if (ready().generation !== status.generation) throw stale();
+        const current = useTaskStore.getState();
+        const values = [current._allTasks, current._allProjects, current._allSections, current._allAreas, current._allPeople, current.settings];
+        if (current.lastDataChangeAt !== state.lastDataChangeAt || !values.every((value, index) => value === references[index])
+            || !taskEditValuesEqual(values, frozen)) throw stale();
+    };
+    assertCurrent();
+    if (!await adapter.readRowBaseline()) throw stale();
+    assertCurrent();
+    const data = await adapter.getData({ rawTasks: true });
+    assertCurrent();
+    const canonical = [data.tasks, data.projects, data.sections ?? [], data.areas ?? [], data.people ?? [], stripSensitiveSettings(data.settings)];
+    if (!taskEditValuesEqual(references, canonical)
+        && !taskEditValuesEqual(references, [data.tasks.map((task) => normalizeTaskForLoad(task)), ...canonical.slice(1)])) throw stale();
+    const session = await adapter.readPomodoroSession();
+    assertCurrent();
+    let request: NativePomodoroRequest;
+    if (watchSourceJSON !== undefined) {
+        const source = parseNativeWatchPomodoroSource(watchSourceJSON), now = new Date();
+        const options = data.settings.gtd?.pomodoro;
+        const wanted = source.taskId ?? session.state?.session.selectedTaskId;
+        const linked = options?.linkTask === true && wanted
+            ? data.tasks.find(task => task.id === wanted && !task.deletedAt && !isTaskCancelled(task) && isTaskActionable(task)) : undefined;
+        request = { action: 'watch', requestId: source.id, sourceJSON: watchSourceJSON,
+            observedAtMs: now.getTime(), localDayKey: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`,
+            autoStart: { autoStartFocus: options?.autoStartFocus === true, autoStartBreaks: options?.autoStartBreaks === true },
+            durations: sanitizePomodoroDurations(options?.customDurations), selectedTaskId: linked?.id ?? null };
+    } else {
+        const parsed = pomodoroJSON(requestJSON) as NativePomodoroRequest;
+        request = parsed.action === 'adoptLegacy' ? parsed : pomodoroJSON(requestJSON, 8192) as NativePomodoroRequest;
+        if (request.action === 'watch') throw new Error('INVALID_INPUT: Watch timer requires its source owner');
+    }
+    const legacy = request.action === 'adoptLegacy' && typeof request.legacy?.sessionRaw === 'string'
+        ? JSON.parse(request.legacy.sessionRaw) as { selectedTaskId?: unknown } | null : null;
+    const selected = request.action === 'adoptLegacy'
+        ? typeof legacy?.selectedTaskId === 'string' ? legacy.selectedTaskId : undefined
+        : session.state?.session.selectedTaskId;
+    const before = (id: string) => {
+        const matches = data.tasks.filter((task) => task.id === id);
+        if (matches.length > 1 || (matches.length === 1 && !hasRawReadRow(matches[0]))) throw stale();
+        const row = matches.length === 1 ? [...rawReadRow(matches[0], taskToSqliteRow(matches[0])).row] as (string | number | null)[] : null;
+        if (row && row.length !== TASK_SQLITE_COLUMNS.length) throw stale();
+        return { id, row };
+    };
+    const plan = prepareNativePomodoroTransition({ request, session, target: selected ? before(selected) : null,
+        owed: request.action === 'adoptLegacy' ? nativePomodoroOwedTaskIds(request).map(before) : [],
+        deviceId: request.action === 'initialize' ? null : typeof data.settings.deviceId === 'string' ? data.settings.deviceId : null });
+    assertCurrent();
+    if (!plan) return { kind: 'noop' };
+    const planJSON = JSON.stringify(validatePreparedNativePomodoroTransition(plan));
+    pomodoroWarmAdmission = { planJSON, assertCurrent };
+    return { kind: 'prepared', planJSON };
+};
+let iosPomodoroAlarmTurn: { token: string; current: () => Promise<void> } | null = null;
+const requirePomodoroAlarmTurn = async (token: string) => {
+    const turn = iosPomodoroAlarmTurn;
+    if (!turn || turn.token !== token) throw new Error('NOT_READY: Pomodoro alarm turn is unavailable');
+    await turn.current();
+    if (iosPomodoroAlarmTurn !== turn) throw new Error('NOT_READY: Pomodoro alarm turn changed');
+};
+let appleReminderWarmAdmission: { planJSON: string; assertCurrent: () => void } | null = null;
+const appleReminderAdapter = () => {
+    if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || getStorageAdapter() !== bootAdapter
+        || !bootAdapter.concurrentWritesGuarded || isSandboxMode() || isWorkspaceTransitionActive())
+        throw new Error('NOT_READY: Reminders import requires current personal storage');
+    return bootAdapter;
+};
+const appleReminderJSON = (json: string): unknown => {
+    if (typeof json !== 'string' || json.length > 8 * 1024 * 1024 || new TextEncoder().encode(json).byteLength > 8 * 1024 * 1024)
+        throw new Error('INVALID_INPUT: Reminders import item exceeds its transport limit');
+    try { return JSON.parse(json) as unknown; } catch { throw new Error('INVALID_INPUT: Invalid Reminders import item'); }
+};
+const appleReminderRegistry = (raw: string | null) => {
+    if (raw !== null && (typeof raw !== 'string' || new TextEncoder().encode(raw).byteLength > 1024 * 1024))
+        throw new Error('INVALID_INPUT: Reminders registry exceeds its limit');
+    let value: unknown;
+    try { value = raw === null ? {} : JSON.parse(raw); } catch { throw new Error('INVALID_INPUT: Reminders registry is malformed'); }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_INPUT: Reminders registry is malformed');
+    const fields = value as Record<string, unknown>;
+    if (['selectedListId', 'selectedListTitle'].some((name) => name in fields && typeof fields[name] !== 'string')
+        || ['deleteImportedReminders', 'autoImportOnOpen'].some((name) => name in fields && typeof fields[name] !== 'boolean')
+        || 'importedReminderIds' in fields && (!Array.isArray(fields.importedReminderIds)
+            || fields.importedReminderIds.some((id) => typeof id !== 'string')))
+        throw new Error('INVALID_INPUT: Reminders registry is malformed');
+    return normalizeAppleRemindersImportSettings(value);
+};
+const appleReminderItemOwner = createNativeAppleReminderImportOwner({
+    readiness: () => {
+        try { appleReminderAdapter(); requireSaved(); unwrap(contract.getDataSettings()); return { ok: true, value: null }; }
+        catch { return { ok: false, error: { code: 'NOT_READY', message: 'Reminders import is not ready' } }; }
+    },
+    save: async () => {
+        try { await flushPendingSave(); requireSaved(); return { ok: true, value: null }; }
+        catch { return { ok: false, error: { code: 'SAVE_FAILED', message: 'Reminders import save needs recovery' } }; }
+    },
+});
 const backupTranslate = (key: string, values?: Record<string, number | string>): string => {
     const template = unwrap(contract.getStrings({ keys: [key] })).strings[key];
     if (typeof template !== 'string') throw new Error('INVALID_INPUT: Backup translation is unavailable');
     return values ? formatI18nTemplate(template, values) : template;
 };
 
-// Only the native owner supplies these frozen checkpoints and preparations,
-// after reading its private evidence. They never enter the raw attachment API.
+
+let captureLinesWarmAdmission: { planJSON: string; assertCurrent: () => void } | null = null;
+const captureLinesJson = (json: string): unknown => {
+    if (typeof json !== 'string' || json.length > 8 * 1024 * 1024
+        || new TextEncoder().encode(json).byteLength > 8 * 1024 * 1024) throw new Error('INVALID_INPUT: Prepared lines are too large');
+    let plan: unknown;
+    try { plan = JSON.parse(json); } catch { throw new Error('INVALID_INPUT: Prepared lines are malformed'); }
+    return plan;
+};
+const requireCaptureLinesAdmission = (planJSON: string) => {
+    if (!captureLinesWarmAdmission || captureLinesWarmAdmission.planJSON !== planJSON) {
+        throw new Error('STALE_REVISION: Capture lines preparation is no longer current');
+    }
+    captureLinesWarmAdmission.assertCurrent();
+};
+
+
 const attachmentDraftJson = (json: string): unknown => {
     try {
         if (typeof json === 'string' && json.length <= 8 * 1024 * 1024
             && new TextEncoder().encode(json).byteLength <= 8 * 1024 * 1024) return JSON.parse(json);
-    } catch { /* A parser excerpt could expose draft content or a picked path. */ }
+    } catch {                                                                     }
     throw new Error('INVALID_INPUT');
 };
 const attachmentCleanupJson = (json: string, maxBytes: number): unknown => {
     try {
         if (typeof json === 'string' && json.length <= maxBytes
             && new TextEncoder().encode(json).byteLength <= maxBytes) return JSON.parse(json);
-    } catch { /* Never expose raw durable rows or parser excerpts. */ }
+    } catch {                                                         }
     throw new Error('INVALID_INPUT');
 };
 const attachmentDiscardInvalid = (): Error => new Error('INVALID_INPUT: Invalid attachment Discard handoff');
@@ -1313,14 +2489,14 @@ const settledAttachmentDiscardState = () => {
         return { state, status };
     } catch { throw attachmentDiscardNotReady(); }
 };
-// Reference-only: the fixed iOS spellings can keep bytes, never grant file IO.
+
 const nativeAttachmentFileInUse = (uri: string, owners: readonly (Task | Project)[]): boolean => {
     if (isAttachmentFileInUse(uri, owners)) return true;
     const counterpart = uri.startsWith('file:///private/var/') ? 'file:///var/' + uri.slice('file:///private/var/'.length)
         : uri.startsWith('file:///var/') ? 'file:///private/var/' + uri.slice('file:///var/'.length) : null;
     return counterpart !== null && isAttachmentFileInUse(counterpart, owners);
 };
-/** Native-held callbacks complete their action before JSC's return-time microtask drain. */
+
 const retireAttachmentDiscard = (json: string, keepCallback: () => string, retireCallback: () => string, availability = false): string => {
     if (typeof keepCallback !== 'function' || typeof retireCallback !== 'function') throw attachmentDiscardInvalid();
     const input = attachmentDiscardInput(json, availability), before = settledAttachmentDiscardState();
@@ -1334,7 +2510,7 @@ const retireAttachmentDiscard = (json: string, keepCallback: () => string, retir
     let result: unknown;
     try { result = inUse ? keepCallback() : retireCallback(); }
     catch { throw attachmentDiscardNotReady(); }
-    // Never retry/fall back to the other callback after a refused/failed branch.
+
     try {
         if (typeof result !== 'string' || result.length > 1024 || new TextEncoder().encode(result).byteLength > 1024) {
             throw attachmentDiscardInvalid();
@@ -1374,9 +2550,9 @@ type AttachmentSavePlan = Readonly<{
     settlementPlan: ReadonlyArray<Readonly<(ReturnType<typeof contract.validatePreparedOwnedEditorFileEditTaskDraftSave>
         & { ok: true })['value']['settlementPlan'][number]>>;
 }>;
-// One detached historical plan only; current storage and references are never retained.
+
 let attachmentSavePlan: AttachmentSavePlan | null = null;
-/** Private same-turn Save settlement fence; callbacks carry native-held proofs. */
+
 const retireAttachmentFileEditSave = (json: string, referencedCallback: () => string,
     taskChangedCallback: () => string, retireCallback: () => string): string => {
     if ([referencedCallback, taskChangedCallback, retireCallback].some((callback) => typeof callback !== 'function')) {
@@ -1427,7 +2603,7 @@ const retireAttachmentFileEditSave = (json: string, referencedCallback: () => st
             || plan.settlementPlan[index].reason === 'uncommitted-draft')) throw attachmentSaveInvalid();
     } catch { throw attachmentSaveInvalid(); }
     const selected = plan.settlementPlan[index];
-    // Out-of-order and failed last calls safely revalidate on a later retry.
+
     if (index === plan.settlementPlan.length - 1) attachmentSavePlan = null;
     const before = settledAttachmentSaveState();
     const tasks = before.state._allTasks, projects = before.state._allProjects, taskMap = before.state._tasksById;
@@ -1447,7 +2623,7 @@ const retireAttachmentFileEditSave = (json: string, referencedCallback: () => st
     let result: unknown;
     try { result = referenced ? referencedCallback() : moved ? taskChangedCallback() : retireCallback(); }
     catch { throw attachmentSaveNotReady(); }
-    // No fallback or second callback, including malformed/failed acknowledgment.
+
     try {
         if (typeof result !== 'string' || result.length > 1024 || new TextEncoder().encode(result).byteLength > 1024) throw attachmentSaveInvalid();
         const value = JSON.parse(result) as Record<string, unknown> | null;
@@ -1460,8 +2636,8 @@ const retireAttachmentFileEditSave = (json: string, referencedCallback: () => st
         return result;
     } catch { throw attachmentSaveInvalid(); }
 };
-// Pure validation remains available before boot; applying an owned Save also
-// requires the current iOS file capability and stable personal workspace.
+
+
 const requireOwnedAttachmentSave = (): void => {
     if (globalThis.__mindwtrHostPlatform !== 'ios' || !localAttachments
         || isSandboxMode() || isWorkspaceTransitionActive()) {
@@ -1497,7 +2673,7 @@ const iosReminderEffects = createIosReminderMethods({
     },
     read: () => keyValue.multiGet([REMINDER_ALARM_MAP_STORAGE_KEY, NATIVE_REMINDER_STATE_STORAGE_KEY]),
     plan: (input) => contract.planReminderAlarms(input),
-    acknowledged: async (mode, scheduled, cancelled, collapsed, rearmed) => {
+    acknowledged: async (mode, scheduled, cancelled, collapsed, rearmed, zoned) => {
         await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
             message: 'Native iOS reminders reconciled',
             context: { releaseCheck: 'v1.3.5/ios-reminder-apply', outcome: 'confirmed', mode,
@@ -1510,6 +2686,10 @@ const iosReminderEffects = createIosReminderMethods({
         if (rearmed > 0) await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
             message: 'Native iOS missing Snoozes recovered',
             context: { releaseCheck: 'v1.3.5/ios-reminder-snooze-recovery', count: String(rearmed) },
+        }, { force: true });
+        if (zoned > 0) await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
+            message: 'Native iOS time-zoned repeating reminders admitted',
+            context: { releaseCheck: 'v1.3.7/ios-reminder-time-zone', count: String(zoned) },
         }, { force: true });
     },
     observation: {
@@ -1538,6 +2718,192 @@ const iosSearchSavedState = () => {
         || !contract.getDataSettings().ok) throw iosSearchUnavailable();
     return { adapter, generation: status.generation, state: useTaskStore.getState() };
 };
+const readIOSWidgetNext = (includeActions: boolean) => {
+    const unavailable = () => new Error('NOT_READY: Native iOS widget Next snapshot is unavailable');
+    const adapter = bootAdapter;
+    const assertReady = () => {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !adapter || bootAdapter !== adapter
+            || getStorageAdapter() !== adapter || isSandboxMode() || isWorkspaceTransitionActive()) throw unavailable();
+        requireSaved();
+        const status = getPersistenceStatus();
+        if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+            || !contract.getDataSettings().ok) throw unavailable();
+        return status;
+    };
+    const before = assertReady(), state = useTaskStore.getState();
+    const data = { tasks: state._allTasks, projects: state._allProjects, sections: state._allSections,
+        areas: state._allAreas, settings: state.settings };
+    const language = unwrap(contract.getStrings({ keys: [] })).language, locale = iosVoiceSystemLocale;
+    const focusFilter = getFocusWidgetFilter();
+    let focusFilterKey: string;
+    type Item = { id: string; title: string; contextLabel: string | null; dueLabel: string | null;
+        dueTone: 'overdue' | 'today' | 'normal' };
+    let actions: { tokens: (string | null)[]; completeLabel: string; undoLabel: string } | null = null;
+    let result: { version: 1; title: string; emptyMessage: string; totalCount: number; items: Item[] };
+    try {
+        focusFilterKey = focusWidgetFilterKey(focusFilter);
+        const payload = createWidgetPayloadProjection(data, language,
+            { listIds: ['next'], systemLocale: locale ?? undefined, focusFilter }).build(IOS_WIDGET_FAMILY_CACHE_ITEMS.medium);
+        const next = payload.lists.next;
+        const text = (value: unknown, limit: number, nonempty = false) =>
+            typeof value === 'string' && value.length <= limit && (!nonempty || value.length > 0);
+        if (!next || !text(next.title, 16_384) || !text(payload.emptyMessage, 16_384)
+            || !Array.isArray(next.items) || next.items.length > IOS_WIDGET_FAMILY_CACHE_ITEMS.medium
+            || !Number.isSafeInteger(next.totalCount) || next.totalCount < next.items.length) throw new Error();
+        const identities = new Set<string>();
+        const items = next.items.map((row): Item => {
+            if (!text(row.id, 500, true) || identities.has(row.id) || !text(row.title, 16_384)
+                || (row.contextLabel !== null && !text(row.contextLabel, 16_384))
+                || (row.dueLabel !== null && !text(row.dueLabel, 100))
+                || !['overdue', 'today', 'normal'].includes(row.dueTone)) throw new Error();
+            identities.add(row.id);
+            return { id: row.id, title: row.title, contextLabel: row.contextLabel,
+                dueLabel: row.dueLabel, dueTone: row.dueTone };
+        });
+        result = { version: 1, title: next.title, emptyMessage: payload.emptyMessage, totalCount: next.totalCount, items };
+        if (includeActions) {
+            if (!text(payload.completeLabel, 16_384, true) || !text(payload.undoLabel, 16_384, true)) throw new Error();
+            const tokens = next.items.map((row) => {
+                if (row.completionToken === undefined) return null;
+                if (typeof row.completionToken !== 'string'
+                    || new TextEncoder().encode(row.completionToken).byteLength > 8192) throw new Error();
+                const token: unknown = JSON.parse(row.completionToken);
+                if (!Array.isArray(token) || token.length !== 4 || token[0] !== row.id) throw new Error();
+                return row.completionToken;
+            });
+            actions = { tokens, completeLabel: payload.completeLabel, undoLabel: payload.undoLabel };
+        }
+        if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 1024 * 1024) throw new Error();
+    } catch { throw new Error('INVALID_INPUT: Native iOS widget Next snapshot is invalid'); }
+    const after = assertReady(), current = useTaskStore.getState();
+    let sameFilter = false;
+    try { sameFilter = focusWidgetFilterKey(getFocusWidgetFilter()) === focusFilterKey; } catch { }
+    if (!sameFilter || before.generation !== after.generation || current._allTasks !== data.tasks || current._allProjects !== data.projects
+        || current._allSections !== data.sections || current._allAreas !== data.areas || current.settings !== data.settings
+        || unwrap(contract.getStrings({ keys: [] })).language !== language || iosVoiceSystemLocale !== locale) throw unavailable();
+    try {
+        logInfo('Native iOS Next widget snapshot', { scope: 'native-ios', force: true,
+            context: { releaseCheck: 'v1.3.9/ios-widget-next-snapshot', count: String(result.items.length) } });
+    } catch { }
+    return actions ? { snapshot: JSON.stringify(result), ...actions } : result;
+};
+
+
+type IOSWidgetFamilySnapshot = { version: 1; payloads: Record<keyof typeof IOS_WIDGET_FAMILY_CACHE_ITEMS, string> };
+const readIOSWidgetFamilies = (json: string): IOSWidgetFamilySnapshot => {
+    const invalid = () => new Error('INVALID_INPUT: Native iOS widget family snapshot is invalid');
+    const unavailable = () => new Error('NOT_READY: Native iOS widget family snapshot is unavailable');
+    let input: unknown;
+    try {
+        if (typeof json !== 'string' || json.length > 128) throw invalid();
+        input = JSON.parse(json);
+    } catch { throw invalid(); }
+    if (!record(input) || !exact(input, ['systemColorScheme'])
+        || (input.systemColorScheme !== 'light' && input.systemColorScheme !== 'dark')) throw invalid();
+    const systemColorScheme = input.systemColorScheme;
+    const adapter = bootAdapter;
+    const assertReady = () => {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !adapter || bootAdapter !== adapter
+            || getStorageAdapter() !== adapter || isSandboxMode() || isWorkspaceTransitionActive()) throw unavailable();
+        requireSaved();
+        const status = getPersistenceStatus();
+        if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+            || !contract.getDataSettings().ok) throw unavailable();
+        return status;
+    };
+    const before = assertReady(), state = useTaskStore.getState();
+    const data = { tasks: state._allTasks, projects: state._allProjects, sections: state._allSections,
+        areas: state._allAreas, settings: state.settings };
+    const language = unwrap(contract.getStrings({ keys: [] })).language, locale = iosVoiceSystemLocale;
+    const focusFilter = getFocusWidgetFilter();
+    let filterKey: string;
+    let result: IOSWidgetFamilySnapshot;
+    try {
+        filterKey = focusWidgetFilterKey(focusFilter);
+        const projection = createPublishedWidgetProjection(createWidgetPayloadProjection(data, language,
+            iosWidgetProjectionOptions({ systemColorScheme, systemLocale: locale ?? undefined, focusFilter })), language);
+        result = { version: 1, payloads: {
+            default: JSON.stringify(projection.build(IOS_WIDGET_FAMILY_CACHE_ITEMS.default)),
+            small: JSON.stringify(projection.build(IOS_WIDGET_FAMILY_CACHE_ITEMS.small)),
+            medium: JSON.stringify(projection.build(IOS_WIDGET_FAMILY_CACHE_ITEMS.medium)),
+            large: JSON.stringify(projection.build(IOS_WIDGET_FAMILY_CACHE_ITEMS.large)),
+            extraLarge: JSON.stringify(projection.build(IOS_WIDGET_FAMILY_CACHE_ITEMS.extraLarge)),
+        } };
+        if (!isNativeJsonWithinBytes({ ok: true, value: result })) throw invalid();
+    } catch { throw invalid(); }
+    const after = assertReady(), current = useTaskStore.getState();
+    let sameFilter = false;
+    try { sameFilter = focusWidgetFilterKey(getFocusWidgetFilter()) === filterKey; } catch {}
+    if (!sameFilter || before.generation !== after.generation || current._allTasks !== data.tasks || current._allProjects !== data.projects
+        || current._allSections !== data.sections || current._allAreas !== data.areas || current.settings !== data.settings
+        || unwrap(contract.getStrings({ keys: [] })).language !== language || iosVoiceSystemLocale !== locale) throw unavailable();
+    try {
+        logInfo('Native iOS widget families read', { scope: 'native-ios', force: true,
+            context: { releaseCheck: 'v1.3.9/ios-widget-family-read', operation: 'read', outcome: 'ready' } });
+    } catch {}
+    return result;
+};
+
+
+const readIOSWatchSnapshot = async () => {
+    const unavailable = () => new Error('NOT_READY: Native iOS Watch snapshot is unavailable');
+    const adapter = bootAdapter;
+    const assertReady = () => {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !adapter || bootAdapter !== adapter
+            || getStorageAdapter() !== adapter || !adapter.concurrentWritesGuarded
+            || isSandboxMode() || isWorkspaceTransitionActive()) throw unavailable();
+        requireSaved();
+        const status = getPersistenceStatus();
+        if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+            || !contract.getDataSettings().ok) throw unavailable();
+        return status;
+    };
+    const before = assertReady(), state = useTaskStore.getState();
+    const data = { tasks: state._allTasks, projects: state._allProjects, sections: state._allSections,
+        areas: state._allAreas, settings: state.settings };
+    const language = unwrap(contract.getStrings({ keys: [] })).language, locale = iosVoiceSystemLocale;
+    const focusFilter = getFocusWidgetFilter(), filterKey = focusWidgetFilterKey(focusFilter);
+    const requireBaseline = async () => {
+        assertReady();
+        if (!adapter || !await adapter.readRowBaseline())
+            throw new Error('STALE_REVISION: Watch saved data changed; reload before reading');
+    };
+    await requireBaseline();
+    if (!adapter) throw unavailable();
+    const saved = (await adapter.readPomodoroSession()).state?.session;
+    const now = new Date(), options = data.settings.gtd?.pomodoro;
+    const timerState = saved ? { ...saved.timerState,
+        remainingSeconds: saved.timerState.isRunning
+            ? Math.max(0, Math.ceil((Date.parse(saved.phaseEndsAt ?? '') - now.getTime()) / 1000))
+            : saved.timerState.remainingSeconds,
+    } : createPomodoroState(sanitizePomodoroDurations(options?.customDurations));
+    const widget = createWidgetPayloadProjection(data, language,
+        { focusFilter, systemLocale: locale ?? undefined }).build(WATCH_FOCUS_TASK_LIMIT);
+    const byId = new Map(data.tasks.map((task) => [task.id, task]));
+    const focus = widget.sections.flatMap((section) => section.items.map(({ id, title }) => {
+        const task = byId.get(id);
+        return { id, title, createdAt: task?.createdAt, description: task?.description, checklist: task?.checklist };
+    }));
+    const linked = options?.linkTask === true && saved?.selectedTaskId
+        ? data.tasks.find((task) => task.id === saved.selectedTaskId && !task.deletedAt
+            && !isTaskCancelled(task) && isTaskActionable(task)) : undefined;
+    const result = buildWatchApplicationContext({ focus,
+        pomodoro: { timerState, phaseEndsAt: saved?.phaseEndsAt, selectedTaskId: saved?.selectedTaskId, isHydrating: false },
+        linkedTask: linked, completionAlertEnabled: options?.completionAlert !== false, now });
+    await requireBaseline();
+    const after = assertReady(), current = useTaskStore.getState();
+    if (before.generation !== after.generation || current.lastDataChangeAt !== state.lastDataChangeAt
+        || current._allTasks !== data.tasks || current._allProjects !== data.projects
+        || current._allSections !== data.sections || current._allAreas !== data.areas || current.settings !== data.settings
+        || focusWidgetFilterKey(getFocusWidgetFilter()) !== filterKey
+        || unwrap(contract.getStrings({ keys: [] })).language !== language || iosVoiceSystemLocale !== locale) throw unavailable();
+    try {
+        logInfo('Native iOS Watch snapshot read', { scope: 'native-ios', force: true,
+            context: { releaseCheck: 'v1.3.9/ios-watch-snapshot', operation: 'read', outcome: 'ready' } });
+    } catch { }
+    return result;
+};
+
 let iosSearchPrevious: { inputs: unknown[]; ready: boolean; now: number; day: string; zone: string;
     revision: number; nextAt: number | null } | null = null;
 const requireReminderSignal = (signal: AbortSignal) => {
@@ -1603,7 +2969,7 @@ const reminderCompletionRequest = (json: string): unknown => {
 };
 
 globalThis.MindwtrHost = {
-    /** Private fixed canonical plaintext retirement receipt; no secret inputs. */
+
     nativeLegacySecretRetirementDelivered(): void {
         if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter
             || isSandboxMode() || isWorkspaceTransitionActive()) return;
@@ -1612,9 +2978,9 @@ globalThis.MindwtrHost = {
                 scope: 'native-ios', force: true,
                 context: { releaseCheck: 'v1.3.5/ios-legacy-secret-retirement', operation: 'legacy-secret-retirement', outcome: 'delivered' },
             });
-        } catch { /* A fixed diagnostic never changes the storage result. */ }
+        } catch {                                                            }
     },
-    /** Private fixed storage receipt; never carries a setting name or value. */
+
     nativeDeviceStorageDelivered(): void {
         if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter
             || isSandboxMode() || isWorkspaceTransitionActive()) return;
@@ -1623,9 +2989,9 @@ globalThis.MindwtrHost = {
                 scope: 'native-ios', force: true,
                 context: { releaseCheck: 'v1.3.5/ios-device-storage', operation: 'device-storage', outcome: 'delivered' },
             });
-        } catch { /* A fixed diagnostic never changes the storage result. */ }
+        } catch {                                                            }
     },
-    /** Private fixed primitive receipt; never carries input or derived bytes. */
+
     nativeCryptoDelivered(): void {
         if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter
             || isSandboxMode() || isWorkspaceTransitionActive()) return;
@@ -1634,9 +3000,9 @@ globalThis.MindwtrHost = {
                 scope: 'native-ios', force: true,
                 context: { releaseCheck: 'v1.3.5/ios-sync-crypto', operation: 'sync-crypto', outcome: 'delivered' },
             });
-        } catch { /* A fixed diagnostic never changes the primitive result. */ }
+        } catch {                                                              }
     },
-    /** Private fixed receipt; never carries a credential or account. */
+
     nativeSecretDelivered(): void {
         if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter
             || isSandboxMode() || isWorkspaceTransitionActive()) return;
@@ -1645,9 +3011,9 @@ globalThis.MindwtrHost = {
                 scope: 'native-ios', force: true,
                 context: { releaseCheck: 'v1.3.5/ios-secure-storage', operation: 'secure-storage', outcome: 'delivered' },
             });
-        } catch { /* A fixed diagnostic never changes the transport result. */ }
+        } catch {                                                              }
     },
-    /** Private fixed transport receipt; no request data or domain authority. */
+
     nativeHTTPDelivered(): void {
         if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter
             || isSandboxMode() || isWorkspaceTransitionActive()) return;
@@ -1656,9 +3022,9 @@ globalThis.MindwtrHost = {
                 scope: 'native-ios', force: true,
                 context: { releaseCheck: 'v1.3.5/ios-http-transport', operation: 'http-transport', outcome: 'delivered' },
             });
-        } catch { /* A fixed diagnostic never changes the transport result. */ }
+        } catch {                                                              }
     },
-    /** Read-only upgrade preflight, before the native host opens SQLite. */
+
     legacyCheck(legacyState: string, legacyBackup: string): string {
         return submit(async () => {
             const state = JSON.parse(legacyState) as LegacyState;
@@ -1675,21 +3041,22 @@ globalThis.MindwtrHost = {
             ? { ok: true, value: slot.value }
             : { ok: false, error: slot.error });
     },
-    /**
-     * `legacyState` is "" for the dev database; else LegacyRnStoreGuard's reading of RN's AsyncStorage.
-     * `writeJournal` is "journaled" from a host that journals every write (Kotlin's WriteJournal); iOS sends nothing.
-     */
-    boot(legacyState: string, legacyBackup: string, writeJournal = ''): string {
-        return boot(legacyState, legacyBackup, false, writeJournal === 'journaled');
+
+
+    boot(legacyState: string, legacyBackup: string, writeJournal = '', budgetJSON = ''): string {
+        return boot(legacyState, legacyBackup, false, writeJournal === 'journaled', budgetJSON);
     },
-    /** Private iOS journal recovery: no dynamic load maintenance before exact replay. */
-    bootRecovery(legacyState: string, legacyBackup: string): string {
-        return boot(legacyState, legacyBackup, true);
+
+
+    bootRecovery(legacyState: string, legacyBackup: string, writeJournal = '', budgetJSON = ''): string {
+        return boot(legacyState, legacyBackup, true, writeJournal === 'journaled', budgetJSON);
     },
-    /** The native host calls this after durable journal cleanup, before exposing the UI. */
+
     resumeActivation(): string {
         return submit(async () => {
             if (!bootAdapter) throw new Error('Native recovery adapter unavailable');
+
+            if (!debugControl('no-activation-storage')) await sizeStorageTimeout(bootAdapter);
             return activateAndVerify(bootAdapter);
         });
     },
@@ -1699,34 +3066,47 @@ globalThis.MindwtrHost = {
             return unwrap(contract.getInboxWindow({ offset, limit, revision: revision || undefined }));
         });
     },
-    /** The RN Inbox screen model: core owns the toolbar, scope, empty state and rows. */
+
     inboxView(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.getInboxView(JSON.parse(json)));
         });
     },
-    /**
-     * `controls` is the control state Kotlin keeps and `controlEdit` a control's edit, as JSON; "" leaves either out, so a read
-     * that sends neither keeps the flat Focus it always had.
-     */
-    focus(limit: number, controls = '', controlEdit = ''): string {
+
+
+    focus(limit: number, controls = '', controlEdit = '', folds = ''): string {
         return submit(async () => {
             requireSaved();
-            const focus = unwrap(contract.getFocus({ limit, ...(controls ? { controls: JSON.parse(controls) } : {}), ...(controlEdit ? { controlEdit: JSON.parse(controlEdit) } : {}) }));
-            // The Focus screen's filter and sort, handed to the widget's Focus list as RN's Focus screen hands it (setFocusWidgetFilter).
+            const focus = unwrap(contract.getFocus({ limit, ...(controls ? { controls: JSON.parse(controls) } : {}), ...(controlEdit ? { controlEdit: JSON.parse(controlEdit) } : {}),
+                ...(folds ? { collapsedGroupIds: JSON.parse(folds) } : {}) }));
+            cacheIOSFocusWidgetFilter(focus);
             widgets?.focusFilter(focus.controls?.widgetFilter);
             return focus;
         });
     },
-    /** Core checks `key` and refuses a stale `revision`; Kotlin then reads Focus again from offset 0. `controls` as for focus. */
-    focusWindow(key: string, offset: number, limit: number, revision: string, controls = ''): string {
+
+    focusWindow(key: string, offset: number, limit: number, revision: string, controls = '', folds = ''): string {
         return submit(async () => {
             requireSaved();
-            return unwrap(contract.getFocusSectionWindow({ key: key as FocusTaskSectionKey, offset, limit, revision, ...(controls ? { controls: JSON.parse(controls) } : {}) }));
+            return unwrap(contract.getFocusSectionWindow({ key: key as FocusTaskSectionKey, offset, limit, revision, ...(controls ? { controls: JSON.parse(controls) } : {}),
+                ...(folds ? { collapsedGroupIds: JSON.parse(folds) } : {}) }));
         });
     },
-    /** The task's View tab; core formats its fields, Markdown and checklist windows. */
+    pomodoroTasks(json: string): string {
+        return submit(async () => {
+            requireSaved();
+            const input = editorJson(json) as Parameters<typeof contract.getPomodoroTaskWindow>[0];
+            const page = unwrap(contract.getPomodoroTaskWindow(input));
+            if (globalThis.__mindwtrHostPlatform === 'ios' && input.offset === 0) {
+                logInfo('Native Pomodoro task choices loaded', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-pomodoro-picker', outcome: 'confirmed' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            }
+            return page;
+        });
+    },
+
     taskView(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -1768,7 +3148,7 @@ globalThis.MindwtrHost = {
             return unwrap(await contract.openAttachment({ owner: { kind: 'project', projectId }, attachmentId: attachmentId!, urlOnly: true }));
         });
     },
-    /** Pure classification of original settled metadata; Swift alone resolves and proves the current URI. */
+
     taskLocalFileOpenPlan(json: string, available: boolean): string {
         return submit(async () => {
             requireSaved();
@@ -1782,8 +3162,8 @@ globalThis.MindwtrHost = {
             const matches = owner.attachments.filter((item) => item?.id === input.attachmentId);
             const saved = (task?.attachments ?? []).filter((item) => item.id === input.attachmentId);
             const selected = matches[0], durable = saved[0];
-            // SQLite hydration owns optional undefined fields which JSON omits.
-            // Compare that wire shape; null, false and every defined value remain exact.
+
+
             const storedFields = durable ? Object.entries(durable).filter(([, value]) => value !== undefined) : [];
             if (view.id !== owner.taskId || !task || task.deletedAt || task.purgedAt
                 || matches.length !== 1 || saved.length !== 1 || selected.kind !== 'file' || selected.deletedAt || !selected.uri
@@ -1796,7 +3176,7 @@ globalThis.MindwtrHost = {
                 : { status: 'unavailable', message: getAttachmentResolutionMessage({ status: 'unavailable' }, t), update: null, open: null };
         });
     },
-    /** Read-only classification after Swift observes the current managed file. */
+
     projectLocalFileOpenPlan(json: string, available: boolean): string {
         return submit(async () => {
             requireSaved();
@@ -1848,7 +3228,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.getTaskEditorDraftDirection(JSON.parse(json)));
         });
     },
-    /** Strict read of an editor snapshot's touched opening bases, including unresolved raw-only inputs. */
+
     taskEditorResumeCheck(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -1861,7 +3241,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.getTaskDraftDestinationPicker(JSON.parse(json)));
         });
     },
-    /** The checklist and live attachment titles of core's getTask, which the editor shows read-only. */
+
     editorContent(id: string): string {
         return submit(async () => {
             requireSaved();
@@ -1872,47 +3252,65 @@ globalThis.MindwtrHost = {
             };
         });
     },
-    /** `json` is `{ id, draft, checklist, edit? }`, passed to core's editTaskChecklist unchanged: one checklist edit on the draft. Nothing is written. */
+
     editChecklist(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.editTaskChecklist(JSON.parse(json)));
         });
     },
-    /** `json` is `{ id, requestId }`: RN's Reset checklist, written at once. A repeat of the request after a failed save only finishes it. */
+
     resetChecklist(json: string): string {
         return submit(async () => taskResult('resetChecklist', await contract.resetTaskChecklist(JSON.parse(json))));
     },
-    /** `json` is `{ id, draft, edit? }`, passed to core's editTaskDraft unchanged: the model for the edited draft. */
+
     editDraft(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.editTaskDraft(JSON.parse(json)));
         });
     },
-    /** Core's suggestions for the whole text of a context, tag, or person input. */
+
     editorSuggestions(id: string, field: string, query: string, limit: number): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.getTaskEditorSuggestions({ id, field: field as 'contexts' | 'tags' | 'assignedTo', query, limit }));
         });
     },
-    /** Core's setLanguage. "" is no stored language. Labels are not stored data, so no failed save blocks them. */
+
     language(stored: string, system: string): string {
         storedLanguage = stored || null;
         return submit(async () => {
             const resolved = unwrap(await contract.setLanguage({ storedLanguage: stored || null, systemLocale: system || null }));
+            if (globalThis.__mindwtrHostPlatform === 'ios') iosVoiceSystemLocale = system || null;
             iosReminderEffects.languageResolved(resolved.language); return resolved;
         });
     },
-    /**
-     * Publishes the home-screen widgets now when what they show changed: after a CoreWork job and when the app comes to the
-     * front (host-widgets.ts). `{ published }`.
-     */
-    widgetsRefresh(): string {
-        return submit(async () => ({ published: widgets?.publish() ?? false }));
+
+
+    widgetsRefresh(mode = ''): string {
+        return submit(async () => ({ published: (mode === 'leave' ? widgets?.flush() : widgets?.publish()) ?? false }));
     },
-    /** Opt-in iOS read: a settled synced language wins; the legacy device-key route above is unchanged. */
+
+
+    saveWarm(count: number): string {
+        return submit(async () => {
+            const adapter = bootAdapter;
+            if (!adapter) return { done: true };
+            const slice = Math.max(1, Math.min(2_000, Number(count) || 0));
+            const tasks = useTaskStore.getState()._allTasks;
+            if (saveWarmTasks !== tasks) { saveWarmTasks = tasks; saveWarmFrom = 0; }
+            if (saveWarmFrom < tasks.length) {
+                saveWarmFrom = warmTaskRowEntries(tasks, saveWarmFrom, slice);
+                return { done: false };
+            }
+            const done = adapter.warmReadFingerprints(slice);
+
+            if (done) saveWarmTasks = null;
+            return { done };
+        });
+    },
+
     languageSaved(stored: string, system: string): string {
         return submit(async () => {
             if (!bootAdapter) throw new Error('Native storage has not been loaded and validated');
@@ -1925,6 +3323,7 @@ globalThis.MindwtrHost = {
             const synced = typeof raw === 'string' && isSupportedLanguage(raw) ? raw : null;
             const winner = synced ?? (stored || null);
             const resolved = unwrap(await contract.setLanguage({ storedLanguage: winner, systemLocale: system || null }));
+            if (globalThis.__mindwtrHostPlatform === 'ios') iosVoiceSystemLocale = system || null;
             iosReminderEffects.languageResolved(resolved.language);
             const after = getPersistenceStatus();
             const deviceWrites = synced !== null && synced === state.settings?.language
@@ -1934,16 +3333,30 @@ globalThis.MindwtrHost = {
             return { language: resolved.language, deviceWrites };
         });
     },
-    /** `keysJson` is a JSON array of core i18n keys. */
+    taskEditorSectionHelp(): string {
+        return submit(async () => {
+            const copy = unwrap(contract.getStrings({ keys: [
+                'onboarding.help', 'onboarding.readGuide', 'onboarding.guideError',
+                ONBOARDING_TOPIC_COPY.scheduling.title, ONBOARDING_TOPIC_COPY.scheduling.body,
+                ONBOARDING_TOPIC_COPY.details.title, ONBOARDING_TOPIC_COPY.details.body,
+            ] }));
+            const topic = (id: 'scheduling' | 'details') => ({
+                title: copy.strings[ONBOARDING_TOPIC_COPY[id].title],
+                body: copy.strings[ONBOARDING_TOPIC_COPY[id].body],
+                url: getOnboardingGuideUrl(id, 'mobile', copy.language),
+            });
+            return { help: copy.strings['onboarding.help'], readGuide: copy.strings['onboarding.readGuide'],
+                guideError: copy.strings['onboarding.guideError'], scheduling: topic('scheduling'), details: topic('details') };
+        });
+    },
     strings(keysJson: string): string {
         return submit(async () => unwrap(contract.getStrings({ keys: JSON.parse(keysJson) as string[] })));
     },
-    /**
-     * The React Native app's theme, resolved as its theme-context.tsx does: the synced
-     * `settings.theme` wins, then RN's device-local `@mindwtr_theme` ([stored], "" for none),
-     * then the system. Core classifies the mode and owns the status and priority hues;
-     * Kotlin holds only the mobile palettes. Cosmetic, so no failed save blocks it.
-     */
+
+
+    swipeTrays(): string {
+        return submit(async () => unwrap(contract.getTaskRowSwipeTrays()));
+    },
     theme(stored: string): string {
         return submit(async () => {
             const state = useTaskStore.getState();
@@ -1953,8 +3366,8 @@ globalThis.MindwtrHost = {
             const preset = descriptor?.statusPreset ?? null;
             const lightPreset = resolveThemeStatusPreset(mode as AppTheme, 'light');
             const darkPreset = resolveThemeStatusPreset(mode as AppTheme, 'dark');
-            // A failed or in-flight save can leave the store showing an optimistic theme.
-            // Only the canonical saved Settings row may authorize local mirrors.
+
+
             let deviceWrites: ReturnType<typeof getGeneralSettingsDeviceWrites> = [];
             const generation = getPersistenceStatus().generation;
             const saved = await savedSettingsIfSettled(state.settings);
@@ -1975,22 +3388,20 @@ globalThis.MindwtrHost = {
                 },
                 material: mode === 'material3-light' || mode === 'material3-dark',
                 scheme: descriptor?.scheme === 'system' ? null : descriptor?.scheme ?? null,
-                // Core's status palettes ({ bg, text, border } per status): RN's badges, glyphs, and Done swipe.
+
                 status: {
                     light: STATUS_COLORS_BY_THEME[lightPreset ?? 'light'],
                     dark: STATUS_COLORS_BY_THEME[darkPreset ?? 'dark'],
                 },
-                priority: TASK_PRIORITY_COLORS,
+                priority: getTaskPriorityColors(lightPreset),
             };
         });
     },
-    /**
-     * RN's app lock gate: core's General row for it, whose `value` is `settings.security.mobileAppLockEnabled` (per device).
-     * The gate guards the screens and shows no stored data, so no failed save blocks it: a lock turned on whose save is owed
-     * still locks.
-     */
+
+
     appLock(): string {
-        return submit(async () => unwrap(contract.getGeneralSettings({})).privacy.appLock);
+        return submit(async () => ({ ...unwrap(contract.getGeneralSettings({})).privacy.appLock,
+            relockDelayMinutes: resolveMobileAppLockRelockDelayMinutes(useTaskStore.getState().settings?.security?.mobileAppLockRelockDelayMinutes) }));
     },
     projects(): string {
         return submit(async () => {
@@ -1998,7 +3409,14 @@ globalThis.MindwtrHost = {
             return unwrap(contract.getProjects());
         });
     },
-    /** Native Projects quick-add choices, including the current Area filter default. */
+
+    projectList(): string {
+        return submit(async () => {
+            requireSaved();
+            return unwrap(contract.getProjects({ moves: true }));
+        });
+    },
+
     projectCreateOptions(): string {
         return submit(async () => {
             requireSaved();
@@ -2011,14 +3429,14 @@ globalThis.MindwtrHost = {
             return unwrap(contract.projectCreateRetryOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation; the host journals the exact envelope before commit. */
+
     projectCreatePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.prepareProjectCreate(JSON.parse(json)));
         });
     },
-    /** Pure validation also runs during cold recovery before SQLite is opened. */
+
     projectCreateValidate(json: string): string {
         return submit(async () => unwrap(contract.validatePreparedProjectCreate(JSON.parse(json))));
     },
@@ -2037,7 +3455,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectSectionCreateOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectSectionCreatePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2062,7 +3480,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectSectionRenameOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectSectionRenamePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2087,7 +3505,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectSectionDeleteOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectSectionDeletePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2112,7 +3530,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectSectionOrderOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectSectionOrderPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2143,7 +3561,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeAreaCreateOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     areaCreatePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2156,7 +3574,7 @@ globalThis.MindwtrHost = {
     areaCreateCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedAreaCreate(JSON.parse(json))));
     },
-    /** Settings Manage uses the same prepared Area policy with its own journal method. */
+
     manageAreaCreateCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedAreaCreate(JSON.parse(json))));
     },
@@ -2172,7 +3590,34 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probePersonCreateOutcome(JSON.parse(json)));
         });
     },
-    /** Explicit rebuild; a future publisher owns coalescing and time-boundary invalidation. */
+    iosWidgetFamilySnapshot(json: string): string {
+        const count = arguments.length;
+        return submit(async () => {
+            if (count !== 1) throw new Error('INVALID_INPUT: Widget family snapshot takes one appearance object');
+            return readIOSWidgetFamilies(json);
+        });
+    },
+    iosWidgetNextSnapshot(): string {
+        const count = arguments.length;
+        return submit(async () => {
+            if (count !== 0) throw new Error('INVALID_INPUT: Widget Next snapshot takes no arguments');
+            return readIOSWidgetNext(false);
+        });
+    },
+    iosWatchSnapshot(): string {
+        const count = arguments.length;
+        return submit(async () => {
+            if (count !== 0) throw new Error('INVALID_INPUT: Watch snapshot takes no arguments');
+            return readIOSWatchSnapshot();
+        });
+    },
+    iosWidgetNextActionSnapshot(): string {
+        const count = arguments.length;
+        return submit(async () => {
+            if (count !== 0) throw new Error('INVALID_INPUT: Widget Next actions snapshot takes no arguments');
+            return readIOSWidgetNext(true);
+        });
+    },
     iosSearchSnapshot(): string {
         const argumentCount = arguments.length;
         return submit(async () => {
@@ -2221,7 +3666,7 @@ globalThis.MindwtrHost = {
             try {
                 logInfo('Native iOS search snapshot', { scope: 'native-ios', force: true,
                     context: { releaseCheck: 'v1.3.5/ios-search-snapshot', count: String(result.items.length) } });
-            } catch { /* Diagnostics cannot fail a successful readonly projection. */ }
+            } catch {                                                                 }
             return result;
         });
     },
@@ -2230,14 +3675,14 @@ globalThis.MindwtrHost = {
         if (globalThis.__mindwtrHostPlatform !== 'ios') throw iosSearchUnavailable();
         const state = useTaskStore.getState(), now = new Date(), nowMs = now.getTime();
         const inputs = [state._allTasks, state._allProjects, state._allSections, state._allAreas, state.settings,
-            bootAdapter, getStorageAdapter()];
+            bootAdapter, getStorageAdapter(), focusWidgetFilterKey(getFocusWidgetFilter())];
         const day = `${now.getFullYear()}/${now.getMonth()}/${now.getDate()}`;
         let zone = '', saved: ReturnType<typeof iosSearchSavedState> | null = null;
         try {
             zone = `${now.getTimezoneOffset()}/${new Intl.DateTimeFormat().resolvedOptions().timeZone}`;
             if (!Number.isFinite(nowMs)) throw iosSearchUnavailable();
             saved = iosSearchSavedState();
-        } catch { /* Uncertain canonical state never admits publication. */ }
+        } catch {                                                           }
         let ready = saved !== null;
         const previous = iosSearchPrevious;
         const changed = !previous || inputs.some((input, index) => input !== previous.inputs[index])
@@ -2262,6 +3707,33 @@ globalThis.MindwtrHost = {
         iosSearchPrevious = { inputs, ready, now: nowMs, day, zone, revision, nextAt };
         return JSON.stringify({ ready, revision, nextAt });
     },
+    iosGmailLifecycle(appState: string): string {
+        const count = arguments.length;
+        return submit(async () => {
+            if (count !== 1 || (appState !== 'active' && appState !== 'background')) throw new Error('INVALID_INPUT: Gmail lifecycle takes active or background');
+            const gmail = requireIosGmail();
+            if (iosGmailStarted) gmail.appState(appState);
+            else { iosGmailStarted = true; gmail.start(appState); }
+            return null;
+        });
+    },
+    iosGmailRequest(name: string, json: string): string {
+        const count = arguments.length;
+        return submit(async () => {
+            if (count !== 2 || typeof name !== 'string' || typeof json !== 'string' || json.length > 4096) throw new Error('INVALID_INPUT: Gmail request takes a name and bounded JSON');
+            const input: unknown = JSON.parse(json);
+            if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('INVALID_INPUT: Gmail request input must be an object');
+            return requireIosGmail().request(name, input as { labelId?: string; enabled?: boolean });
+        });
+    },
+    iosTaskIconBadgeCount(): string {
+        const count = arguments.length;
+        return submit(async () => {
+            if (count !== 0) throw new Error('INVALID_INPUT: Task icon badge count takes no arguments');
+            const { state } = iosSearchSavedState();
+            return countTasksForIconBadge(state._allTasks, state._allProjects, state._allSections);
+        });
+    },
     iosSearchOpen(taskID: string): string {
         const argumentCount = arguments.length;
         return submit(async () => {
@@ -2277,7 +3749,7 @@ globalThis.MindwtrHost = {
             return target && 'taskId' in target ? { type: 'task', taskId: target.taskId } : { type: 'inbox' };
         });
     },
-    /** Private prepared Person methods; Swift owns the durable journal. */
+
     managePersonCreatePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2320,6 +3792,9 @@ globalThis.MindwtrHost = {
     manageTaxonomyCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedTaxonomy(JSON.parse(json))));
     },
+    appLockDelayOptions(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.getAppLockDelayOptions(JSON.parse(json))); });
+    },
     generalPreferenceOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.getGeneralPreferenceOptions(JSON.parse(json))); });
     },
@@ -2337,6 +3812,9 @@ globalThis.MindwtrHost = {
     },
     gtdWorkflowOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.getGtdWorkflowOptions(JSON.parse(json))); });
+    },
+    gtdPomodoroOptions(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.getGtdPomodoroOptions(JSON.parse(json))); });
     },
     gtdArchiveOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.getGtdArchiveOptions(JSON.parse(json))); });
@@ -2362,6 +3840,9 @@ globalThis.MindwtrHost = {
     gtdCaptureParseOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.getGtdCaptureParseOptions(JSON.parse(json))); });
     },
+    gtdCaptureAudioOptions(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.getGtdCaptureAudioOptions(JSON.parse(json))); });
+    },
     gtdCaptureAreaOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.getGtdCaptureAreaOptions(JSON.parse(json))); });
     },
@@ -2379,6 +3860,65 @@ globalThis.MindwtrHost = {
     },
     gtdWorkflowCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedGtdWorkflow(JSON.parse(json))));
+    },
+    iosWidgetCompletionPrepare(json: string): string {
+        return submit(async () => {
+            iosSearchSavedState();
+            return unwrap(contract.prepareWidgetCompletion(completionJson(json, 65_536)));
+        });
+    },
+    iosWidgetCompletionValidate(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw iosSearchUnavailable();
+            return unwrap(contract.validatePreparedWidgetCompletion(completionJson(json, 2_100_000)));
+        });
+    },
+    iosWidgetCompletionCommit(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || isSandboxMode() || isWorkspaceTransitionActive()) throw iosSearchUnavailable();
+            return unwrap(await contract.commitPreparedWidgetCompletion(completionJson(json, 2_100_000)));
+        });
+    },
+    iosWidgetCompletionOutcome(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || isSandboxMode() || isWorkspaceTransitionActive()) throw iosSearchUnavailable();
+            return unwrap(contract.widgetCompletionOutcome(completionJson(json, 65_536)));
+        });
+    },
+    iosShareCapturePrepare(json: string): string {
+        return submit(async () => iosShareCaptureMethods.prepare(JSON.parse(json)));
+    },
+    iosShareCaptureCommit(json: string): string {
+        return submit(async () => iosShareCaptureMethods.commit(JSON.parse(json)));
+    },
+    iosShareCaptureOutcome(json: string): string {
+        return submit(async () => iosShareCaptureMethods.outcome(JSON.parse(json)));
+    },
+    iosShareCaptureDraft(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: iOS share unavailable');
+            requireSaved();
+            return readIOSShareCaptureDraft(json);
+        });
+    },
+    iosProductionWidgetTaskOpen(url: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || typeof url !== 'string' || url.length > 16_000) {
+                throw new Error('INVALID_INPUT: Invalid production task URL');
+            }
+            const scheme = 'mindwtr';
+            if (url.slice(0, scheme.length + 1).toLowerCase() !== `${scheme}:`
+                || !isEntityOpenUrl(url) || parseEntityOpenUrl(url)?.kind !== 'task') return { type: 'none' };
+            const target = unwrap(contract.resolveNativeEntryPoint({ kind: 'link', url, scheme }));
+            const type = target.taskId && target.taskId.length <= 500 ? 'task' : target.route === '/inbox' ? 'inbox' : 'none';
+            if (type !== 'none') {
+                try {
+                    logInfo('Native iOS production task URL resolved', { scope: 'native-ios', force: true,
+                        context: { releaseCheck: 'v1.3.9/ios-production-task-url', outcome: type } });
+                } catch {}
+            }
+            return type === 'task' ? { type, taskId: target.taskId } : { type };
+        });
     },
     iosEntityOpen(url: string): string {
         return submit(async () => {
@@ -2430,7 +3970,7 @@ globalThis.MindwtrHost = {
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS reminder Snooze acknowledged',
                 context: { releaseCheck: 'v1.3.5/ios-reminder-snooze', outcome: 'confirmed' },
-            }, { force: true }); } catch { /* Logging cannot lose the durable acknowledgment or its observer wake. */ }
+            }, { force: true }); } catch {                                                                            }
             return null;
         });
     },
@@ -2449,7 +3989,7 @@ globalThis.MindwtrHost = {
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS reminder completion acknowledged',
                 context: { releaseCheck: 'v1.3.5/ios-reminder-complete', outcome: 'confirmed' },
-            }, { force: true }); } catch { /* Logging cannot change an acknowledged durable command result. */ }
+            }, { force: true }); } catch {                                                                     }
             return null;
         });
     },
@@ -2473,7 +4013,7 @@ globalThis.MindwtrHost = {
                     message: 'Native iOS calendar access request returned',
                     context: { releaseCheck: 'v1.3.5/ios-calendar-access', outcome: 'returned' },
                 }, { force: true });
-            } catch { /* Diagnostics cannot change a completed permission request. */ }
+            } catch {                                                                 }
             return null;
         });
     },
@@ -2485,7 +4025,7 @@ globalThis.MindwtrHost = {
                     message: 'Native iOS device calendar setting saved',
                     context: { releaseCheck: 'v1.3.5/ios-calendar-setting', outcome: 'saved' },
                 }, { force: true });
-            } catch { /* Diagnostics cannot change an acknowledged durable result. */ }
+            } catch {                                                                 }
             return null;
         });
     },
@@ -2510,7 +4050,7 @@ globalThis.MindwtrHost = {
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS calendar subscription setting saved',
                 context: { releaseCheck: 'v1.3.5/ios-calendar-subscription-setting', outcome: 'saved' },
-            }); } catch { /* Diagnostics cannot change a durable acknowledgment. */ }
+            }); } catch {                                                           }
             return null;
         });
     },
@@ -2535,7 +4075,7 @@ globalThis.MindwtrHost = {
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS calendar subscription added',
                 context: { releaseCheck: 'v1.3.5/ios-calendar-subscription-add', outcome: 'saved' },
-            }); } catch { /* Diagnostics cannot change a durable acknowledgment. */ }
+            }); } catch {                                                           }
             return null;
         });
     },
@@ -2560,7 +4100,7 @@ globalThis.MindwtrHost = {
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS notification setting saved',
                 context: { releaseCheck: 'v1.3.5/ios-notification-setting', outcome: 'saved' },
-            }, { force: true }); } catch { /* A logging failure cannot change an acknowledged saved result. */ }
+            }, { force: true }); } catch {                                                                     }
             return null;
         });
     },
@@ -2591,7 +4131,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probePersonDeleteOutcome(JSON.parse(json)));
         });
     },
-    /** Private prepared Person deletion; Swift owns the durable journal. */
+
     managePersonDeletePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2616,7 +4156,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeAreaColorOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     areaColorPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2635,7 +4175,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeAreaRenameOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     areaRenamePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2669,7 +4209,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeAreaOrderOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     areaOrderPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2700,7 +4240,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeAreaDeleteOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     areaDeletePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2830,13 +4370,40 @@ globalThis.MindwtrHost = {
     somedaySectionMoveUndoRetryOutcome(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.probeSomedaySectionMoveUndoOutcome(JSON.parse(json))); });
     },
+    somedaySectionBulkMoveOptions(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.getSomedaySectionBulkMoveOptions(JSON.parse(json))); });
+    },
+    somedaySectionBulkMovePrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.prepareSomedaySectionBulkMove(JSON.parse(json))); });
+    },
+    somedaySectionBulkMoveValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedSomedaySectionBulkMove(JSON.parse(json))));
+    },
+    somedaySectionBulkMoveCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedSomedaySectionBulkMove(JSON.parse(json))));
+    },
+    somedaySectionBulkMoveRetryOutcome(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.probeSomedaySectionBulkMoveOutcome(JSON.parse(json))); });
+    },
+    somedaySectionBulkMoveUndoPrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.prepareSomedaySectionBulkMoveUndo(JSON.parse(json))); });
+    },
+    somedaySectionBulkMoveUndoValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedSomedaySectionBulkMoveUndo(JSON.parse(json))));
+    },
+    somedaySectionBulkMoveUndoCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedSomedaySectionBulkMoveUndo(JSON.parse(json))));
+    },
+    somedaySectionBulkMoveUndoRetryOutcome(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.probeSomedaySectionBulkMoveUndoOutcome(JSON.parse(json))); });
+    },
     focusGroupOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.getFocusGroupOptions(JSON.parse(json))); });
     },
     focusGroupValidate(json: string): string {
         return submit(async () => unwrap(contract.validateFocusGroupWrite(JSON.parse(json))));
     },
-    /** Exact scalar intent; the iOS host journals before dispatch. */
+
     focusGroupWrite(json: string): string {
         return submit(async () => unwrap(await contract.setFocusGroupChecked(JSON.parse(json))));
     },
@@ -2855,7 +4422,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectFocusOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectFocusPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2883,7 +4450,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeTaskFocusOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     taskFocusPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2908,7 +4475,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectRenameOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectRenamePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2920,6 +4487,21 @@ globalThis.MindwtrHost = {
     },
     projectRenameCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedProjectRename(JSON.parse(json))));
+    },
+    archiveRetentionOptions(): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.getArchiveRetentionOptions()); });
+    },
+    archiveRetentionReview(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.getArchiveRetentionReview(JSON.parse(json))); });
+    },
+    projectSectionFlowOptions(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.getProjectSectionFlowOptions(JSON.parse(json))); });
+    },
+    projectFlowModeOptions(json: string): string {
+        return submit(async () => {
+            requireSaved();
+            return unwrap(contract.getProjectFlowModeOptions(JSON.parse(json)));
+        });
     },
     projectFlowOptions(json: string): string {
         return submit(async () => {
@@ -2933,7 +4515,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectFlowOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectFlowPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -2961,7 +4543,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectTaskSortOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectTaskSortPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3000,6 +4582,12 @@ globalThis.MindwtrHost = {
     },
     focusSavedFilterCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedFocusSavedFilter(JSON.parse(json))));
+    },
+    savedSearchSortOptions(json: string): string {
+        return submit(async () => {
+            requireSaved();
+            return unwrap(contract.getSavedSearchSortOptions(JSON.parse(json)));
+        });
     },
     savedSearchOptions(json: string): string {
         return submit(async () => {
@@ -3064,7 +4652,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectTaskOrderOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectTaskOrderPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3095,7 +4683,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectNotesWriteOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectNotesWritePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3120,7 +4708,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectTagsWriteOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectTagsWritePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3133,7 +4721,7 @@ globalThis.MindwtrHost = {
     projectTagsWriteCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedProjectTagsWrite(JSON.parse(json))));
     },
-    /** Settled durable raw authority; target derivation remains shared policy. */
+
     projectAttachmentAvailabilityPreflight(json: string, encryptionStateJSON?: unknown): string {
         return submit(async () => {
             if (globalThis.__mindwtrHostPlatform !== 'ios' || !localAttachments || nativeSync || !bootAdapter
@@ -3145,7 +4733,7 @@ globalThis.MindwtrHost = {
             return unwrap(await contract.getProjectAttachmentAvailabilityPreflight(JSON.parse(json)));
         });
     },
-    /** Native-owned present-generation proof; canonical target policy stays shared. */
+
     projectAttachmentCachedAvailabilityPreflight(json: string, encryptionStateJSON: unknown): string {
         return submit(async () => {
             if (globalThis.__mindwtrHostPlatform !== 'ios' || !localAttachments || nativeSync || !bootAdapter
@@ -3220,7 +4808,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectAttachmentWriteOutcome(editorJson(json) as Parameters<typeof contract.probeProjectAttachmentWriteOutcome>[0]));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectAttachmentWritePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3251,18 +4839,18 @@ globalThis.MindwtrHost = {
     projectFileRemoveWriteCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedProjectFileRemoveWrite(editorJson(json) as Parameters<typeof contract.commitPreparedProjectFileRemoveWrite>[0])));
     },
-    // Private native publisher calls; these are not ordinary CoreHost query mutations.
-    projectFileAvailabilityPreflight(json: string, encryptionStateJSON: unknown, cloudURL: string, backend: string = 'cloud'): string {
+    projectFileAvailabilityPreflight(json: string, encryptionStateJSON: unknown, cloudURL: string | null, backend: string = 'cloud'): string {
         return submit(async () => {
             if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || !localAttachments || nativeSync
                 || iosTaskAttachmentPreparation || iosProjectFilePreparation || iosCleanupCallback
                 || isSandboxMode() || isWorkspaceTransitionActive()) throw new Error('NOT_READY: Project download is unavailable');
             requireSaved(); await assertNativeSelfHostedAttachmentEncryptionAdmission(encryptionStateJSON);
+            if (backend === 'dropbox' && cloudURL !== null) throw new Error('INVALID_INPUT: Dropbox has no direct availability URL');
             const input = editorJson(json) as { projectId?: unknown };
             const id = typeof input.projectId === 'string' ? input.projectId : '';
             const preflight = unwrap(await preparedProjectAvailability(id, backend).getProjectFileAvailabilityPreflight(input));
             return { preflight, columns: PROJECT_SQLITE_COLUMNS,
-                initialURL: nativeProjectFileAvailabilityInitialURL(preflight.attachmentJSON, cloudURL, backend === 'webdav') };
+                initialURL: backend === 'dropbox' ? null : nativeProjectFileAvailabilityInitialURL(preflight.attachmentJSON, cloudURL!, backend === 'webdav') };
         });
     },
     projectFileAvailabilityEncryptionAdmission(encryptionStateJSON: unknown): string {
@@ -3321,7 +4909,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectStatusOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectStatusPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3346,7 +4934,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectDateOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectDatePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3371,7 +4959,7 @@ globalThis.MindwtrHost = {
             return unwrap(contract.probeProjectAreaOutcome(JSON.parse(json)));
         });
     },
-    /** Private iOS preparation and commit; Swift owns the durable journal. */
+
     projectAreaPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3384,7 +4972,7 @@ globalThis.MindwtrHost = {
     projectAreaCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedProjectArea(JSON.parse(json))));
     },
-    /** Core refuses a stale `revision`; Kotlin then reads the project again from offset 0. */
+
     projectDetail(id: string, offset: number, limit: number, revision: string): string {
         return submit(async () => {
             requireSaved();
@@ -3403,19 +4991,20 @@ globalThis.MindwtrHost = {
             return unwrap(contract.getProjectNotesReferenceTarget(JSON.parse(json)));
         });
     },
-    /** `json` is `{ id, base, patch }`, passed to core unchanged: the status menu and the Restore and Next swipes. */
+
     update(json: string): string {
         return submit(async () => taskResult('update', await contract.updateTask(JSON.parse(json))));
     },
-    /** `json` is the editor's `{ id, base, patch, checklist? }` (draft fields and the edited checklist), passed to core's saveTaskDraft unchanged. */
+
+
     saveDraft(json: string): string {
-        return submit(async () => taskResult('saveTaskDraft', await contract.saveTaskDraft(JSON.parse(json))));
+        return submit(async () => taskResult('saveTaskDraft', await contract.saveTaskDraft({ ...JSON.parse(json), mergeSyncedChanges: globalThis.__mindwtrHostPlatform !== 'ios' })));
     },
-    /** One static Calendar preference intent; exact before/desired values survive journal replay. */
+
     calendarPreference(json: string): string {
         return submit(async () => unwrap(await contract.setCalendarPreference(JSON.parse(json))));
     },
-    /** Read-only RN Calendar composer transport. */
+
     calendarComposerOpen(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.openCalendarComposer(JSON.parse(json))); });
     },
@@ -3440,18 +5029,18 @@ globalThis.MindwtrHost = {
     calendarUnscheduleCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedCalendarUnschedule(JSON.parse(json))));
     },
-    /** Private pure preparation, persisted by the iOS host before any task write. */
+
     calendarComposerPrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.prepareCalendarComposerSave(JSON.parse(json))); });
     },
-    /** Private immutable authority check; safe before boot and terminal cleanup. */
+
     calendarComposerValidate(json: string): string {
         return submit(async () => unwrap(contract.validatePreparedCalendarComposerSave(JSON.parse(json))));
     },
     calendarComposerCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedCalendarComposerSave(JSON.parse(json))));
     },
-    /** New Calendar task/project is one frozen, atomic publication. */
+
     calendarComposerCreatePrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.prepareCalendarComposerCreate(JSON.parse(json))); });
     },
@@ -3476,22 +5065,79 @@ globalThis.MindwtrHost = {
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS calendar event task created',
                 context: { releaseCheck: 'v1.3.5/ios-calendar-event-task', outcome: 'confirmed' },
-            }); } catch { /* Diagnostics cannot change a durable acknowledgment. */ }
+            }); } catch {                                                           }
             return null;
         });
     },
-    /** Private native Board preparation: no store writes before the host journals it. */
+
     boardPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
-            return unwrap(contract.prepareBoardAction(JSON.parse(json)));
+            return unwrap<Extract<ReturnType<typeof contract.prepareBoardAction>, { ok: true }>['value']>(contract.prepareBoardAction(JSON.parse(json)));
         });
     },
-    /** Private immutable journal check; safe before boot and during terminal cleanup. */
+
     boardValidate(json: string): string {
         return submit(async () => unwrap(contract.validatePreparedBoardAction(JSON.parse(json))));
     },
-    /** Only the exact frozen Trash/Duplicate envelope is replayable. */
+
+    iosBoardMoveAcknowledged(): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') return null;
+            try {
+                logInfo('Native iOS Board move saved', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-board-move', outcome: 'saved' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                           }
+            return null;
+        });
+    },
+
+    iosBoardCompletionAcknowledged(outcome: string): string {
+        return submit(async () => {
+            if (outcome !== 'completed' && outcome !== 'undone') throw new Error('INVALID_INPUT: Invalid Board completion outcome');
+            if (globalThis.__mindwtrHostPlatform !== 'ios') return null;
+            try {
+                logInfo('Native iOS Board completion acknowledged', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-board-complete', outcome } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                           }
+            return null;
+        });
+    },
+
+    iosBoardReactivateAcknowledged(): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') return null;
+            try {
+                logInfo('Native iOS Board task reactivated', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-board-reactivate', outcome: 'saved' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                           }
+            return null;
+        });
+    },
+
+    iosBoardOrderAcknowledged(outcome: string, affectedCount: number): string {
+        return submit(async () => {
+            if (outcome !== 'saved' || !Number.isSafeInteger(affectedCount) || affectedCount < 1 || affectedCount > 100_000)
+                throw new Error('INVALID_INPUT: Invalid Board order acknowledgement');
+            if (globalThis.__mindwtrHostPlatform !== 'ios') return null;
+            try {
+                logInfo('Native iOS Board order saved', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-board-order', outcome, affectedCount } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                             }
+            return null;
+        });
+    },
+    boardOrderOutcome(json: string): string {
+        return submit(async () => unwrap(await contract.boardOrderOutcome(editorJson(json) as Parameters<typeof contract.boardOrderOutcome>[0])));
+    },
+    boardMoveOutcome(json: string): string {
+        return submit(async () => unwrap(await contract.boardMoveOutcome(editorJson(json) as Parameters<typeof contract.boardMoveOutcome>[0])));
+    },
+
     boardCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedBoardAction(JSON.parse(json))));
     },
@@ -3503,6 +5149,39 @@ globalThis.MindwtrHost = {
     },
     taskPromoteCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedTaskPromotion(editorJson(json) as Parameters<typeof contract.commitPreparedTaskPromotion>[0])));
+    },
+    taskPromoteOptions(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); return unwrap(contract.getTaskPromotionOptions(completionJson(json, 4_096) as Parameters<typeof contract.getTaskPromotionOptions>[0])); });
+    },
+    taskPromoteUndoPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); requireSaved(); return unwrap(contract.prepareTaskPromotionUndo(editorJson(json) as Parameters<typeof contract.prepareTaskPromotionUndo>[0])); });
+    },
+    taskPromoteUndoValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); return unwrap(contract.validatePreparedTaskPromotionUndo(editorJson(json) as Parameters<typeof contract.validatePreparedTaskPromotionUndo>[0])); });
+    },
+    taskPromoteUndoCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); return unwrap(await contract.commitPreparedTaskPromotionUndo(editorJson(json) as Parameters<typeof contract.commitPreparedTaskPromotionUndo>[0])); });
+    },
+    projectToSectionOptions(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); requireSaved(); return unwrap(contract.getProjectToSectionConversionOptions(completionJson(json, 4_096) as Parameters<typeof contract.getProjectToSectionConversionOptions>[0])); });
+    },
+    projectToSectionPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); requireSaved(); return unwrap(contract.prepareProjectToSection(completionJson(json, 200_000) as Parameters<typeof contract.prepareProjectToSection>[0])); });
+    },
+    projectToSectionValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); return unwrap(contract.validatePreparedProjectToSection(editorJson(json) as Parameters<typeof contract.validatePreparedProjectToSection>[0])); });
+    },
+    projectToSectionCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); return unwrap(await contract.commitPreparedProjectToSection(editorJson(json) as Parameters<typeof contract.commitPreparedProjectToSection>[0])); });
+    },
+    projectToSectionUndoPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); requireSaved(); return unwrap(contract.prepareProjectToSectionUndo(editorJson(json) as Parameters<typeof contract.prepareProjectToSectionUndo>[0])); });
+    },
+    projectToSectionUndoValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); return unwrap(contract.validatePreparedProjectToSectionUndo(editorJson(json) as Parameters<typeof contract.validatePreparedProjectToSectionUndo>[0])); });
+    },
+    projectToSectionUndoCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Conversion requires iOS'); return unwrap(await contract.commitPreparedProjectToSectionUndo(editorJson(json) as Parameters<typeof contract.commitPreparedProjectToSectionUndo>[0])); });
     },
     taskDeletePrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.prepareTaskDelete(editorJson(json) as Parameters<typeof contract.prepareTaskDelete>[0])); });
@@ -3532,7 +5211,7 @@ globalThis.MindwtrHost = {
         return submit(async () => { requireSaved(); return unwrap(contract.getDoneTaskStatusOptions(completionJson(json, 4_096) as Parameters<typeof contract.getDoneTaskStatusOptions>[0])); });
     },
     referenceProjectNextActionOptions(json: string): string {
-        return submit(async () => { requireSaved(); return unwrap(await contract.getReferenceProjectNextActionOptions(completionJson(json, 2_100_000) as Parameters<typeof contract.getReferenceProjectNextActionOptions>[0])); });
+        return submit(async () => { requireSaved(); return unwrap(await contract.getReferenceProjectNextActionOptions(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.getReferenceProjectNextActionOptions>[0])); });
     },
     referenceProjectNextActionInput(text: string): string {
         return submit(async () => {
@@ -3541,16 +5220,58 @@ globalThis.MindwtrHost = {
         });
     },
     referenceProjectNextActionPrepare(json: string): string {
-        return submit(async () => { requireSaved(); return unwrap(await contract.prepareReferenceProjectNextAction(completionJson(json, 2_100_000) as Parameters<typeof contract.prepareReferenceProjectNextAction>[0])); });
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareReferenceProjectNextAction(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.prepareReferenceProjectNextAction>[0])); });
     },
     referenceProjectNextActionValidate(json: string): string {
-        return submit(async () => unwrap(contract.validatePreparedReferenceProjectNextAction(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedReferenceProjectNextAction>[0])));
+        return submit(async () => unwrap(contract.validatePreparedReferenceProjectNextAction(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedReferenceProjectNextAction>[0])));
     },
     referenceProjectNextActionCommit(json: string): string {
-        return submit(async () => unwrap(await contract.commitPreparedReferenceProjectNextAction(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedReferenceProjectNextAction>[0])));
+        return submit(async () => unwrap(await contract.commitPreparedReferenceProjectNextAction(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedReferenceProjectNextAction>[0])));
     },
     referenceProjectNextActionOutcome(json: string): string {
-        return submit(async () => unwrap(contract.referenceProjectNextActionOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.referenceProjectNextActionOutcome>[0])));
+        return submit(async () => unwrap(contract.referenceProjectNextActionOutcome(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.referenceProjectNextActionOutcome>[0])));
+    },
+    taskRowSwipeActions(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row swipe presentation requires iOS'); return unwrap(contract.getTaskRowSwipeActions(completionJson(json, 4_096) as Parameters<typeof contract.getTaskRowSwipeActions>[0])); });
+    },
+    rowTaskFocusPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Focus requires iOS'); requireSaved(); return unwrap(await contract.prepareRowTaskFocus(completionJson(json, 4_096) as Parameters<typeof contract.prepareRowTaskFocus>[0])); });
+    },
+    rowTaskFocusValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Focus requires iOS'); return unwrap(contract.validatePreparedRowTaskFocus(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedRowTaskFocus>[0])); });
+    },
+    rowTaskFocusCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Focus requires iOS'); return unwrap(await contract.commitPreparedRowTaskFocus(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedRowTaskFocus>[0])); });
+    },
+    rowTaskFocusOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Focus requires iOS'); return unwrap(contract.rowTaskFocusOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.rowTaskFocusOutcome>[0])); });
+    },
+    rowTaskDatesPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Dates requires iOS'); requireSaved(); return unwrap(await contract.prepareRowTaskDates(completionJson(json, 2_100_000) as Parameters<typeof contract.prepareRowTaskDates>[0])); });
+    },
+    rowTaskDatesValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Dates requires iOS'); return unwrap(contract.validatePreparedRowTaskDates(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedRowTaskDates>[0])); });
+    },
+    rowTaskDatesCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Dates requires iOS'); return unwrap(await contract.commitPreparedRowTaskDates(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedRowTaskDates>[0])); });
+    },
+    rowTaskDatesOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row Dates requires iOS'); return unwrap(contract.rowTaskDatesOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.rowTaskDatesOutcome>[0])); });
+    },
+    rowTaskDestinationOptions(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row destination requires iOS'); requireSaved(); return unwrap(await contract.getRowTaskDestinationOptions(completionJson(json, 16_384) as Parameters<typeof contract.getRowTaskDestinationOptions>[0])); });
+    },
+    rowTaskDestinationPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row destination requires iOS'); requireSaved(); return unwrap(await contract.prepareRowTaskDestination(completionJson(json, 4_096) as Parameters<typeof contract.prepareRowTaskDestination>[0])); });
+    },
+    rowTaskDestinationValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row destination requires iOS'); return unwrap(contract.validatePreparedRowTaskDestination(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedRowTaskDestination>[0])); });
+    },
+    rowTaskDestinationCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row destination requires iOS'); return unwrap(await contract.commitPreparedRowTaskDestination(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedRowTaskDestination>[0])); });
+    },
+    rowTaskDestinationOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row destination requires iOS'); return unwrap(contract.rowTaskDestinationOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.rowTaskDestinationOutcome>[0])); });
     },
     referenceTaskDestinationOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.getReferenceTaskDestinationOptions(completionJson(json, 4_096) as Parameters<typeof contract.getReferenceTaskDestinationOptions>[0])); });
@@ -3566,6 +5287,48 @@ globalThis.MindwtrHost = {
     },
     referenceTaskDestinationOutcome(json: string): string {
         return submit(async () => unwrap(contract.referenceTaskDestinationOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.referenceTaskDestinationOutcome>[0])));
+    },
+    taskChecklistMoveOptions(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); requireSaved(); return unwrap(await contract.getTaskChecklistMoveOptions(completionJson(json, 16_384) as Parameters<typeof contract.getTaskChecklistMoveOptions>[0])); });
+    },
+    taskChecklistMovePrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); requireSaved(); return unwrap(await contract.prepareTaskChecklistMove(completionJson(json, 4_096) as Parameters<typeof contract.prepareTaskChecklistMove>[0])); });
+    },
+    taskChecklistMoveValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); return unwrap(await contract.validatePreparedTaskChecklistMove(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedTaskChecklistMove>[0])); });
+    },
+    taskChecklistMoveCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); return unwrap(await contract.commitPreparedTaskChecklistMove(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedTaskChecklistMove>[0])); });
+    },
+    taskChecklistMoveOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); return unwrap(await contract.taskChecklistMoveOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.taskChecklistMoveOutcome>[0])); });
+    },
+    taskChecklistMoveUndoPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); requireSaved(); return unwrap(await contract.prepareTaskChecklistMoveUndo(completionJson(json, 2_100_000) as Parameters<typeof contract.prepareTaskChecklistMoveUndo>[0])); });
+    },
+    taskChecklistMoveUndoValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); return unwrap(await contract.validatePreparedTaskChecklistMoveUndo(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedTaskChecklistMoveUndo>[0])); });
+    },
+    taskChecklistMoveUndoCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); return unwrap(await contract.commitPreparedTaskChecklistMoveUndo(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedTaskChecklistMoveUndo>[0])); });
+    },
+    taskChecklistMoveUndoOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Checklist move requires iOS'); return unwrap(await contract.taskChecklistMoveUndoOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.taskChecklistMoveUndoOutcome>[0])); });
+    },
+    rowTaskBackdateOptions(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row backdate requires iOS'); requireSaved(); return unwrap(await contract.getRowTaskBackdateOptions(completionJson(json, 4_096) as Parameters<typeof contract.getRowTaskBackdateOptions>[0])); });
+    },
+    rowTaskBackdatePrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row backdate requires iOS'); requireSaved(); return unwrap(await contract.prepareRowTaskBackdate(completionJson(json, 4_096) as Parameters<typeof contract.prepareRowTaskBackdate>[0])); });
+    },
+    rowTaskBackdateValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row backdate requires iOS'); return unwrap(await contract.validatePreparedRowTaskBackdate(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedRowTaskBackdate>[0])); });
+    },
+    rowTaskBackdateCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row backdate requires iOS'); return unwrap(await contract.commitPreparedRowTaskBackdate(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedRowTaskBackdate>[0])); });
+    },
+    rowTaskBackdateOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row backdate requires iOS'); return unwrap(await contract.rowTaskBackdateOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.rowTaskBackdateOutcome>[0])); });
     },
     referenceTaskBackdateOptions(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.getReferenceTaskBackdateOptions(completionJson(json, 4_096) as Parameters<typeof contract.getReferenceTaskBackdateOptions>[0])); });
@@ -3625,28 +5388,28 @@ globalThis.MindwtrHost = {
         return submit(async () => unwrap(contract.archiveTaskCompletedAtOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.archiveTaskCompletedAtOutcome>[0])));
     },
     taskCompletionPrepare(json: string): string {
-        return submit(async () => { requireSaved(); return unwrap(await contract.prepareTaskCompletion(completionJson(json, 4_096) as Parameters<typeof contract.prepareTaskCompletion>[0])); });
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareTaskCompletion(taskCompletionJson(json, 4_096) as Parameters<typeof contract.prepareTaskCompletion>[0])); });
     },
     taskCompletionValidate(json: string): string {
-        return submit(async () => unwrap(contract.validatePreparedTaskCompletion(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedTaskCompletion>[0])));
+        return submit(async () => unwrap(contract.validatePreparedTaskCompletion(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedTaskCompletion>[0])));
     },
     taskCompletionCommit(json: string): string {
-        return submit(async () => unwrap(await contract.commitPreparedTaskCompletion(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedTaskCompletion>[0])));
+        return submit(async () => unwrap(await contract.commitPreparedTaskCompletion(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedTaskCompletion>[0])));
     },
     taskCompletionOutcome(json: string): string {
-        return submit(async () => unwrap(contract.taskCompletionOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.taskCompletionOutcome>[0])));
+        return submit(async () => unwrap(contract.taskCompletionOutcome(taskCompletionJson(json, 2_100_000) as Parameters<typeof contract.taskCompletionOutcome>[0])));
     },
     taskCompletionUndoPrepare(json: string): string {
-        return submit(async () => { requireSaved(); return unwrap(await contract.prepareTaskCompletionUndo(completionJson(json, 4_500_000) as Parameters<typeof contract.prepareTaskCompletionUndo>[0])); });
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareTaskCompletionUndo(taskCompletionJson(json, 4_500_000) as Parameters<typeof contract.prepareTaskCompletionUndo>[0])); });
     },
     taskCompletionUndoValidate(json: string): string {
-        return submit(async () => unwrap(contract.validatePreparedTaskCompletionUndo(completionJson(json, 4_500_000) as Parameters<typeof contract.validatePreparedTaskCompletionUndo>[0])));
+        return submit(async () => unwrap(contract.validatePreparedTaskCompletionUndo(taskCompletionJson(json, 4_500_000) as Parameters<typeof contract.validatePreparedTaskCompletionUndo>[0])));
     },
     taskCompletionUndoCommit(json: string): string {
-        return submit(async () => unwrap(await contract.commitPreparedTaskCompletionUndo(completionJson(json, 4_500_000) as Parameters<typeof contract.commitPreparedTaskCompletionUndo>[0])));
+        return submit(async () => unwrap(await contract.commitPreparedTaskCompletionUndo(taskCompletionJson(json, 4_500_000) as Parameters<typeof contract.commitPreparedTaskCompletionUndo>[0])));
     },
     taskCompletionUndoOutcome(json: string): string {
-        return submit(async () => unwrap(contract.taskCompletionUndoOutcome(completionJson(json, 4_500_000) as Parameters<typeof contract.taskCompletionUndoOutcome>[0])));
+        return submit(async () => unwrap(contract.taskCompletionUndoOutcome(taskCompletionJson(json, 4_500_000) as Parameters<typeof contract.taskCompletionUndoOutcome>[0])));
     },
     trashTaskRestorePrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.prepareTrashTaskRestore(editorJson(json) as Parameters<typeof contract.prepareTrashTaskRestore>[0])); });
@@ -3656,6 +5419,30 @@ globalThis.MindwtrHost = {
     },
     trashTaskRestoreCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedTrashTaskRestore(editorJson(json) as Parameters<typeof contract.commitPreparedTrashTaskRestore>[0])));
+    },
+    projectTasksDeletePrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); requireSaved(); return unwrap(await contract.prepareProjectTasksDelete(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareProjectTasksDelete>[0])); });
+    },
+    projectTasksDeleteValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); return unwrap(await contract.validatePreparedProjectTasksDelete(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedProjectTasksDelete>[0])); });
+    },
+    projectTasksDeleteCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); return unwrap(await contract.commitPreparedProjectTasksDelete(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedProjectTasksDelete>[0])); });
+    },
+    projectTasksDeleteOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); return unwrap(await contract.projectTasksDeleteOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.projectTasksDeleteOutcome>[0])); });
+    },
+    projectTasksDeleteUndoPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); requireSaved(); return unwrap(await contract.prepareProjectTasksDeleteUndo(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareProjectTasksDeleteUndo>[0])); });
+    },
+    projectTasksDeleteUndoValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); return unwrap(await contract.validatePreparedProjectTasksDeleteUndo(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedProjectTasksDeleteUndo>[0])); });
+    },
+    projectTasksDeleteUndoCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); return unwrap(await contract.commitPreparedProjectTasksDeleteUndo(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedProjectTasksDeleteUndo>[0])); });
+    },
+    projectTasksDeleteUndoOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project Trash requires iOS'); return unwrap(await contract.projectTasksDeleteUndoOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.projectTasksDeleteUndoOutcome>[0])); });
     },
     archivedTasksDeletePrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.prepareArchivedTasksDelete(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareArchivedTasksDelete>[0])); });
@@ -3680,6 +5467,71 @@ globalThis.MindwtrHost = {
     },
     archivedTasksDeleteUndoOutcome(json: string): string {
         return submit(async () => unwrap(contract.archivedTasksDeleteUndoOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.archivedTasksDeleteUndoOutcome>[0])));
+    },
+    inboxTasksMoveNotice(json: string): string {
+        return submit(async () => {
+            requireSaved();
+            const result = completionJson(json, 2_000) as { count?: unknown; status?: unknown };
+            if (!result || typeof result !== 'object' || Array.isArray(result)
+                || Object.keys(result).sort().join(',') !== 'count,status'
+                || typeof result.count !== 'number' || !Number.isInteger(result.count)
+                || result.count < 1 || result.count > 10_000
+                || !getBulkMoveStatusOptions('all').includes(result.status as TaskStatus)) {
+                throw new Error('INVALID_INPUT: Inbox move notice requires a bounded result');
+            }
+            const t = (key: string): string => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key;
+            return { message: formatListItemCount(result.count, 'task', t) };
+        });
+    },
+    inboxTasksMovePrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareInboxTasksMove(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareInboxTasksMove>[0])); });
+    },
+    inboxTasksMoveValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedInboxTasksMove(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedInboxTasksMove>[0])));
+    },
+    inboxTasksMoveCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedInboxTasksMove(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedInboxTasksMove>[0])));
+    },
+    inboxTasksMoveOutcome(json: string): string {
+        return submit(async () => unwrap(await contract.inboxTasksMoveOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.inboxTasksMoveOutcome>[0])));
+    },
+    projectTasksMovePrepare(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk status requires iOS');
+            requireSaved(); return unwrap(await contract.prepareProjectTasksMove(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareProjectTasksMove>[0]));
+        });
+    },
+    projectTasksMoveNotice(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk status requires iOS');
+            requireSaved();
+            const result = completionJson(json, 2_000) as { count?: unknown; status?: unknown };
+            if (!result || typeof result !== 'object' || Array.isArray(result)
+                || Object.keys(result).sort().join(',') !== 'count,status'
+                || typeof result.count !== 'number' || !Number.isInteger(result.count) || result.count < 1 || result.count > 10_000
+                || !getBulkMoveStatusOptions('all').includes(result.status as TaskStatus))
+                throw new Error('INVALID_INPUT: Project move notice requires a bounded result');
+            const t = (key: string): string => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key;
+            return { message: formatListItemCount(result.count, 'task', t) };
+        });
+    },
+    projectTasksMoveValidate(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk status requires iOS');
+            return unwrap(contract.validatePreparedProjectTasksMove(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedProjectTasksMove>[0]));
+        });
+    },
+    projectTasksMoveCommit(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk status requires iOS');
+            return unwrap(await contract.commitPreparedProjectTasksMove(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedProjectTasksMove>[0]));
+        });
+    },
+    projectTasksMoveOutcome(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk status requires iOS');
+            return unwrap(contract.projectTasksMoveOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.projectTasksMoveOutcome>[0]));
+        });
     },
     referenceTasksMoveNotice(json: string): string {
         return submit(async () => {
@@ -3708,6 +5560,102 @@ globalThis.MindwtrHost = {
     referenceTasksMoveOutcome(json: string): string {
         return submit(async () => unwrap(await contract.referenceTasksMoveOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.referenceTasksMoveOutcome>[0])));
     },
+    inboxTasksAddTagPrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareInboxTasksAddTag(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareInboxTasksAddTag>[0])); });
+    },
+    inboxTasksAddTagValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedInboxTasksAddTag(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedInboxTasksAddTag>[0])));
+    },
+    inboxTasksAddTagCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedInboxTasksAddTag(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedInboxTasksAddTag>[0])));
+    },
+    inboxTasksAddTagOutcome(json: string): string {
+        return submit(async () => unwrap(await contract.inboxTasksAddTagOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.inboxTasksAddTagOutcome>[0])));
+    },
+    projectTasksAddTagPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); requireSaved(); return unwrap(await contract.prepareProjectTasksAddTag(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareProjectTasksAddTag>[0])); });
+    },
+    projectTasksAddTagValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); return unwrap(contract.validatePreparedProjectTasksAddTag(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedProjectTasksAddTag>[0])); });
+    },
+    projectTasksAddTagCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); return unwrap(await contract.commitPreparedProjectTasksAddTag(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedProjectTasksAddTag>[0])); });
+    },
+    projectTasksAddTagOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); return unwrap(await contract.projectTasksAddTagOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.projectTasksAddTagOutcome>[0])); });
+    },
+    inboxTasksRemoveTagPrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareInboxTasksRemoveTag(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareInboxTasksRemoveTag>[0])); });
+    },
+    inboxTasksRemoveTagValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedInboxTasksRemoveTag(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedInboxTasksRemoveTag>[0])));
+    },
+    inboxTasksRemoveTagCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedInboxTasksRemoveTag(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedInboxTasksRemoveTag>[0])));
+    },
+    inboxTasksRemoveTagOutcome(json: string): string {
+        return submit(async () => unwrap(await contract.inboxTasksRemoveTagOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.inboxTasksRemoveTagOutcome>[0])));
+    },
+    projectTasksRemoveTagPrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); requireSaved(); return unwrap(await contract.prepareProjectTasksRemoveTag(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareProjectTasksRemoveTag>[0])); });
+    },
+    projectTasksRemoveTagValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); return unwrap(contract.validatePreparedProjectTasksRemoveTag(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedProjectTasksRemoveTag>[0])); });
+    },
+    projectTasksRemoveTagCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); return unwrap(await contract.commitPreparedProjectTasksRemoveTag(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedProjectTasksRemoveTag>[0])); });
+    },
+    projectTasksRemoveTagOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk tags require iOS'); return unwrap(await contract.projectTasksRemoveTagOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.projectTasksRemoveTagOutcome>[0])); });
+    },
+    projectTasksOrganizePrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk Organize requires iOS'); requireSaved(); return unwrap(await contract.prepareProjectTasksOrganize(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareProjectTasksOrganize>[0])); });
+    },
+    projectTasksOrganizeValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk Organize requires iOS'); return unwrap(contract.validatePreparedProjectTasksOrganize(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedProjectTasksOrganize>[0])); });
+    },
+    projectTasksOrganizeCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk Organize requires iOS'); return unwrap(await contract.commitPreparedProjectTasksOrganize(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedProjectTasksOrganize>[0])); });
+    },
+    projectTasksOrganizeOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project bulk Organize requires iOS'); return unwrap(await contract.projectTasksOrganizeOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.projectTasksOrganizeOutcome>[0])); });
+    },
+    inboxTasksOrganizePrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareInboxTasksOrganize(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareInboxTasksOrganize>[0])); });
+    },
+    inboxTasksOrganizeValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedInboxTasksOrganize(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedInboxTasksOrganize>[0])));
+    },
+    inboxTasksOrganizeCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedInboxTasksOrganize(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedInboxTasksOrganize>[0])));
+    },
+    inboxTasksOrganizeOutcome(json: string): string {
+        return submit(async () => unwrap(await contract.inboxTasksOrganizeOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.inboxTasksOrganizeOutcome>[0])));
+    },
+    projectOrganizeDestinationCreatePrepare(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project destination creation requires iOS'); requireSaved(); return unwrap(await contract.prepareProjectOrganizeDestinationCreate(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareProjectOrganizeDestinationCreate>[0])); });
+    },
+    projectOrganizeDestinationCreateValidate(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project destination creation requires iOS'); return unwrap(contract.validatePreparedProjectOrganizeDestinationCreate(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedProjectOrganizeDestinationCreate>[0])); });
+    },
+    projectOrganizeDestinationCreateCommit(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project destination creation requires iOS'); return unwrap(await contract.commitPreparedProjectOrganizeDestinationCreate(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedProjectOrganizeDestinationCreate>[0])); });
+    },
+    projectOrganizeDestinationCreateOutcome(json: string): string {
+        return submit(async () => { if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Project destination creation requires iOS'); return unwrap(await contract.projectOrganizeDestinationCreateOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.projectOrganizeDestinationCreateOutcome>[0])); });
+    },
+    inboxOrganizeDestinationCreatePrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareInboxOrganizeDestinationCreate(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareInboxOrganizeDestinationCreate>[0])); });
+    },
+    inboxOrganizeDestinationCreateValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedInboxOrganizeDestinationCreate(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedInboxOrganizeDestinationCreate>[0])));
+    },
+    inboxOrganizeDestinationCreateCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedInboxOrganizeDestinationCreate(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedInboxOrganizeDestinationCreate>[0])));
+    },
+    inboxOrganizeDestinationCreateOutcome(json: string): string {
+        return submit(async () => unwrap(await contract.inboxOrganizeDestinationCreateOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.inboxOrganizeDestinationCreateOutcome>[0])));
+    },
     referenceTasksAddTagPrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.prepareReferenceTasksAddTag(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareReferenceTasksAddTag>[0])); });
     },
@@ -3731,6 +5679,30 @@ globalThis.MindwtrHost = {
     },
     referenceTasksRemoveTagOutcome(json: string): string {
         return submit(async () => unwrap(await contract.referenceTasksRemoveTagOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.referenceTasksRemoveTagOutcome>[0])));
+    },
+    trashItemsRestorePrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareTrashItemsRestore(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareTrashItemsRestore>[0])); });
+    },
+    trashItemsRestoreValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedTrashItemsRestore(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedTrashItemsRestore>[0])));
+    },
+    trashItemsRestoreCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedTrashItemsRestore(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedTrashItemsRestore>[0])));
+    },
+    trashItemsRestoreOutcome(json: string): string {
+        return submit(async () => unwrap(contract.trashItemsRestoreOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.trashItemsRestoreOutcome>[0])));
+    },
+    trashItemsPurgePrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareTrashItemsPurge(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareTrashItemsPurge>[0])); });
+    },
+    trashItemsPurgeValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedTrashItemsPurge(completionJson(json, 2_000_000) as Parameters<typeof contract.validatePreparedTrashItemsPurge>[0])));
+    },
+    trashItemsPurgeCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedTrashItemsPurge(completionJson(json, 2_000_000) as Parameters<typeof contract.commitPreparedTrashItemsPurge>[0])));
+    },
+    trashItemsPurgeOutcome(json: string): string {
+        return submit(async () => unwrap(contract.trashItemsPurgeOutcome(completionJson(json, 2_000_000) as Parameters<typeof contract.trashItemsPurgeOutcome>[0])));
     },
     archivedTasksRestorePrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(await contract.prepareArchivedTasksRestore(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareArchivedTasksRestore>[0])); });
@@ -3798,6 +5770,9 @@ globalThis.MindwtrHost = {
     projectLifecyclePrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.prepareProjectLifecycle(editorJson(json) as Parameters<typeof contract.prepareProjectLifecycle>[0])); });
     },
+    reviewProjectCompletionPrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.prepareReviewProjectCompletion(editorJson(json) as Parameters<typeof contract.prepareReviewProjectCompletion>[0])); });
+    },
     projectLifecycleValidate(json: string): string {
         return submit(async () => unwrap(contract.validatePreparedProjectLifecycle(editorJson(json) as Parameters<typeof contract.validatePreparedProjectLifecycle>[0])));
     },
@@ -3807,29 +5782,82 @@ globalThis.MindwtrHost = {
     projectLifecycleOutcome(json: string): string {
         return submit(async () => unwrap(contract.projectLifecycleOutcome(editorJson(json) as Parameters<typeof contract.projectLifecycleOutcome>[0])));
     },
-    /** Private native editor preparation freezes the raw Task effect before journaling. */
+
     draftPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(await contract.prepareTaskDraftSaveV2(editorJson(json) as Parameters<typeof contract.prepareTaskDraftSaveV2>[0]));
         });
     },
-    /** Review row actions prepare the ordinary durable Task Draft V2 journal. */
+
     reviewTaskPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(await contract.prepareReviewTaskWrite(editorJson(json) as Parameters<typeof contract.prepareReviewTaskWrite>[0]));
         });
     },
-    /** Pure check for both legacy v1 and exact v2 Task Editor journals. */
+
     draftValidate(json: string): string {
         return submit(async () => unwrap(contract.validatePreparedTaskDraftSave(editorJson(json) as Parameters<typeof contract.validatePreparedTaskDraftSave>[0])));
     },
-    /** Commit only the exact prepared editor envelope; recovery never prepares again. */
+
     draftCommit(json: string): string {
         return submit(async () => taskResult('saveTaskDraft', await contract.commitPreparedTaskDraftSave(editorJson(json) as Parameters<typeof contract.commitPreparedTaskDraftSave>[0])));
     },
-    /** Pure checklist edit and field model; only the host's prepared save writes. */
+    rowQuickStatusOptions(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row quick status requires iOS');
+            requireSaved(); return unwrap(await contract.getRowQuickStatusOptions(completionJson(json, 4_096) as Parameters<typeof contract.getRowQuickStatusOptions>[0]));
+        });
+    },
+    rowQuickStatusPrepare(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row quick status requires iOS');
+            requireSaved(); return unwrap(await contract.prepareRowQuickStatusWrite(completionJson(json, 4_096) as Parameters<typeof contract.prepareRowQuickStatusWrite>[0]));
+        });
+    },
+    rowQuickStatusValidate(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row quick status requires iOS');
+            return unwrap(contract.validatePreparedRowQuickStatusWrite(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedRowQuickStatusWrite>[0]));
+        });
+    },
+    rowQuickStatusCommit(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row quick status requires iOS');
+            return unwrap(await contract.commitPreparedRowQuickStatusWrite(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedRowQuickStatusWrite>[0]));
+        });
+    },
+    rowQuickStatusOutcome(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Row quick status requires iOS');
+            return unwrap(contract.rowQuickStatusOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.rowQuickStatusOutcome>[0]));
+        });
+    },
+    inlineChecklistPrepare(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Inline checklist requires iOS');
+            requireSaved(); return unwrap(await contract.prepareInlineChecklistWrite(completionJson(json, 2_000_000) as Parameters<typeof contract.prepareInlineChecklistWrite>[0]));
+        });
+    },
+    inlineChecklistValidate(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Inline checklist requires iOS');
+            return unwrap(contract.validatePreparedInlineChecklistWrite(completionJson(json, 2_100_000) as Parameters<typeof contract.validatePreparedInlineChecklistWrite>[0]));
+        });
+    },
+    inlineChecklistCommit(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Inline checklist requires iOS');
+            return unwrap(await contract.commitPreparedInlineChecklistWrite(completionJson(json, 2_100_000) as Parameters<typeof contract.commitPreparedInlineChecklistWrite>[0]));
+        });
+    },
+    inlineChecklistOutcome(json: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT: Inline checklist requires iOS');
+            return unwrap(contract.inlineChecklistOutcome(completionJson(json, 2_100_000) as Parameters<typeof contract.inlineChecklistOutcome>[0]));
+        });
+    },
     checklistEdit(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.editTaskChecklist(JSON.parse(json))); });
     },
@@ -3873,45 +5901,539 @@ globalThis.MindwtrHost = {
             return unwrap(await contract.commitPreparedTaskCancellationUndo(editorJson(json) as Parameters<typeof contract.commitPreparedTaskCancellationUndo>[0]));
         });
     },
-    /** The capture popup (RN's quick capture sheet): an empty draft with the starting options. */
+
     captureOpen(): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.openQuickCapture());
         });
     },
-    /** `json` is `{ text, options, picker? }`, passed to core unchanged. */
+
     captureView(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.getQuickCaptureView(JSON.parse(json)));
         });
     },
-    /** `json` is `{ text, options, edit, picker? }`: one control's edit. Nothing is written. */
+
     captureEdit(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.editQuickCapture(JSON.parse(json)));
         });
     },
-    /** `json` is `{ text, options, captureId, openAfterSave }`. Reusing captureId retries: the draft is written at most once. */
+    iosReviewAIWitness(json: string): string {
+        return submit(async () => { if (!iosReviewAI) throw new Error('NOT_READY: Review AI is unavailable'); return iosReviewAI.witness(json); });
+    },
+    iosReviewAIRequest(json: string, owner: (json: string) => unknown): string {
+        return submit(async signal => { if (!iosReviewAI) throw new Error('NOT_READY: Review AI is unavailable'); return iosReviewAI.request(json, owner, signal); });
+    },
+    iosReviewAIValidateApply(json: string, durableSQLJSON: string): string {
+        return submit(async () => { if (!iosReviewAI) throw new Error('NOT_READY: Review AI is unavailable'); return iosReviewAI.validateApply(json, durableSQLJSON); });
+    },
+    iosReviewAIOutcome(json: string): string {
+        return submit(async () => { if (!iosReviewAI) throw new Error('NOT_READY: Review AI is unavailable'); return iosReviewAI.outcome(json); });
+    },
+    iosReviewAIApply(json: string): string {
+        return submit(async () => { if (!iosReviewAI) throw new Error('NOT_READY: Review AI is unavailable'); return iosReviewAI.apply(json); });
+    },
+    iosInboxAIWitness(json: string): string {
+        return submit(async () => {
+            if (!iosInboxAI) throw new Error('NOT_READY: Inbox AI is unavailable');
+            return iosInboxAI.witness(json);
+        });
+    },
+    iosInboxAIRequest(json: string, owner: (json: string) => unknown): string {
+        return submit(async signal => {
+            if (!iosInboxAI) throw new Error('NOT_READY: Inbox AI is unavailable');
+            return iosInboxAI.request(json, owner, signal);
+        });
+    },
+    iosInboxAIApply(json: string, owner: () => unknown): string {
+        return submit(async () => {
+            if (!iosInboxAI) throw new Error('NOT_READY: Inbox AI is unavailable');
+            return iosInboxAI.apply(json, owner);
+        });
+    },
+    iosTaskAIOptions(json: string): string {
+        return submit(async () => {
+            if (!iosTaskAI) throw new Error('NOT_READY: Task AI is unavailable');
+            return iosTaskAI.options(json);
+        });
+    },
+    iosTaskAIWitness(json: string): string {
+        return submit(async () => {
+            if (!iosTaskAI) throw new Error('NOT_READY: Task AI is unavailable');
+            return iosTaskAI.witness(json);
+        });
+    },
+    iosTaskAIRequest(json: string, owner: (json: string) => unknown): string {
+        return submit(async signal => {
+            if (!iosTaskAI) throw new Error('NOT_READY: Task AI is unavailable');
+            return iosTaskAI.request(json, owner, signal);
+        });
+    },
+    captureCopilotOptions(json: string, available: boolean): string {
+        return submit(async () => {
+            requireSaved();
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || typeof available !== 'boolean') throw new Error('NOT_READY: Capture copilot is unavailable');
+            const settings = useTaskStore.getState().settings;
+            const value = unwrap(contract.getCaptureCopilotOptions({ ...JSON.parse(json), aiKey: { required: isAIKeyRequired(settings), available } }));
+            iosCaptureAIQuestion = value.request ? { revision: value.revision, request: value.request,
+                settings, language: unwrap(contract.getStrings({ keys: [] })).language } : null;
+            return value;
+        });
+    },
+    captureCopilotEdit(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.editCaptureCopilot(JSON.parse(json))); });
+    },
+    iosCaptureCopilotRequest(json: string, owner: (json: string) => unknown): string {
+        return submit(async (signal) => {
+            const question = iosCaptureAIQuestion, adapter = bootAdapter;
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || !question || !adapter || iosCaptureAIHost || iosConfigurationAIHost || iosConfigurationAIActive || iosTaskAI?.active || iosInboxAI?.active || iosReviewAI?.active || typeof owner !== 'function'
+                || !taskEditValuesEqual(completionJson(json, 2_000_000), { revision: question.revision, request: question.request })) {
+                throw new Error('STALE_REVISION: Capture copilot question changed');
+            }
+            const settings = question.settings, frozen = JSON.parse(JSON.stringify(settings));
+            const provider = settings.ai?.provider ?? 'openai';
+            if (!['openai', 'gemini', 'anthropic'].includes(provider)) throw new Error('NOT_READY: Capture copilot is unavailable');
+            const generation = getPersistenceStatus().generation;
+            const admit = (request: object) => {
+                if (checked(owner(JSON.stringify(request))) !== '') throw new Error('NOT_READY: Capture copilot owner is unavailable');
+            };
+            const current = () => {
+                const status = getPersistenceStatus(), state = useTaskStore.getState();
+                if (signal.aborted || iosCaptureAIQuestion !== question || bootAdapter !== adapter || getStorageAdapter() !== adapter
+                    || isSandboxMode() || isWorkspaceTransitionActive() || state.settings !== settings || !taskEditValuesEqual(state.settings, frozen)
+                    || unwrap(contract.getStrings({ keys: [] })).language !== question.language || status.generation !== generation
+                    || status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+                    || state.isLoading || state.editLockCount > 0) throw new Error('STALE_REVISION: Capture copilot owner changed');
+                requireSaved(); admit({ phase: 'current' });
+            };
+            admit({ phase: 'begin', provider, configuration: JSON.stringify(settings.ai ?? {}), language: question.language });
+            const unavailable = async (): Promise<never> => { throw new Error('NOT_READY: Capture copilot storage is read-only'); };
+            const host: NativeAIHost = {
+                platform: { isFossBuild },
+                storage: { getItem: unavailable, setItem: unavailable, removeItem: unavailable },
+                secrets: { get: unavailable, set: unavailable, delete: unavailable },
+                loadRequestKey: async (selected) => {
+                    current();
+                    if (selected !== provider) throw new Error('STALE_REVISION: Capture copilot provider changed');
+                    const raw = checked(owner(JSON.stringify({ phase: 'credential', provider: selected })));
+                    if (typeof raw !== 'string') throw new Error('NOT_READY: Capture copilot credential is unavailable');
+                    const loaded = completionJson(raw, 32 * 1024);
+                    current();
+                    if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded) || Object.keys(loaded).length !== 1
+                        || !('value' in loaded) || (loaded.value !== null && (typeof loaded.value !== 'string' || loaded.value.length > 4000))) {
+                        throw new Error('NOT_READY: Capture copilot credential is unavailable');
+                    }
+                    return loaded.value;
+                },
+                fetch: async (input, init) => {
+                    current();
+                    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+                    admit({ phase: 'http', url });
+                    const response = await globalThis.fetch(input, init);
+                    current(); return response;
+                },
+            };
+            iosCaptureAIHost = host;
+            try {
+                current();
+                const value = unwrap(await contract.requestAICopilot({ request: question.request }, { signal }));
+                current();
+                return { suggestion: value.suggestion ? { ...value.suggestion, language: question.language } : null };
+            } finally { if (iosCaptureAIHost === host) iosCaptureAIHost = null; }
+        });
+    },
     captureSubmit(json: string): string {
         return submit(async () => taskResult('quickCapture', await contract.submitQuickCapture(JSON.parse(json))));
     },
-    /** Read-only final creation rows; native journals this result before commit. */
+
     capturePrepare(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.prepareQuickCapture(JSON.parse(json)));
         });
     },
-    /** The exact prepared journal; retries never reparse text or current defaults. */
+    captureCopilotPrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.prepareQuickCaptureCopilot(JSON.parse(json))); });
+    },
     captureCommit(json: string): string {
         return submit(async () => taskResult('quickCapture', await contract.commitPreparedQuickCapture(JSON.parse(json))));
     },
-    /** Mind Sweep guide and its literal one-task Inbox add. The iOS host journals preparation before commit. */
+
+    captureLinesPrepare(json: string): string {
+        return submit(async () => {
+            captureLinesWarmAdmission = null;
+            const adapter = bootAdapter;
+            const stale = () => new Error('STALE_REVISION: Capture lines preparation is no longer current');
+            const ready = () => {
+                if (globalThis.__mindwtrHostPlatform !== 'ios' || !adapter || bootAdapter !== adapter
+                    || getStorageAdapter() !== adapter || !adapter.concurrentWritesGuarded
+                    || isSandboxMode() || isWorkspaceTransitionActive()) throw stale();
+                requireSaved(); unwrap(contract.getDataSettings());
+                return getPersistenceStatus();
+            };
+            ready();
+            await flushPendingSave();
+            const status = ready(), state = useTaskStore.getState();
+            const assertSettled = () => {
+                const currentStatus = ready();
+                if (currentStatus.failed || currentStatus.queued || currentStatus.inFlight || currentStatus.immediate
+                    || currentStatus.retrying || currentStatus.generation !== status.generation) throw stale();
+            };
+            const assertCurrent = () => {
+                assertSettled();
+                const current = useTaskStore.getState();
+                if (current._allTasks !== state._allTasks || current._allProjects !== state._allProjects
+                    || current._allSections !== state._allSections || current._allAreas !== state._allAreas
+                    || current._allPeople !== state._allPeople || current.settings !== state.settings) throw stale();
+            };
+            assertCurrent();
+
+
+            if (!await adapter!.readRowBaseline()) throw stale();
+            assertCurrent();
+            const data = await adapter!.getData();
+            assertCurrent();
+            if (!data || !['tasks', 'projects', 'sections', 'areas', 'people'].every((name) => Array.isArray(data[name as keyof AppData]))
+                || !data.settings || typeof data.settings !== 'object' || Array.isArray(data.settings)
+                || validateMergedSyncData(data).length !== 0) throw new Error('INVALID_INPUT: Saved capture recovery data is incomplete');
+            const planned = unwrap(contract.prepareQuickCaptureLines(captureLinesJson(json) as Parameters<typeof contract.prepareQuickCaptureLines>[0]));
+            assertCurrent();
+            if (planned.kind === 'refused') return planned;
+            const planJSON = JSON.stringify({ request: planned.prepared.request, prepared: planned.prepared });
+            unwrap(contract.validatePreparedQuickCaptureLines(captureLinesJson(planJSON)));
+            const recoveryJSON = serializeBackupData(data);
+            if (new TextEncoder().encode(recoveryJSON).byteLength > 128 * 1024 * 1024) throw new Error('INVALID_INPUT: Recovery snapshot exceeds 128 MiB');
+            assertCurrent();
+            captureLinesWarmAdmission = { planJSON, assertCurrent };
+            return { kind: 'prepared', planJSON, recoveryJSON };
+        });
+    },
+
+    captureLinesValidate(planJSON: string): string {
+        return submit(async () => unwrap(contract.validatePreparedQuickCaptureLines(captureLinesJson(planJSON))));
+    },
+    captureLinesAdmission(planJSON: string): string {
+        return submit(async () => { requireCaptureLinesAdmission(planJSON); return true; });
+    },
+
+    captureLinesCommit(planJSON: string, firstAdmission = false): string {
+        return submit(async () => {
+            const plan = captureLinesJson(planJSON) as Parameters<typeof contract.commitPreparedQuickCaptureLines>[0];
+            if (firstAdmission) requireCaptureLinesAdmission(planJSON);
+            const result = unwrap(await contract.commitPreparedQuickCaptureLines(plan));
+            if (captureLinesWarmAdmission?.planJSON === planJSON) captureLinesWarmAdmission = null;
+            return result;
+        });
+    },
+    appleReminderSourceRemovalAcknowledged(outcome: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || !['confirmed', 'unconfirmed'].includes(outcome))
+                throw new Error('INVALID_INPUT: Invalid Reminders removal outcome');
+            logInfo('Native Reminders source removal finished', { scope: 'native-ios', force: true,
+                context: { releaseCheck: 'v1.3.5/ios-reminders-source-removal', outcome } });
+            await diagnosticsLog.serialize(async () => undefined);
+            return {};
+        });
+    },
+    appleReminderImportRunAcknowledged(outcome: string, importedCount: number, failedCount: number): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || !['completed', 'interrupted'].includes(outcome)
+                || ![importedCount, failedCount].every((value) => Number.isInteger(value) && value >= 0 && value <= 10_000))
+                throw new Error('INVALID_INPUT: Invalid Reminders run outcome');
+            logInfo('Native Reminders import run finished', { scope: 'native-ios', force: true,
+                context: { releaseCheck: 'v1.3.5/ios-reminders-run', outcome, importedCount, failedCount } });
+            await diagnosticsLog.serialize(async () => undefined);
+            return {};
+        });
+    },
+    appleReminderAccessAcknowledged(outcome: string): string {
+        return submit(async () => {
+            if (!['granted', 'denied', 'undetermined', 'unavailable'].includes(outcome))
+                throw new Error('INVALID_INPUT: Invalid Reminders permission');
+            logInfo('Native Reminders access request finished', { scope: 'native-ios', force: true,
+                context: { releaseCheck: 'v1.3.5/ios-reminders-access', outcome } });
+            await diagnosticsLog.serialize(async () => undefined);
+            return {};
+        });
+    },
+    appleReminderSettingsOptions(registryRaw: string | null): string {
+        return submit(async () => {
+            const { importedReminderIds: _ids, ...settings } = appleReminderRegistry(registryRaw);
+            return { settings, expectedRaw: registryRaw };
+        });
+    },
+    appleReminderSettingPrepare(editJSON: string, registryRaw: string | null): string {
+        return submit(async () => {
+            const edit = appleReminderJSON(editJSON) as Record<string, unknown>;
+            if (!edit || typeof edit !== 'object' || Array.isArray(edit))
+                throw new Error('INVALID_INPUT: Invalid Reminders preference');
+            const registry = appleReminderRegistry(registryRaw);
+            if (edit.type === 'selectedList') {
+                if (Object.keys(edit).sort().join(',') !== 'id,sourceId,title,type'
+                    || typeof edit.title !== 'string'
+                    || ![edit.id, edit.sourceId].every((value) => typeof value === 'string' && value.trim().length > 0))
+                    throw new Error('INVALID_INPUT: Invalid Reminders list');
+                registry.selectedListId = edit.id as string;
+                registry.selectedListTitle = edit.title as string;
+            } else {
+                if (!['autoImportOnOpen', 'deleteImportedReminders'].includes(edit.type as string)
+                    || Object.keys(edit).sort().join(',') !== 'type,value' || typeof edit.value !== 'boolean')
+                    throw new Error('INVALID_INPUT: Invalid Reminders preference');
+                registry[edit.type as 'autoImportOnOpen' | 'deleteImportedReminders'] = edit.value;
+            }
+            return { nextRaw: JSON.stringify(normalizeAppleRemindersImportSettings(registry)) };
+        });
+    },
+    appleReminderSettingAcknowledged(): string {
+        return submit(async () => {
+            logInfo('Native Reminders preference saved', { scope: 'native-ios', force: true,
+                context: { releaseCheck: 'v1.3.5/ios-reminders-setting', outcome: 'confirmed' } });
+            await diagnosticsLog.serialize(async () => undefined);
+            return {};
+        });
+    },
+    appleReminderImportOptions(registryRaw: string | null): string {
+        return submit(async () => appleReminderRegistry(registryRaw));
+    },
+
+    appleReminderItemPrepare(sourceJSON: string, registryRaw: string | null): string {
+        return submit(async () => {
+            appleReminderWarmAdmission = null;
+            const adapter = appleReminderAdapter();
+            const source = appleReminderJSON(sourceJSON) as Omit<NativeAppleReminderImportRequest, 'generatedTaskId'>;
+            if (!source || typeof source !== 'object' || Array.isArray(source)
+                || Object.keys(source).sort().join(',') !== 'list,reminder,requestId,version'
+                || source.version !== 1 || typeof source.requestId !== 'string'
+                || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(source.requestId)
+                || !source.list || typeof source.list.id !== 'string' || typeof source.list.sourceId !== 'string'
+                || !source.reminder || typeof source.reminder !== 'object')
+                throw new Error('INVALID_INPUT: Invalid native Reminders source');
+            const registry = appleReminderRegistry(registryRaw);
+            if (registry.selectedListId !== source.list.id) throw new Error('STALE_REVISION: The selected Reminders list changed');
+            const candidate = classifyAppleReminderForImport(source.reminder, source.list.id.trim(), new Set(registry.importedReminderIds));
+            if (candidate.kind !== 'candidate') return { kind: 'noop', reason: candidate.kind };
+            const request: NativeAppleReminderImportRequest = { ...source, generatedTaskId: candidate.captureId ? null : generateUUID() };
+            const targetId = candidate.captureId ?? request.generatedTaskId!;
+            const stale = () => new Error('STALE_REVISION: Reminders import preparation changed');
+            const ready = () => {
+                if (appleReminderAdapter() !== adapter) throw stale();
+                requireSaved(); unwrap(contract.getDataSettings());
+                const status = getPersistenceStatus();
+                if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+                    || useTaskStore.getState().editLockCount > 0 || useTaskStore.getState().isLoading) throw stale();
+                return status;
+            };
+            const status = ready(), state = useTaskStore.getState();
+            const references = [state._allTasks, state._allProjects, state._allSections, state._allAreas, state._allPeople, state.settings];
+            const frozen = JSON.parse(JSON.stringify(references)) as unknown;
+            const assertCurrent = () => {
+                if (ready().generation !== status.generation) throw stale();
+                const current = useTaskStore.getState();
+                const values = [current._allTasks, current._allProjects, current._allSections, current._allAreas, current._allPeople, current.settings];
+                if (current.lastDataChangeAt !== state.lastDataChangeAt || !values.every((value, index) => value === references[index])
+                    || !taskEditValuesEqual(values, frozen)) throw stale();
+            };
+            assertCurrent(); if (!await adapter.readRowBaseline()) throw stale(); assertCurrent();
+            const data = await adapter.getData({ rawTasks: true }); assertCurrent();
+            const matches = data.tasks.filter((task) => task.id === targetId);
+            if (matches.length > 1 || matches.length === 1 && !hasRawReadRow(matches[0])) throw stale();
+            const row = matches.length ? [...rawReadRow(matches[0], taskToSqliteRow(matches[0])).row] as (string | number | null)[] : null;
+            const device = row ? null : ensureDeviceId(data.settings);
+            const plan = prepareNativeAppleReminderImportItem({ request, target: { id: targetId, row }, factory: row ? null : {
+                preparedAt: new Date().toISOString(), deviceIdBefore: data.settings.deviceId ?? null,
+                deviceIdToInitialize: device!.updated ? device!.deviceId : null,
+                effectiveDefaultAreaId: resolveDefaultNewTaskAreaId(data.settings, data.areas ?? []) ?? null,
+            } }, getTaskReminderDefault(data.settings));
+            if (!plan) throw new Error('INVALID_INPUT: Reminders candidate could not be prepared');
+            const planJSON = JSON.stringify({ request: plan.request, prepared: plan });
+            validatePreparedNativeAppleReminderImportItem(appleReminderJSON(planJSON));
+            const recoveryJSON = serializeBackupData(data);
+            if (new TextEncoder().encode(recoveryJSON).byteLength > 128 * 1024 * 1024)
+                throw new Error('INVALID_INPUT: Recovery snapshot exceeds 128 MiB');
+            assertCurrent(); appleReminderWarmAdmission = { planJSON, assertCurrent };
+            return { kind: 'prepared', planJSON, recoveryJSON };
+        });
+    },
+
+    appleReminderRegistryPlan(planJSON: string, registryRaw: string | null): string {
+        return submit(async () => {
+            const plan = validatePreparedNativeAppleReminderImportItem(appleReminderJSON(planJSON));
+            const registry = appleReminderRegistry(registryRaw);
+            const nextRaw = JSON.stringify(normalizeAppleRemindersImportSettings({ ...registry,
+                importedReminderIds: [...registry.importedReminderIds, plan.result.importKey] }));
+            if (new TextEncoder().encode(nextRaw).byteLength > 1024 * 1024)
+                throw new Error('INVALID_INPUT: Reminders registry exceeds its limit');
+            return { nextRaw };
+        });
+    },
+    appleReminderItemValidate(planJSON: string): string {
+        return submit(async () => validatePreparedNativeAppleReminderImportItem(appleReminderJSON(planJSON)).result);
+    },
+    appleReminderItemAdmission(planJSON: string): string {
+        return submit(async () => {
+            if (appleReminderWarmAdmission?.planJSON !== planJSON) throw new Error('STALE_REVISION: Reminders import admission changed');
+            appleReminderWarmAdmission.assertCurrent(); return true;
+        });
+    },
+    appleReminderItemCommit(planJSON: string, firstAdmission: boolean): string {
+        return submit(async () => {
+            if (typeof firstAdmission !== 'boolean') throw new Error('INVALID_INPUT: Invalid Reminders import admission');
+            appleReminderAdapter();
+            if (firstAdmission) {
+                if (appleReminderWarmAdmission?.planJSON !== planJSON) throw new Error('STALE_REVISION: Reminders import admission changed');
+                appleReminderWarmAdmission.assertCurrent(); appleReminderWarmAdmission = null;
+            }
+            const result = unwrap(await appleReminderItemOwner.commit(appleReminderJSON(planJSON)));
+
+            requireSaved();
+            return result;
+        });
+    },
+    appleReminderItemAcknowledged(): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform === 'ios') {
+                logInfo('Native Reminders item and import registry confirmed', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-reminders-item', outcome: 'confirmed' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            }
+            return {};
+        });
+    },
+    appleReminderItemOutcome(planJSON: string): string {
+        return submit(async () => { appleReminderAdapter(); return unwrap(await appleReminderItemOwner.outcome(appleReminderJSON(planJSON))); });
+    },
+    pomodoroPanelRead(json: string): string {
+        return submit(async () => {
+            const presentation = readNativePomodoroPresentation(pomodoroJSON(json, 8192));
+            const { raw, current } = await readSavedNativePomodoro();
+            const t = (key: string) => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key;
+            const panel = buildNativePomodoroPanel({ ...presentation, raw, settings: current.settings,
+                liveTasks: current.tasks, nowMs: Date.now(), t });
+            if (new TextEncoder().encode(JSON.stringify(panel)).byteLength > 1_000_000)
+                throw new Error('INVALID_INPUT: Pomodoro presentation exceeds the bounded native read');
+            if (globalThis.__mindwtrHostPlatform === 'ios') logInfo('Native Pomodoro panel state read', { scope: 'native-ios', force: true,
+                context: { releaseCheck: 'v1.3.5/ios-pomodoro-panel', outcome: panel.kind } });
+            return panel;
+        });
+    },
+    pomodoroAlarmRead(): string {
+        return submit(async () => {
+            const { raw, current } = await readSavedNativePomodoro();
+            const t = (key: string) => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key;
+            const intent = buildNativePomodoroAlarmIntent({ raw, settings: current.settings, nowMs: Date.now(), t });
+            if (new TextEncoder().encode(JSON.stringify(intent)).byteLength > 16_384)
+                throw new Error('INVALID_INPUT: Pomodoro alarm exceeds the native read limit');
+            logInfo('Native Pomodoro alarm intent read', { scope: 'native-ios', force: true,
+                context: { releaseCheck: 'v1.3.5/ios-pomodoro-alarm-plan', outcome: intent.kind } });
+            return intent;
+        });
+    },
+
+
+    pomodoroAlarmPlan(granted: boolean, raw: string | null, scope: string, pendingJSON: string, deliveredJSON: string): string {
+
+        raw ??= null;
+        return submit(async () => {
+            if (typeof granted !== 'boolean') throw new Error('INVALID_INPUT: Invalid Pomodoro permission');
+            const settings = useTaskStore.getState().settings;
+
+            const session = !granted || settings.gtd?.pomodoro?.completionAlert === false
+                ? null : (await pomodoroAdapter().readPomodoroSession()).raw;
+            const nowMs = Date.now();
+            const intent = buildNativePomodoroAlarmIntent({ raw: session, settings, nowMs,
+                t: (key) => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key });
+            const plan = planNativePomodoroAlarmEffects({ intent, granted, raw, scope, nowMs,
+                pending: pomodoroJSON(pendingJSON, 4 * 1024 * 1024), delivered: pomodoroJSON(deliveredJSON, 4 * 1024 * 1024),
+                android: { deliveryLedger: true, lateLimitMs: NATIVE_POMODORO_LATE_LIMIT_MS } });
+
+
+            if (!plan.schedule) return plan;
+            const details = plan.schedule.details as { data?: Record<string, string> };
+            return { ...plan, schedule: { ...plan.schedule, details: { ...details, channelName: REMINDER_NOTIFICATION_CHANNEL_NAME,
+                data: { ...details.data, endsAtMs: String(plan.schedule.fireAtMs) } } } };
+        });
+    },
+
+    pomodoroAlarmSaved(outcome: string): string {
+        return submit(async () => {
+            if (!['scheduled', 'retained', 'cancelled', 'uncertain', 'uninitialized', 'legacy-shown'].includes(outcome))
+                throw new Error('INVALID_INPUT: Invalid Pomodoro alarm outcome');
+            logInfo('Native Android Pomodoro alarm reconciliation saved', { scope: 'native-android', force: true,
+                context: { releaseCheck: 'v1.3.8/native-pomodoro-alarm', outcome } });
+            return {};
+        });
+    },
+
+
+    pomodoroLegacyAlert(raw: string | null, upgradedAtMs: number): string {
+
+        raw ??= null;
+        return submit(async () => {
+            pomodoroAdapter();
+            if ((raw !== null && typeof raw !== 'string') || !Number.isSafeInteger(upgradedAtMs) || upgradedAtMs <= 0)
+                throw new Error('INVALID_INPUT: Invalid RN Pomodoro record');
+            const alert = buildNativePomodoroLegacyAlert({ raw, settings: useTaskStore.getState().settings, nowMs: Date.now(), upgradedAtMs,
+                t: (key) => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key });
+            return alert.kind === 'show' ? { ...alert, details: { ...alert.details, channelName: REMINDER_NOTIFICATION_CHANNEL_NAME } } : alert;
+        });
+    },
+    pomodoroSessionRead(): string {
+        return submit(async () => pomodoroAdapter().readPomodoroSession());
+    },
+    pomodoroTransitionPrepare(requestJSON: string): string {
+        return submit(() => preparePomodoroRequest(requestJSON));
+    },
+    iosWatchPomodoroPrepare(sourceJSON: string): string {
+        return submit(() => preparePomodoroRequest('', sourceJSON));
+    },
+    pomodoroTransitionValidate(planJSON: string): string {
+        return submit(async () => validatePreparedNativePomodoroTransition(pomodoroJSON(planJSON)).result);
+    },
+    pomodoroTransitionCommit(planJSON: string, replayOnly: boolean): string {
+        return submit(async () => {
+
+
+            if (typeof replayOnly !== 'boolean') throw new Error('INVALID_INPUT: Invalid Pomodoro replay authority');
+            const plan = validatePreparedNativePomodoroTransition(pomodoroJSON(planJSON));
+            if (!replayOnly && pomodoroWarmAdmission?.planJSON === planJSON) {
+                pomodoroWarmAdmission.assertCurrent();
+                pomodoroWarmAdmission = null;
+            }
+            const adapter = pomodoroAdapter();
+            try { return await adapter.savePomodoroTransitionWithReceipt(plan, { replayOnly }); }
+            catch (error) {
+                if (error instanceof NativePomodoroTransitionRefusal)
+                    throw new Error(error.code === 'staleBaseline' ? 'STALE_REVISION: Pomodoro baseline changed before mutation'
+                        : 'NOT_READY: Pomodoro storage refused before mutation');
+                throw new Error('Pomodoro transition could not be proven');
+            }
+        });
+    },
+    pomodoroTransitionOutcome(planJSON: string): string {
+        return submit(async () => pomodoroAdapter().readPomodoroTransitionOutcome(validatePreparedNativePomodoroTransition(pomodoroJSON(planJSON))));
+    },
+
     mindSweepGuide(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.getMindSweepGuide(JSON.parse(json))); });
+    },
+    weeklyReviewProjectTaskOptions(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.getWeeklyReviewProjectTaskOptions(JSON.parse(json))); });
+    },
+    weeklyReviewProjectTaskPrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(await contract.prepareWeeklyReviewProjectTask(JSON.parse(json))); });
+    },
+    weeklyReviewProjectTaskValidate(json: string): string {
+        return submit(async () => unwrap(contract.validatePreparedWeeklyReviewProjectTask(JSON.parse(json))));
+    },
+    weeklyReviewProjectTaskCommit(json: string): string {
+        return submit(async () => unwrap(await contract.commitPreparedWeeklyReviewProjectTask(JSON.parse(json))));
+    },
+    weeklyReviewProjectTaskOutcome(json: string): string {
+        return submit(async () => unwrap(contract.weeklyReviewProjectTaskOutcome(JSON.parse(json))));
     },
     mindSweepPrepare(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.prepareMindSweepAdd(JSON.parse(json))); });
@@ -3922,38 +6444,90 @@ globalThis.MindwtrHost = {
     mindSweepCommit(json: string): string {
         return submit(async () => unwrap(await contract.commitPreparedMindSweepAdd(JSON.parse(json))));
     },
-    /** The recovery snapshot before a several-lines capture; `{ snapshot: null }` in sandbox mode. */
+
     captureSnapshot(): string {
         return submit(async () => ({ snapshot: unwrap(await contract.createQuickCaptureSnapshot()) }));
     },
-    /** `json` is `{ text, options, captureIds, snapshotFileName }`: one task per line, in one write. */
+
+
+    captureSnapshotFile(handle: string): string {
+        return submit(async () => {
+            const snapshot = unwrap(await contract.createQuickCaptureSnapshot());
+            if (!snapshot) return { snapshot: null };
+            try {
+                await channelWriteFile(handle, snapshot.contents, false);
+                return { snapshot: { fileName: snapshot.fileName, ...channelClose(handle) } };
+            } catch (error) {
+                if (channelCode(error)) throw new Error('SAVE_FAILED: The recovery snapshot could not be written');
+                throw error;
+            }
+        });
+    },
+
+
+    dataExportFile(format: string, handle: string, maxBytes: number): string {
+        return submit(async () => runSerializedSyncDocumentWriteOperation(async () => {
+            if (format !== 'json' && format !== 'csv' && format !== 'tasknotes') throw new Error('INVALID_INPUT: Unsupported export format');
+            const settled = () => {
+                const pending = getPersistenceStatus();
+                return !(pending.queued || pending.inFlight || pending.immediate || pending.retrying || pending.failed);
+            };
+            if (!settled()) throw new Error('NOT_READY: Backup export is unavailable while saving is pending');
+            const stamp = useTaskStore.getState().lastDataChangeAt;
+            if (await backupAdapter().libraryBytes() > Number(maxBytes)) throw new Error('TOO_LARGE: The library exceeds the transfer limit');
+            if (!settled() || useTaskStore.getState().lastDataChangeAt !== stamp) throw new Error('NOT_READY: The library changed while the export was checked');
+            const file = unwrap(contract.getDataBackup(format));
+            try {
+                await channelWriteFile(handle, file.content, file.encoding === 'base64');
+                return { fileName: file.fileName, bytes: channelClose(handle).bytes };
+            } catch (error) {
+                if (channelCode(error)) throw new Error('SAVE_FAILED: The export file could not be written');
+                throw error;
+            }
+        }));
+    },
+
+
+    dataChannelRoundTrip(readHandle: string, writeHandle: string): string {
+        return submit(async () => {
+            const text = channelRead(readHandle);
+            channelClose(readHandle);
+            channelWrite(writeHandle, text);
+            return channelClose(writeHandle);
+        });
+    },
+
     captureLines(json: string): string {
         return submit(async () => taskResult('quickCaptureLines', await contract.submitQuickCaptureLines(JSON.parse(json))));
     },
-    /** `json` is `{ picker, query, text, options, requestId }`: the project or area picker's search, chosen or created. */
+
     capturePicker(json: string): string {
         return submit(async () => taskResult('quickCapturePicker', await contract.submitQuickCapturePickerQuery(JSON.parse(json))));
     },
-    /** `json` is `{ params, draft, captureId, openAfterSave }`: the capture screen's Save. Reusing captureId retries: written at most once. */
+
     captureModalSubmit(json: string): string {
         return submit(async () => taskResult('captureModal', await contract.submitCaptureModal(JSON.parse(json))));
     },
-    /** `json` is `{ params, draft, captureIds }`: the capture screen's Create tasks, one task per line in one write. */
+
     captureModalLines(json: string): string {
         return submit(async () => taskResult('captureModalLines', await contract.submitCaptureModalLines(JSON.parse(json))));
     },
-    // A revision left out ("", as iOS sends none) is no revision: core requires one only from a journaling host.
+
     complete(id: string, taskRevision = ''): string {
         return submit(async () => taskResult('complete', await contract.completeTask({ id, taskRevision: taskRevision || undefined })));
     },
-    /** A target state, so an exact retry re-sends the same target. A `{ blocked }` reply wrote nothing. */
+
+    completeUndo(json: string): string {
+        return submit(async () => taskResult('completeUndo', await contract.undoTaskCompletion(JSON.parse(json))));
+    },
+
     taskFocus(id: string, focused: boolean, taskRevision = ''): string {
         return submit(async () => taskResult('taskFocus', await contract.setTaskFocus({ id, focused, taskRevision: taskRevision || undefined })));
     },
     projectFocus(id: string, focused: boolean, projectRevision = ''): string {
         return submit(async () => taskResult('projectFocus', await contract.setProjectFocus({ id, focused, projectRevision: projectRevision || undefined })));
     },
-    /** `areaId` "" is no area. Core names the new project by `requestId`, so a replay finds it. */
+
     createProject(title: string, areaId: string, requestId: string): string {
         return submit(async () => taskResult('createProject', await contract.createProject({ title, areaId: areaId || null, requestId })));
     },
@@ -3963,14 +6537,12 @@ globalThis.MindwtrHost = {
             return unwrap(contract.getAreaFilter());
         });
     },
-    /** `json` is one of getAreaFilter's `next` selections, passed to core unchanged. */
+
     setAreaFilter(json: string): string {
         return submit(async () => taskResult('areaFilter', await contract.setAreaFilter(JSON.parse(json))));
     },
-    /**
-     * `json` is `{ query, filters, limit }`, passed to core's searchTasks unchanged; the reply echoes the trimmed query.
-     * `filters: null` (the screen before any filter change) is core's DEFAULT_GLOBAL_SEARCH_FILTERS.
-     */
+
+
     search(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -3978,33 +6550,49 @@ globalThis.MindwtrHost = {
             return unwrap(await contract.searchTasks({ ...input, filters: input.filters ?? DEFAULT_GLOBAL_SEARCH_FILTERS }));
         });
     },
-    /** `json` is `{ query, name, requestId }`. Core saves one search per query, so a retry never adds a second. */
+
     saveSearch(json: string): string {
         return submit(async () => taskResult('saveSearch', await contract.saveSearch(JSON.parse(json))));
     },
-    /** Core's startInboxProcessing in RN's per-device mode ('guided' or 'quick'). */
+
+
     inboxStart(mode: string): string {
         return submit(async () => {
             requireSaved();
-            return unwrap(contract.startInboxProcessing({ mode: mode as 'guided' | 'quick' }));
+            return unwrap(contract.startInboxProcessing({ mode: mode as 'guided' | 'quick', mergeSyncedChanges: globalThis.__mindwtrHostPlatform !== 'ios' }));
         });
     },
-    /** `json` is `{ sessionId, taskId, step, edit?, mode? }`: one control's edit, passed to core unchanged. */
+    inboxStartDetailed(mode: string): string {
+        return submit(async () => {
+            requireSaved();
+            return unwrap(contract.startInboxProcessing({ mode: mode as 'guided' | 'quick', includeDetails: true }));
+        });
+    },
+    inboxEditorReload(json: string): string {
+        return submit(async () => {
+            requireSaved();
+            return unwrap(contract.reloadInboxProcessingTask(editorJson(json) as Parameters<typeof contract.reloadInboxProcessingTask>[0]));
+        });
+    },
     inboxStep(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.getInboxProcessingStep(JSON.parse(json)));
         });
     },
-    /** `json` is `{ sessionId, taskId, step, decision, requestId }`. Core answers a repeated request without writing again. */
+
     inboxCommit(json: string): string {
         return submit(async () => taskResult('inboxCommit', await contract.commitInboxProcessingStep(JSON.parse(json))));
     },
-    /** `json` is `{ sessionId, taskId, requestId }`, the header's Skip. */
+
+    inboxDecisionUndo(json: string): string {
+        return submit(async () => taskResult('inboxDecisionUndo', await contract.undoInboxDecision(JSON.parse(json))));
+    },
+
     inboxSkip(json: string): string {
         return submit(async () => taskResult('inboxSkip', await contract.skipInboxProcessingTask(JSON.parse(json))));
     },
-    /** iOS journals the exact prepared envelope before calling the private commit. */
+
     inboxCommitPrepare(json: string): string {
         return submit(async () => {
             requireSaved();
@@ -4023,13 +6611,25 @@ globalThis.MindwtrHost = {
     inboxPreparedCommit(json: string): string {
         return submit(async () => unwrap(await contract.inboxPreparedCommit(JSON.parse(json))));
     },
+    inboxUndoPrepare(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.inboxUndoPrepare(JSON.parse(json))); });
+    },
+    inboxUndoValidate(json: string): string {
+        return submit(async () => unwrap(contract.inboxUndoValidate(JSON.parse(json))));
+    },
+    inboxUndoCommit(json: string): string {
+        return submit(async () => unwrap(await contract.inboxUndoCommit(JSON.parse(json))));
+    },
+    inboxUndoOutcome(json: string): string {
+        return submit(async () => unwrap(contract.inboxUndoOutcome(JSON.parse(json))));
+    },
     inboxAfterCommit(json: string): string {
         return submit(async () => {
             requireSaved();
             return unwrap(contract.inboxAfterCommit(JSON.parse(json)));
         });
     },
-    /** Closes the session; it writes nothing. Core answers null; Kotlin reads an object. */
+
     inboxEnd(sessionId: string): string {
         return submit(async () => {
             unwrap(contract.endInboxProcessing({ sessionId }));
@@ -4037,32 +6637,157 @@ globalThis.MindwtrHost = {
         });
     },
     backupDocumentInspect(text: string, metadataJSON: string, format = 'json'): string {
-        return submit(async () => {
-            backupAdapter(true);
-            const pending = getPersistenceStatus();
-            if (pending.queued || pending.inFlight || pending.immediate || pending.retrying || pending.failed) {
-                throw new Error('NOT_READY: Backup inspection is unavailable while saving is pending');
+        return submit(async () => inspectBackup(() => text, metadataJSON, format));
+    },
+
+
+    backupDocumentInspectFile(handle: string, metadataJSON: string, format = 'json'): string {
+        return submit(async () => inspectBackup(() => {
+            try {
+                const text = channelRead(handle);
+                channelClose(handle);
+                return text;
+            } catch (error) {
+                if (channelCode(error) === 'DATA_UTF8') return '';
+                if (channelCode(error)) throw new Error('SAVE_FAILED: The selected file could not be read');
+                throw error;
             }
-            if (format !== 'json' && format !== 'json-restore' && format !== 'csv' && format !== 'todoist' && format !== 'ticktick' && format !== 'dgt' && format !== 'omnifocus') throw new Error('INVALID_INPUT: Invalid backup document input');
-            return inspectNativeBackupDocument(text, backupJson(metadataJSON) as Parameters<typeof inspectNativeBackupDocument>[1], backupTranslate, format);
+        }, metadataJSON, format));
+    },
+
+
+    backupDocumentPrepareFile(sourceHandle: string, inputJSON: string, recoveryHandle: string, planHandle: string): string {
+        return submit(async () => {
+            const input = backupJson(inputJSON) as Parameters<typeof prepareNativeBackupDocument>[1];
+            let text: string;
+            let sourceBytes: number;
+            try {
+                text = channelRead(sourceHandle);
+                sourceBytes = channelClose(sourceHandle).bytes;
+            } catch (error) {
+                if (channelCode(error) === 'DATA_UTF8') throw new Error('INVALID_INPUT: Backup file is not valid UTF-8');
+                if (channelCode(error)) throw new Error('SAVE_FAILED: The selected file could not be read');
+                throw error;
+            }
+            native().memProbe?.('prepare:read');
+            if (input && typeof input === 'object' && input.admission && input.admission.sourceBytes !== sourceBytes) {
+                throw new Error('INVALID_INPUT: Invalid backup document input');
+            }
+            const written = (write: () => void) => {
+                try { write(); } catch (error) {
+                    if (channelCode(error) === 'DATA_CAP') throw new Error('TOO_LARGE: The prepared backup exceeds the transfer limit');
+                    if (channelCode(error)) throw new Error('SAVE_FAILED: The prepared backup could not be written');
+                    throw error;
+                }
+            };
+
+            const owned = { ...input, text };
+            text = '';
+            const result = await prepareNativeBackupDocument(backupAdapter(true), owned, {
+                recovery: (recovery) => written(() => {
+                    if (!recoveryHandle) throw new Error('INVALID_INPUT: Invalid backup document input');
+                    channelWrite(recoveryHandle, recovery);
+                }),
+                plan: (part) => written(() => channelWrite(planHandle, part)),
+            });
+            native().memProbe?.('prepare:done');
+            let plan: { bytes: number; sha256: string } | undefined;
+            let recovery: { bytes: number; sha256: string } | null = null;
+            written(() => {
+                plan = channelClose(planHandle);
+                if (result.recovery) recovery = channelClose(recoveryHandle);
+            });
+
+            return { plan: plan!, recovery, ...(result.undo === false ? { noUndo: buildNativeBackupNoUndoConfirmation(backupTranslate) } : {}) };
         });
     },
     backupDocumentPrepare(inputJSON: string): string {
         return submit(async () => prepareNativeBackupDocument(backupAdapter(true), backupJson(inputJSON) as Parameters<typeof prepareNativeBackupDocument>[1]));
     },
-    backupDocumentCommit(referenceJSON: string, planJSON: string, snapshotName: string): string {
-        return submit(async () => commitNativeBackupDocument(backupAdapter(), backupJson(referenceJSON) as Parameters<typeof commitNativeBackupDocument>[1], planJSON, snapshotName));
+
+
+    backupDocumentCommit(referenceJSON: string, planJSON: string, snapshotName: string, budgetMs?: number): string {
+        return submit(async () => {
+
+
+            const before = getStorageTimeoutMs();
+            if (typeof budgetMs === 'number' && budgetMs > 0 && !debugControl('no-commit-storage') && !debugControl('no-storage-budget')) setStorageTimeoutMs(budgetMs);
+            const source = globalThis.__mindwtrHostPlatform === 'android' ? { take: () => {
+                try {
+                    const text = channelRead(planJSON);
+                    channelClose(planJSON);
+                    native().memProbe?.('commit:read');
+                    return text;
+                } catch (error) {
+                    if (channelCode(error) === 'DATA_MISMATCH') throw new Error('INVALID_INPUT: Backup operation files do not match');
+                    if (channelCode(error)) throw new Error('SAVE_FAILED: Backup plan could not be read');
+                    throw error;
+                }
+            } } : planJSON;
+            try {
+                const presence = attachmentsHost?.getLocalAttachmentPresence;
+                return await commitNativeBackupDocument(backupAdapter(), backupJson(referenceJSON) as Parameters<typeof commitNativeBackupDocument>[1], source, snapshotName,
+                    presence ? { getLocalAttachmentPresence: (uri) => presence(uri) } : {});
+            } finally {
+                native().memProbe?.('commit:done');
+                if (debugControl('no-activation-storage')) setStorageTimeoutMs(before);
+                else if (typeof budgetMs === 'number' && budgetMs > 0) await sizeStorageTimeout(backupAdapter()).catch(() => undefined);
+            }
+        });
     },
     backupDocumentOutcome(referenceJSON: string, planJSON: string, snapshotName: string): string {
         return submit(async () => readNativeBackupDocumentOutcome(backupAdapter(), backupJson(referenceJSON) as Parameters<typeof readNativeBackupDocumentOutcome>[1], planJSON, snapshotName));
     },
+
+
+    backupUndoHold(snapshotHandle: string, snapshotName: string): string {
+        return submit(async () => {
+            let text: string;
+            try {
+                text = channelRead(snapshotHandle);
+                channelClose(snapshotHandle);
+            } catch (error) {
+                if (channelCode(error)) throw new Error('SAVE_FAILED: The recovery snapshot could not be read');
+                throw error;
+            }
+            return { held: holdNativeBackupUndoAttachments(text, snapshotName) };
+        });
+    },
+
+
+    sessionRestoreRead(): string {
+        return submit(async () => ({ route: isSandboxMode() ? null : parseRestorableLastRoute(await keyValue.get(LAST_ROUTE_STORAGE_KEY), Date.now()) }));
+    },
+
+    sessionRestoreWrite(pathname: string, paramsJSON: string, ageMs = 0): string {
+        return submit(async () => {
+            if (isSandboxMode()) return { stored: false };
+            const params = JSON.parse(paramsJSON || '{}') as Record<string, unknown>;
+            const text = buildLastRouteSnapshot(pathname, params, null, Date.now() - Math.max(0, Number(ageMs) || 0));
+            if (text !== null) await keyValue.set(LAST_ROUTE_STORAGE_KEY, text);
+            return { stored: text !== null };
+        });
+    },
     backupDocumentResultModel(replyJSON: string): string {
         return submit(async () => buildNativeBackupDocumentResult(backupJson(replyJSON) as Parameters<typeof buildNativeBackupDocumentResult>[0], backupTranslate));
     },
-    backupSnapshotRestoreModel(snapshotName: string): string {
-        return submit(async () => buildNativeBackupSnapshotRestoreConfirmation(snapshotName, backupTranslate));
+
+
+    backupDocumentFailureModel(operation: string, error: string, limitMb: number): string {
+        return submit(async () => buildNativeBackupDocumentFailure(String(operation), String(error), backupTranslate, Number(limitMb) || 0));
     },
-    /** Called by iOS only after the immutable JSON file has been written and closed. */
+
+    backupLibraryBytes(): string {
+        return submit(async () => ({ bytes: await backupAdapter().libraryBytes() }));
+    },
+
+    backupSnapshotRestoreModel(snapshotName: string, mode = 'undo'): string {
+        return submit(async () => {
+            if (mode !== 'undo' && mode !== 'restore') throw new Error('INVALID_INPUT: Invalid backup document input');
+            return buildNativeBackupSnapshotRestoreConfirmation(snapshotName, backupTranslate, mode === 'undo');
+        });
+    },
+
     backupExportPrepared(format: string): string {
         return submit(async () => {
             if (globalThis.__mindwtrHostPlatform === 'ios' && (format === 'json' || format === 'csv' || format === 'tasknotes')) {
@@ -4071,12 +6796,12 @@ globalThis.MindwtrHost = {
                         scope: 'native-ios', force: true,
                         context: { releaseCheck: 'v1.3.5/ios-backup-export', outcome: 'prepared', format },
                     });
-                } catch { /* Optional diagnostics cannot prevent sharing a completed file. */ }
+                } catch {                                                                     }
             }
             return {};
         });
     },
-    /** Settings › Data's Share log: the log file's path, made when missing (null when it cannot be made). Nothing is sent. */
+
     logShare(): string {
         return submit(async () => {
             if (globalThis.__mindwtrHostPlatform === 'ios') {
@@ -4085,27 +6810,33 @@ globalThis.MindwtrHost = {
                         scope: 'native-ios', force: true,
                         context: { releaseCheck: 'v1.3.4/ios-diagnostics', operation: 'share' },
                     });
-                } catch { /* diagnostics must not stop sharing */ }
+                } catch {                                         }
             }
             return { path: await diagnosticsLog.serialize(() => diagnosticsLog.ensurePath()) };
         });
     },
-    /** Settings › Data's Clear log: deletes the log file. */
+
     logClear(): string {
         return submit(async () => {
             await diagnosticsLog.clear();
             return {};
         });
     },
-    /** Checked Clear: no appended success line may recreate the target after absence is proven. */
+
     logClearChecked(): string {
         return submit(() => diagnosticsLog.clearChecked());
     },
-    /** `name` is one of MENU_READS; `json` is that method's input. A read waits for an owed save, as every read does. */
+
+    trashSelection(json: string): string {
+        return submit(async () => { requireSaved(); return unwrap(contract.getTrashSelection(completionJson(json, 2_000_000) as Parameters<typeof contract.getTrashSelection>[0])); });
+    },
     archiveTaskSelection(json: string): string {
         return submit(async () => { requireSaved(); return unwrap(contract.getArchiveTaskSelection(completionJson(json, 2_000_000) as Parameters<typeof contract.getArchiveTaskSelection>[0])); });
     },
     doneBulkTagInput(tag: string, changedCount: number): string {
+        return taskListBulkTagInput(tag, changedCount);
+    },
+    inboxBulkTagInput(tag: string, changedCount: number): string {
         return taskListBulkTagInput(tag, changedCount);
     },
     referenceBulkTagInput(tag: string, changedCount: number): string {
@@ -4113,27 +6844,49 @@ globalThis.MindwtrHost = {
     },
     menuRead(name: string, json: string): string {
         return submit(async () => {
-            // The More sheet is navigation: it opens while a retry is owed (an empty sheet looked broken on the phone,
-            // 09-26); each destination's own read still waits for the retry and shows its banner.
+
+
             if (name !== 'more') requireSaved();
             const read = MENU_READS[name];
             if (!read) throw new Error(`INVALID_INPUT: no menu read ${name}`);
             return unwrap(read(JSON.parse(json) as never));
         });
     },
-    /**
-     * Sync (host-sync.ts), after the boot's validated load and journal replay: the network state first, then the automatic
-     * triggers start and the app's first sync is asked for. `appState` is RN's AppState ('active' or 'background').
-     * Each answers the badge and the finished-cycle count.
-     */
+
+
     syncStart(appState: string): string {
-        return submit(async () => requireSync().start(appState));
+        return submit(async () => {
+            const state = requireSync().start(appState);
+
+            gmailLifecycle(() => nativeGmail?.start(appState));
+            void nativeCalendar?.startPush();
+            return state;
+        });
     },
-    /** RN's AppState change: resume and leave run core's triggers. */
+
     syncAppState(appState: string): string {
-        return submit(async () => requireSync().appState(appState));
+        return submit(async () => {
+            gmailLifecycle(() => nativeGmail?.appState(appState));
+            return requireSync().appState(appState);
+        });
     },
-    /** `json` is the device's network state (`{ isConnected, isInternetReachable }`, as expo-network reads it). */
+
+
+    gmailRequest(name: string, json: string): string {
+        return submit(async () => {
+            if (!nativeGmail) throw new Error('Gmail capture is not available on this host');
+            return nativeGmail.request(name, JSON.parse(json) as { labelId?: string; enabled?: boolean });
+        });
+    },
+
+
+    voiceRequest(name: string, json: string): string {
+        return submit(async () => {
+            if (!nativeVoice) throw new Error('Voice capture is not available on this host');
+            return nativeVoice.request(name, JSON.parse(json) as Record<string, unknown>);
+        });
+    },
+
     syncNetwork(json: string): string {
         return submit(async () => {
             const next = JSON.parse(json) as { isConnected?: unknown; isInternetReachable?: unknown };
@@ -4144,15 +6897,21 @@ globalThis.MindwtrHost = {
             return requireSync().network(networkState);
         });
     },
-    /** The badge and the finished-cycle count now. */
+
+
+    archiveRetention(editorOpen: boolean): string {
+        return submit(async () => {
+            const selectedBackend = editorOpen ? 'off' : await Promise.resolve().then(() => requireSync().selectedBackend())
+                .then((backend): string | null => backend, () => null);
+            return unwrap(await contract.runArchiveRetention({ editorOpen, selectedBackend }));
+        });
+    },
+
     syncState(): string {
         return submit(async () => requireSync().state());
     },
-    /**
-     * CoreWork's background run (core's runner; host-sync.ts backgroundSync), after the start order drained the queue: `trigger`
-     * is 'scheduled' or 'capture', `stored` what the drains stored, `deadlineMs` a debug build's shorter deadline (0: core's). A
-     * long call (CoreHost.callLong): it settles with the run.
-     */
+
+
     backgroundSync(trigger: string, stored: number, deadlineMs: number): string {
         return submit(async () => {
             if (trigger !== 'scheduled' && trigger !== 'capture') throw new Error(`INVALID_INPUT: no background sync trigger ${trigger}`);
@@ -4160,18 +6919,70 @@ globalThis.MindwtrHost = {
             return requireSync().backgroundSync(trigger, count(stored), count(deadlineMs));
         });
     },
-    /**
-     * The pending-captures queue drained into the store (core's ingestPendingCaptures): at every boot after the journal's replay,
-     * and for CoreWork's ingest job. A journaled write; its replay drains again.
-     */
+
+
+    pullSync(): string {
+        return submit(async () => requireSync().pullSync());
+    },
+
+
+    iosWatchOpenAIRuntime(): string {
+        const arity = arguments.length;
+        return submit(async () => {
+            if (arity !== 0) throw new Error('INVALID_INPUT: Watch speech runtime takes no arguments');
+            iosWatchReadiness();
+            const result = readWatchOpenAIRuntime(useTaskStore.getState().settings);
+            iosWatchReadiness(); return result;
+        });
+    },
+    iosWatchAudioOutcome(json: string): string {
+        return submit(async () => readIOSWatchAudioOutcome(json, iosWatchReadiness));
+    },
+    iosWatchAudioNeedsTranscript(json: string): string {
+        return submit(async () => readIOSWatchAudioNeedsTranscript(json, iosWatchReadiness));
+    },
+    iosWatchAudioIngest(json: string): string {
+        const arity = arguments.length;
+        return submit(async () => {
+            if (arity !== 1) throw new Error('INVALID_INPUT: Native Watch audio requires one argument');
+            requireSaved();
+            return ingestIOSWatchAudio(json, { contract, current: iosWatchReadiness, lastApplied: lastAppliedRecord });
+        });
+    },
+    iosWatchIngestOutcome(json: string): string {
+        return submit(async () => readIOSWatchBatchOutcome(json, iosWatchReadiness));
+    },
+    iosWatchIngest(json: string): string {
+        const arity = arguments.length;
+        return submit(async () => {
+            if (arity !== 1) throw new Error('INVALID_INPUT: Native Watch batch requires one argument');
+            requireSaved();
+            const result = await ingestIOSWatchBatch(json, { contract, current: iosWatchReadiness, lastApplied: lastAppliedRecord });
+            logInfo('Native iOS Watch command batch saved', { scope: 'native-ios', force: true,
+                context: { releaseCheck: 'v1.3.9/ios-watch-ingest', operation: 'ingest', outcome: 'saved' } });
+            return result;
+        });
+    },
     ingest(requestId: string): string {
         return submit(async () => taskResult('ingest', await contract.ingestPendingCaptures({ requestId, queue: pendingCaptureQueue, lastApplied: lastAppliedRecord })));
     },
-    /**
-     * An automation trigger (`json`: the receiver's `{ action, context }`): core's notification as the details RN's alarm
-     * library posts it with (its channel's name added), or null. None in sandbox mode, as RN's sendMobileImmediateNotification.
-     * It writes nothing, and a failed save does not block it.
-     */
+
+
+    ingestAudio(): string {
+        return submit(async () => {
+            if (!widgetAudioPort) return { ingested: 0 };
+            const result = unwrap(await contract.ingestPendingAudio({ queue: pendingCaptureQueue, lastApplied: lastAppliedRecord, audio: widgetAudioPort }));
+            if (result.ingested > 0) {
+                try {
+                    logInfo('Native Android widget recordings became tasks', { scope: 'capture', force: true,
+                        context: { releaseCheck: 'v1.3.8/native-widget-audio-ingest', outcome: 'created', count: String(result.ingested) } });
+                } catch {                                                 }
+            }
+            return result;
+        });
+    },
+
+
     contextAutomation(json: string): string {
         return submit(async () => {
             const { notification } = unwrap(contract.runContextAutomation(JSON.parse(json)));
@@ -4179,28 +6990,37 @@ globalThis.MindwtrHost = {
             return { notification: { ...buildImmediateNotificationDetails(notification.title, notification.message, notification.data), channelName: REMINDER_NOTIFICATION_CHANNEL_NAME } };
         });
     },
-    /**
-     * Reminder alarms (host-reminders.ts), after the boot's validated load, journal replay and queue drain: RN's alarms cancelled
-     * once, the first plan applied, core's timers armed. `ask`: RN would ask for the notification permission now.
-     */
+
+
     remindersStart(): string {
         return submit(async () => requireReminders().start());
     },
-    /**
-     * One plan applied now: `mode` "rebuild" remakes every alarm (a reboot dropped them, exact alarms were just allowed), "fired" makes
-     * the daily or weekly alarm `key` that fired again at its next time, else "cycle".
-     */
-    remindersCycle(mode: string, key: string): string {
-        return submit(async () => (mode === 'fired' && key ? requireReminders().fired(key) : requireReminders().cycle(mode === 'rebuild')));
+
+
+    appSearchStart(): string {
+        return submit(async () => { void nativeAppSearch?.start(); return { started: Boolean(nativeAppSearch) }; });
     },
-    /** A reminder's Done (core's completeReminderTask): a journaled write under the request UUID its notification was posted with. */
+
+    appSearchApply(): string {
+        return submit(async () => { await nativeAppSearch?.apply(); return { applied: Boolean(nativeAppSearch) }; });
+    },
+
+    appSearchIds(): string {
+        return submit(async () => ({ ids: nativeAppSearch ? await nativeAppSearch.ids() : [] }));
+    },
+
+
+    remindersCycle(mode: string, key: string): string {
+        return submit(async () => (mode === 'fired' && key ? requireReminders().fired(key)
+            : mode === 'background' && (key === 'capture' || key === 'sync') ? requireReminders().background(key)
+            : requireReminders().cycle(mode === 'rebuild')));
+    },
+
     reminderDone(requestId: string, taskId: string): string {
         return submit(async () => taskResult('reminderDone', await contract.completeReminderTask({ requestId, taskId })));
     },
-    /**
-     * A reminder's Snooze (core's snoozeReminder, `json`: `{ requestId, requestedAt, details }`): a journaled write whose alarm the
-     * engine makes once (host-reminders.ts); its reply is that alarm, the same one on every retry of the request.
-     */
+
+
     reminderSnooze(json: string): string {
         return submit(async () => {
             const result = await contract.snoozeReminder(JSON.parse(json));
@@ -4208,50 +7028,57 @@ globalThis.MindwtrHost = {
             return taskResult('reminderSnooze', result);
         });
     },
-    /** A line of Kotlin's runner (CoreWork, the queue drain) through core's logger, its fields in `context`. */
-    logLinkHandoff(outcome: string, surface: string): string {
+    logLinkHandoff(outcome: string, surface: string, scheme = 'upnote'): string {
         return submit(async () => {
-            if (!['opened', 'failed'].includes(outcome) || !['markdown', 'attachment'].includes(surface)) return {};
-            const meta = { scope: 'links', force: true, context: { releaseCheck: 'v1.3.4/upnote-links', outcome, surface, scheme: 'upnote' } };
-            if (outcome === 'failed') logWarn('Native UpNote handoff failed', meta);
-            else logInfo('Native UpNote handoff accepted', meta);
+            if (!['opened', 'failed'].includes(outcome) || !['markdown', 'attachment'].includes(surface)
+                || !['upnote', 'obsidian'].includes(scheme)) return {};
+            const meta = { scope: 'links', force: true, context: { outcome, surface, scheme,
+                ...(scheme === 'obsidian' ? { releaseCheck: 'v1.3.9/ios-native-obsidian-link' } : {}) } };
+            const noteApp = scheme === 'upnote' ? 'UpNote' : 'Obsidian';
+            if (outcome === 'failed') logWarn(`Native ${noteApp} handoff failed`, meta);
+            else logInfo(`Native ${noteApp} handoff accepted`, meta);
             return {};
         });
     },
     logLine(message: string, contextJson: string): string {
         return submit(async () => {
             try {
-                logInfo(message, { scope: 'native-android', context: JSON.parse(contextJson) as Record<string, unknown> });
-            } catch { /* a diagnostic line must never fail its caller */ }
+                logInfo(message, { scope: globalThis.__mindwtrHostPlatform === 'ios' ? 'native-ios' : 'native-android',
+                    ...(['Native iOS capture copilot completed', 'Native iOS ordinary project next action confirmed', 'Native Whisper model store initialized', 'Native Whisper model operation failed'].includes(message) ? { force: true } : {}), context: JSON.parse(contextJson) as Record<string, unknown> });
+            } catch {                                                    }
             return {};
         });
     },
-    /** After the journal's boot replay: drops request receipts older than 30 days. */
+
     pruneReceipts(): string {
-        return submit(async () => ({ pruned: await pruneNativeRequestReceipts(sqlite) }));
+        return submit(async () => ({ pruned: await withHostConnection(() => pruneNativeRequestReceipts(sqlite)) }));
     },
-    /** Private iOS startup: unfinished response ownership outranks receipt expiry. */
-    iosPruneReceipts(rawRetentionJSON: string): string {
+
+    iosPruneReceipts(rawRetentionJSON: string, owedRequestId: string | null = null, owedInboxRequestIds: string[] = []): string {
         return submit(async () => {
             const invalid = () => new Error('INVALID_INPUT: Invalid reminder receipt retention');
             if (globalThis.__mindwtrHostPlatform !== 'ios' || typeof rawRetentionJSON !== 'string'
                 || rawRetentionJSON.length > 8192 || new TextEncoder().encode(rawRetentionJSON).byteLength > 8192) throw invalid();
             let retained: unknown;
             try { retained = JSON.parse(rawRetentionJSON); } catch { throw invalid(); }
+            if (owedRequestId !== null && (typeof owedRequestId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(owedRequestId))) throw invalid();
+            if (!Array.isArray(owedInboxRequestIds) || owedInboxRequestIds.length > 2
+                || new Set(owedInboxRequestIds).size !== owedInboxRequestIds.length
+                || owedInboxRequestIds.some((id) => typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id))) throw invalid();
             if (retained !== null && (!Array.isArray(retained) || retained.length > 128
                 || retained.some((id) => typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id))
                 || new Set(retained).size !== retained.length)) throw invalid();
-            const pruned = await pruneNativeRequestReceipts(sqlite, new Date(), retained === null
-                ? { retainedCommands: ['reminderComplete', 'reminderSnooze'] }
-                : { retainedRequestIds: retained as string[] });
+            const pruned = await withHostConnection(() => pruneNativeRequestReceipts(sqlite, new Date(), retained === null
+                ? { retainedCommands: ['reminderComplete', 'reminderSnooze', 'iosShareCapture', 'iosWidgetCompletion', 'iosWatchIngestItem'], retainedRequestIds: [...new Set([...(owedRequestId ? [owedRequestId] : []), ...owedInboxRequestIds])] }
+                : { retainedCommands: ['iosShareCapture', 'iosWidgetCompletion', 'iosWatchIngestItem'], retainedRequestIds: [...new Set([...(retained as string[]), ...(owedRequestId ? [owedRequestId] : []), ...owedInboxRequestIds])] }));
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS reminder receipt retention applied',
                 context: { releaseCheck: 'v1.3.5/ios-reminder-receipt-retention', outcome: retained === null ? 'conservative' : 'snapshot' },
-            }, { force: true }); } catch { /* Logging cannot change an acknowledged prune. */ }
+            }, { force: true }); } catch {                                                    }
             return { pruned };
         });
     },
-    /** `name` is one of ABOUT_REQUESTS; `json` is that request's input. It writes only RN's AsyncStorage keys. */
+
     aboutRequest(name: string, json: string): string {
         return submit(async () => {
             const request = ABOUT_REQUESTS[name];
@@ -4259,7 +7086,16 @@ globalThis.MindwtrHost = {
             return unwrap(await request(JSON.parse(json) as never));
         });
     },
-    /** `name` is one of AI_REQUESTS; `json` is that request's input. It writes nothing. */
+
+    calendarRequest(name: string, json: string): string {
+        return submit(async () => {
+            requireSaved();
+            const request = CALENDAR_REQUESTS[name];
+            if (!request) throw new Error(`INVALID_INPUT: no calendar request ${name}`);
+            return unwrap(await request(JSON.parse(json) as never));
+        });
+    },
+
     aiRequest(name: string, json: string): string {
         return submit(async (signal) => {
             requireSaved();
@@ -4295,7 +7131,7 @@ globalThis.MindwtrHost = {
                 await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                     message: 'Native iOS link-compatible attachment lineage validated',
                     context: { releaseCheck: 'v1.3.5/ios-attachment-link-lineage', outcome: 'validated' } }, { force: true });
-            } catch { /* Diagnostics do not change validation or grant native ownership. */ }
+            } catch {                                                                       }
             return result;
         });
     },
@@ -4306,7 +7142,7 @@ globalThis.MindwtrHost = {
                 await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                     message: 'Native iOS link-compatible attachment lineage validated',
                     context: { releaseCheck: 'v1.3.5/ios-attachment-link-lineage', outcome: 'validated' } }, { force: true });
-            } catch { /* Diagnostics do not change validation or grant native ownership. */ }
+            } catch {                                                                       }
             return result;
         });
     },
@@ -4328,20 +7164,32 @@ globalThis.MindwtrHost = {
             return prepareNativeAttachmentDraftAvailability(attachmentDraftJson(json));
         });
     },
-    iosTaskDraftPrepareAvailability(json: string, prepareSource: unknown): string {
+    iosTaskDraftPrepareAvailability(json: string, prepareSource: unknown, dropboxControl?: unknown): string {
         return submit(async (signal) => {
             const unavailable = () => new Error('NOT_READY: Task attachment preparation is unavailable');
+            const cloudKit = nativeTaskAttachmentPreparationUsesCloudKit(json);
             if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || !localAttachments || nativeSync
                 || iosTaskAttachmentPreparation || iosProjectFilePreparation || iosCleanupCallback || iosForegroundFailure
-                || typeof prepareSource !== 'function' || !globalThis.__mindwtrSyncSecrets
+                || typeof prepareSource !== 'function' || (cloudKit ? !iosCloudKitAvailable() : !globalThis.__mindwtrSyncSecrets)
                 || isSandboxMode() || isWorkspaceTransitionActive()) throw unavailable();
             requireSaved();
             const channels = nativeFileChannels();
             if (!channels) throw unavailable();
             let callback: ((metadataJSON: string, plaintextBase64: string) => string) | null = prepareSource as typeof callback;
+            const sourceOwner = callback;
+            if (dropboxControl !== undefined && typeof dropboxControl !== 'function') throw unavailable();
+            iosDropboxControl = typeof dropboxControl === 'function' ? dropboxControl as (requestJSON: string) => unknown : null;
+            iosDropboxSignal = signal;
             iosTaskAttachmentPreparation = true;
+            if (cloudKit) iosSelectedCloudKitSource = sourceOwner;
             try {
+                const dropbox = iosDropboxControl ? ensureIosManualSync().dropboxBinding : null;
                 return await prepareNativeTaskAttachmentAvailability(json, {
+                    ...(dropbox ? { dropbox } : {}),
+                    ...(cloudKit ? { cloudKit: createNativeCloudKitAssets((request, selectedSignal) => {
+                        if (!callback || iosSelectedCloudKitSource !== sourceOwner) throw unavailable();
+                        return iosCloudKitCall(request, selectedSignal);
+                    }) } : {}),
                     getLegacyValue: (name) => keyValue.get(name),
                     getSecret: (account) => (globalThis.__mindwtrSyncSecrets as HostSecrets).getSecret(account),
                     crypto: createHostSyncCrypto((globalThis as { __mindwtrCryptoCall?: Parameters<typeof createHostSyncCrypto>[0] }).__mindwtrCryptoCall),
@@ -4350,10 +7198,13 @@ globalThis.MindwtrHost = {
                         return callback(metadata, bytes);
                     },
                 }, channels, signal);
-            } finally { callback = null; iosTaskAttachmentPreparation = false; }
+            } finally {
+                if (iosSelectedCloudKitSource === sourceOwner) iosSelectedCloudKitSource = null;
+                callback = null; iosTaskAttachmentPreparation = false; iosDropboxControl = null; iosDropboxSignal = undefined;
+            }
         });
     },
-    iosProjectFilePrepareAvailability(json: string, prepareSource: unknown): string {
+    iosProjectFilePrepareAvailability(json: string, prepareSource: unknown, dropboxControl?: unknown): string {
         return submit(async (signal) => {
             const unavailable = () => new Error('NOT_READY: Project download is unavailable');
             if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || !localAttachments || nativeSync
@@ -4362,9 +7213,14 @@ globalThis.MindwtrHost = {
                 || isSandboxMode() || isWorkspaceTransitionActive()) throw unavailable();
             requireSaved(); const channels = nativeFileChannels(); if (!channels) throw unavailable();
             let callback: ((metadataJSON: string, plaintextBase64: string) => string) | null = prepareSource as typeof callback;
+            if (dropboxControl !== undefined && typeof dropboxControl !== 'function') throw unavailable();
+            iosDropboxControl = typeof dropboxControl === 'function' ? dropboxControl as (requestJSON: string) => unknown : null;
+            iosDropboxSignal = signal;
             iosProjectFilePreparation = true;
             try {
+                const dropbox = iosDropboxControl ? ensureIosManualSync().dropboxBinding : null;
                 const result = await prepareNativeProjectFileAvailability(json, {
+                    ...(dropbox ? { dropbox } : {}),
                     getLegacyValue: (name) => keyValue.get(name),
                     getSecret: (account) => (globalThis.__mindwtrSyncSecrets as HostSecrets).getSecret(account),
                     crypto: createHostSyncCrypto((globalThis as { __mindwtrCryptoCall?: Parameters<typeof createHostSyncCrypto>[0] }).__mindwtrCryptoCall),
@@ -4377,7 +7233,7 @@ globalThis.MindwtrHost = {
                     return { ...result, result: { status: result.status, message: getAttachmentResolutionMessage(result, t), update: null } };
                 }
                 return result;
-            } finally { callback = null; iosProjectFilePreparation = false; }
+            } finally { callback = null; iosProjectFilePreparation = false; iosDropboxControl = null; iosDropboxSignal = undefined; }
         });
     },
     attachmentDraftValidateLineageV5(json: string): string {
@@ -4419,7 +7275,7 @@ globalThis.MindwtrHost = {
             return validateNativeAttachmentDraftLineageV3(attachmentDraftJson(json));
         });
     },
-    /** Private read-only opening check; native retains the exact editor and sidecar owner. */
+
     attachmentDraftResumeCheckV3(json: string): string {
         return submit(async () => {
             if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('NOT_READY: Attachment draft capability is unavailable');
@@ -4451,7 +7307,7 @@ globalThis.MindwtrHost = {
             return prepareNativeAttachmentDraftDiscardCandidatesV3(attachmentDraftJson(json));
         });
     },
-    /** Pure pre-hydration cleanup policy; only native callbacks carry physical authority. */
+
     attachmentCleanupPrepare(projectionJSON: string, candidateJSON: string): string {
         if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('INVALID_INPUT');
         return JSON.stringify(prepareNativeAttachmentCleanupWitness(
@@ -4471,7 +7327,7 @@ globalThis.MindwtrHost = {
         }
         return result;
     },
-    /** Private, synchronous final handoff; native passes ephemeral proof-bound callbacks. */
+
     attachmentDraftDiscardRetire(json: string, keepCallback: () => string, retireCallback: () => string): string {
         return retireAttachmentDiscard(json, keepCallback, retireCallback);
     },
@@ -4527,12 +7383,12 @@ globalThis.MindwtrHost = {
             throw new Error('INVALID_INPUT');
         });
     },
-    /** Private synchronous Save handoff; no native retirement authority is supplied by JSON. */
+
     attachmentFileEditSaveRetire(json: string, referencedCallback: () => string, taskChangedCallback: () => string,
         retireCallback: () => string): string {
         return retireAttachmentFileEditSave(json, referencedCallback, taskChangedCallback, retireCallback);
     },
-    /** Called only after the native private record and exact checkpoint are durable. */
+
     attachmentDraftAcknowledged(operation: string, outcome: string): string {
         return submit(async () => {
             const finishedDiscard = operation === 'discard-finish' && outcome === 'confirmed';
@@ -4554,6 +7410,9 @@ globalThis.MindwtrHost = {
             const webdavProjectDownload = operation === 'webdav-project-download' && ['saved', 'unrecoverable', 'noop', 'abandoned', 'refused', 'cleanup-pending', 'decrypted'].includes(outcome);
             const projectDownload = webdavProjectDownload || operation === 'selfhosted-project-download' && ['saved', 'abandoned', 'refused', 'cleanup-pending', 'decrypted'].includes(outcome);
             const webdavTaskAvailability = operation === 'webdav-task-availability' && ['confirmed', 'source-retired'].includes(outcome);
+            const cloudKitTaskAvailability = operation === 'cloudkit-task-availability' && outcome === 'confirmed';
+            const dropboxAvailability = operation === 'dropbox-task-availability' && outcome === 'confirmed'
+                || operation === 'dropbox-project-download' && ['confirmed', 'cleanup-pending', 'decrypted'].includes(outcome);
             const taskDownloadMaterial = operation === 'task-download-material' && outcome === 'decrypted';
             const selfHostedAvailability = webdavTaskAvailability || ['selfhosted-task-availability', 'selfhosted-project-availability'].includes(operation) && outcome === 'confirmed';
             const preexistingReplay = operation === 'preexisting-journal-replay' && outcome === 'confirmed';
@@ -4570,17 +7429,17 @@ globalThis.MindwtrHost = {
             const taskFileHash = operation === 'task-file-hash' && outcome === 'saved';
             const ownedCleanup = operation === 'cleanup-owned-retirement' && ['removed', 'absent', 'retained'].includes(outcome);
             const editorAcknowledged = ['editor-add', 'editor-remove', 'editor-save', 'editor-discard', 'editor-recover'].includes(operation) && outcome === 'confirmed';
-            if (globalThis.__mindwtrHostPlatform !== 'ios' || !localAttachments && !finishedDiscard && !unstartedDiscard && !removedDraft && !mixedSave && !mixedDiscard && !mixedAdd && !providerAdd && !photoAdd && !audioPlayback && !completeSave && !completeUndo && !ownedResume && !editorAcknowledged && !preexistingReplay && !containerRecovery && !fileOpen && !projectFileOpen && !relocatedOpen && !relocatedAvailability && !relocatedProjectAvailability && !cachedProjectAvailability && !projectFileRemove && !projectFileAdd && !projectFileHash && !taskFileHash && !ownedCleanup && !availabilityConsumer && !selfHostedAvailability && !projectDownload && !taskDownloadMaterial
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || !localAttachments && !finishedDiscard && !unstartedDiscard && !removedDraft && !mixedSave && !mixedDiscard && !mixedAdd && !providerAdd && !photoAdd && !audioPlayback && !completeSave && !completeUndo && !ownedResume && !editorAcknowledged && !preexistingReplay && !containerRecovery && !fileOpen && !projectFileOpen && !relocatedOpen && !relocatedAvailability && !relocatedProjectAvailability && !cachedProjectAvailability && !projectFileRemove && !projectFileAdd && !projectFileHash && !taskFileHash && !ownedCleanup && !availabilityConsumer && !selfHostedAvailability && !projectDownload && !taskDownloadMaterial && !cloudKitTaskAvailability && !dropboxAvailability
                 || !(['add', 'checkpoint', 'save'].includes(operation) && ['confirmed', 'replayed'].includes(outcome)
                     || operation === 'discard' && outcome === 'retained'
-                    || operation === 'discard-capacity' && outcome === 'confirmed' || finishedDiscard || unstartedDiscard || removedDraft || mixedSave || mixedDiscard || mixedAdd || providerAdd || photoAdd || audioPlayback || completeSave || completeUndo || ownedResume || editorAcknowledged || preexistingReplay || containerRecovery || fileOpen || projectFileOpen || relocatedOpen || relocatedAvailability || relocatedProjectAvailability || cachedProjectAvailability || projectFileRemove || projectFileAdd || projectFileHash || taskFileHash || ownedCleanup || availabilityConsumer || selfHostedAvailability || projectDownload || taskDownloadMaterial)) return {};
+                    || operation === 'discard-capacity' && outcome === 'confirmed' || finishedDiscard || unstartedDiscard || removedDraft || mixedSave || mixedDiscard || mixedAdd || providerAdd || photoAdd || audioPlayback || completeSave || completeUndo || ownedResume || editorAcknowledged || preexistingReplay || containerRecovery || fileOpen || projectFileOpen || relocatedOpen || relocatedAvailability || relocatedProjectAvailability || cachedProjectAvailability || projectFileRemove || projectFileAdd || projectFileHash || taskFileHash || ownedCleanup || availabilityConsumer || selfHostedAvailability || projectDownload || taskDownloadMaterial || cloudKitTaskAvailability || dropboxAvailability)) return {};
             try {
                 if (completeSave && outcome === 'domainSaved') await diagnosticsLog.append({
                     ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                     message: 'Native iOS owned raw row Save acknowledged',
                     context: { releaseCheck: 'v1.3.5/ios-owned-raw-row-save', operation, outcome },
                 }, { force: true });
-            } catch { /* Keep the existing acknowledgment independent of this extra marker. */ }
+            } catch {                                                                          }
             try {
                 await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                     message: 'Native iOS attachment draft acknowledged',
@@ -4588,6 +7447,8 @@ globalThis.MindwtrHost = {
                         : webdavProjectDownload ? { releaseCheck: 'v1.3.5/ios-webdav-project-download' }
                         : projectDownload ? { releaseCheck: 'v1.3.5/ios-selfhosted-project-download' }
                         : taskDownloadMaterial ? { releaseCheck: 'v1.3.5/ios-task-download-material' }
+                        : dropboxAvailability ? { releaseCheck: 'v1.3.9/ios-dropbox' }
+                        : cloudKitTaskAvailability ? { releaseCheck: 'v1.3.9/ios-cloudkit-selected-download' }
                         : webdavTaskAvailability ? { releaseCheck: 'v1.3.5/ios-webdav-task-availability' }
                         : selfHostedAvailability ? { releaseCheck: 'v1.3.5/ios-selfhosted-file-availability' }
                         : availabilityConsumer ? { releaseCheck: 'v1.3.5/ios-task-availability-consumers' }
@@ -4618,11 +7479,11 @@ globalThis.MindwtrHost = {
                             : unstartedDiscard ? { releaseCheck: 'v1.3.5/ios-unstarted-add-discard' }
                                 : operation === 'discard-capacity' ? { releaseCheck: 'v1.3.5/ios-owned-discard-capacity' }
                                     : { releaseCheck: 'v1.3.4/ios-attachment-draft-owned' }), operation: editorAcknowledged ? operation.slice('editor-'.length) : operation, outcome } }, { force: true });
-            } catch { /* Diagnostics cannot invalidate a durable acknowledgment. */ }
+            } catch {                                                               }
             return {};
         });
     },
-    /** `name` is one of ATTACHMENT_REQUESTS; `json` is that call's input. It writes no journaled command. */
+
     attachmentRequest(name: string, json: string): string {
         return submit(async () => {
             requireSaved();
@@ -4648,40 +7509,117 @@ globalThis.MindwtrHost = {
                 try {
                     await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios', message: 'Native iOS local attachment operation completed',
                         context: { releaseCheck: 'v1.3.4/ios-local-attachment-host', operation: name, outcome: 'completed' } }, { force: true });
-                } catch { /* an acknowledged local operation cannot fail on its diagnostic */ }
+                } catch {                                                                     }
             }
             return answer;
         });
     },
-    /**
-     * Operation `idText` is no longer wanted (CoreHost.cancel: an AI request whose input changed, whose screen closed, or whose
-     * caller stopped waiting): its signal fires, so its provider call stops. Unlike cancel, no other host call is refused.
-     */
+
+
     abort(idText: string): null {
         pending.get(Number(idText))?.controller.abort(Object.assign(new Error('The AI request was cancelled'), { name: 'AbortError' }));
         return null;
     },
-    /** Debug builds only: runNetCheck against check-net-device.mjs's server on `port`. */
+
     netCheck(port: string): string {
         return submit(async () => runNetCheck(port));
     },
-    /** Debug builds only: runNetDeadline, which CoreHost runs past a short deadline. */
+
     netDeadline(port: string, mode: string): string {
         return submit(async (signal) => runNetDeadline(port, mode, signal));
     },
-    /**
-     * CoreHost's deadline for operation `idText` passed: every open fetch rejects and new host calls are refused (until
-     * CoreHost resumes them), and the operation's signal fires, so it can drain before the host reports the failure.
-     */
+
+
     cancel(idText: string): null {
         (globalThis.__cancelHostCalls as (message: string) => void)('The host operation timed out');
         pending.get(Number(idText))?.controller.abort(Object.assign(new Error('The host operation timed out'), { name: 'AbortError' }));
         return null;
     },
-    // Synchronous, read-only observation: installed before any native OS await.
+
     iosReminderObserve(): string { return JSON.stringify(iosReminderEffects.observe()); },
     iosReminderObservation(): string { return JSON.stringify(iosReminderEffects.observation()); },
     iosReminderDisposeObservation(): string { return JSON.stringify(iosReminderEffects.disposeObservation()); },
+    iosPomodoroAlarmBegin(token: string): string {
+        return submit(async (signal) => {
+            requireReminderSignal(signal);
+
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || iosPomodoroAlarmTurn
+                || typeof token !== 'string' || !token || token.length > 128)
+                throw new Error('NOT_READY: Pomodoro alarm turn is unavailable');
+            const adapter = pomodoroAdapter(), before = useTaskStore.getState();
+            const generation = getPersistenceStatus().generation;
+            const ready = () => {
+                requireReminderSignal(signal);
+                requireSaved(); unwrap(contract.getDataSettings());
+                const status = getPersistenceStatus(), state = useTaskStore.getState();
+                if (pomodoroAdapter() !== adapter || state.tasks !== before.tasks || state.settings !== before.settings
+                    || status.generation !== generation || status.failed || status.queued || status.inFlight
+                    || status.immediate || status.retrying)
+                    throw new Error('NOT_READY: Pomodoro alarm saved data changed');
+            };
+            const current = async () => {
+                ready();
+                if (!await adapter.readRowBaseline())
+                    throw new Error('STALE_REVISION: Pomodoro alarm saved data changed');
+                ready();
+            };
+            await current();
+            if (iosPomodoroAlarmTurn) throw new Error('NOT_READY: Pomodoro alarm turn is unavailable');
+            iosPomodoroAlarmTurn = { token, current };
+            return true;
+        });
+    },
+    iosPomodoroAlarmCurrent(token: string): string {
+        return submit(async (signal) => {
+            requireReminderSignal(signal); await requirePomodoroAlarmTurn(token); requireReminderSignal(signal); return true;
+        });
+    },
+    iosPomodoroAlarmPrepare(token: string, granted: boolean, raw: string | null, scope: string,
+        pendingJSON: string, deliveredJSON: string): string {
+        return submit(async (signal) => {
+            requireReminderSignal(signal); await requirePomodoroAlarmTurn(token);
+            if (typeof granted !== 'boolean') throw new Error('INVALID_INPUT: Invalid Pomodoro permission');
+            const settings = useTaskStore.getState().settings;
+
+            const session = !granted || settings.gtd?.pomodoro?.completionAlert === false
+                ? null : (await pomodoroAdapter().readPomodoroSession()).raw;
+            await requirePomodoroAlarmTurn(token); requireReminderSignal(signal);
+            const nowMs = Date.now();
+            const intent = buildNativePomodoroAlarmIntent({ raw: session, settings, nowMs,
+                t: (key) => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key });
+            return planNativePomodoroAlarmEffects({ intent, granted, raw, scope, nowMs,
+                pending: pomodoroJSON(pendingJSON, 4 * 1024 * 1024),
+                delivered: pomodoroJSON(deliveredJSON, 4 * 1024 * 1024) });
+        });
+    },
+    iosPomodoroAlarmDispatchPrepare(token: string, intentJSON: string, raw: string | null, scope: string): string {
+        return submit(async (signal) => {
+            requireReminderSignal(signal); await requirePomodoroAlarmTurn(token);
+            const settings = useTaskStore.getState().settings;
+            const session = settings.gtd?.pomodoro?.completionAlert === false
+                ? null : (await pomodoroAdapter().readPomodoroSession()).raw;
+            await requirePomodoroAlarmTurn(token); requireReminderSignal(signal);
+            const intent = buildNativePomodoroAlarmIntent({ raw: session, settings, nowMs: Date.now(),
+                t: (key) => unwrap(contract.getStrings({ keys: [key] })).strings[key] ?? key });
+            return prepareNativePomodoroAlarmDispatch({ intent, raw, scope, attempt: pomodoroJSON(intentJSON, 16 * 1024) });
+        });
+    },
+    iosPomodoroAlarmAcknowledged(token: string, outcome: string): string {
+        return submit(async (signal) => {
+            requireReminderSignal(signal); await requirePomodoroAlarmTurn(token);
+            if (!['scheduled', 'retained', 'cancelled', 'uncertain', 'uninitialized'].includes(outcome))
+                throw new Error('INVALID_INPUT: Invalid Pomodoro alarm outcome');
+            try {
+                await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
+                    message: 'Native iOS Pomodoro alarm reconciliation saved',
+                    context: { releaseCheck: 'v1.3.5/ios-pomodoro-alarm-effects', outcome } }, { force: true });
+            } catch {                                                                      }
+            return {};
+        });
+    },
+    iosPomodoroAlarmEnd(token: string): string {
+        return submit(async () => { if (iosPomodoroAlarmTurn?.token === token) iosPomodoroAlarmTurn = null; return {}; });
+    },
     iosReminderBegin(token: string): string {
         return submit(async (signal) => { requireReminderSignal(signal); return iosReminderEffects.begin(token); });
     },
@@ -4704,7 +7642,7 @@ globalThis.MindwtrHost = {
             return iosReminderEffects.acknowledge(token, mode, scheduled, cancelled, collapsed, rearmed);
         });
     },
-    /** Pure preview only: no alarm bridge, ownership-map write or permission request. */
+
     iosReadReminderPlan(permissionGranted: boolean): string {
         return submit(async (signal) => {
             const adapter = bootAdapter, generation = getPersistenceStatus().generation;
@@ -4740,7 +7678,7 @@ globalThis.MindwtrHost = {
                     message: 'Native iOS reminder plan inspected',
                     context: { releaseCheck: 'v1.3.5/ios-reminder-plan', outcome: 'planned' },
                 }, { force: true });
-            } catch { /* Diagnostics cannot change the inspected plan. */ }
+            } catch {                                                     }
             assertReady();
             return result.value;
         });
@@ -4830,11 +7768,11 @@ globalThis.MindwtrHost = {
                     message: 'Native iOS feedback submission acknowledged',
                     context: { releaseCheck: 'v1.3.5/ios-feedback', outcome: 'sent' },
                 }, { force: true });
-            } catch { /* Diagnostics cannot replace an acknowledged submission. */ }
+            } catch {                                                              }
             return { status: 'sent' };
         });
     },
-    /** Private native owners; never exported through generic CoreHost.call. */
+
     iosCalendarPushStart(): string {
         return submit((signal) => iosCalendarPushOwned(signal, () => iosCalendarPushLifecycle!.start()));
     },
@@ -4886,7 +7824,7 @@ globalThis.MindwtrHost = {
             try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                 message: 'Native iOS calendar push outcome',
                 context: { releaseCheck: 'v1.3.5/ios-calendar-push', operation: input.operation, outcome: input.outcome },
-            }, { force: true }); } catch { /* Diagnostics cannot change a settled native result. */ }
+            }, { force: true }); } catch {                                                          }
             return null;
         });
     },
@@ -4933,6 +7871,695 @@ globalThis.MindwtrHost = {
             return value;
         });
     },
+    iosVoiceEndpointSessionOpen(id: string): string {
+        return submit(async () => {
+            unwrap(iosVoiceReadiness()); requireSaved();
+            const state = useTaskStore.getState();
+            if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) || state.isLoading || state.editLockCount > 0
+                || state.settings.ai?.speechToText?.provider !== 'openai')
+                throw new Error('NOT_READY: Voice endpoint is unavailable');
+            iosVoiceEndpointSession = { id, adapter: bootAdapter!, generation: getPersistenceStatus().generation,
+                settings: state.settings, frozen: JSON.parse(JSON.stringify(state.settings)) };
+            iosVoiceEndpointRetry = null;
+            return null;
+        });
+    },
+    iosVoiceEndpointSessionClose(id: string): string {
+        return submit(async () => {
+            if (iosVoiceEndpointSession?.id === id) iosVoiceEndpointSession = null;
+            if (iosVoiceEndpointRetry?.session === id) iosVoiceEndpointRetry = null;
+            return null;
+        });
+    },
+    iosVoiceEndpointSensitive(json: string, owner: (json: string) => unknown): string {
+        return submit(signal => runVoiceEndpointSensitive(json, owner, signal));
+    },
+    iosVoiceWhisperModel(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const runtime = unwrap(await iosVoiceMethods.runtimeOptions(iosVoiceJSON(json, 256), current));
+            if (runtime.provider !== 'whisper') return null;
+            const model = getSelectedMobileWhisperModel(runtime.model);
+            if (!model) throw new Error('NOT_READY: Local speech model is unavailable');
+            current();
+            return { version: 1, id: model.id, fileName: model.fileName, sizeBytes: model.sizeBytes, sha256: model.sha256,
+                urls: WHISPER_MODEL_BASE_URLS.map(root => `${root}/${model.fileName}`) };
+        });
+    },
+    iosVoiceWhisperLanguage(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const input = iosVoiceJSON(json, 4096);
+            if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2
+                || !('model' in input) || !('language' in input)
+                || typeof input.model !== 'string' || getSelectedMobileWhisperModel(input.model)?.id !== input.model
+                || typeof input.language !== 'string' || input.language.length > 200)
+                throw new Error('INVALID_INPUT: Local speech language request is invalid');
+            const language = normalizeSpeechLanguage(input.language);
+            current(); return input.model.endsWith('.en') && language === 'auto' ? 'en' : language;
+        });
+    },
+    iosVoiceOpenAIRuntime(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const input = iosVoiceJSON(json, 256);
+            if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length)
+                throw new Error('INVALID_INPUT: Voice runtime request is invalid');
+            const result = readWatchOpenAIRuntime(useTaskStore.getState().settings);
+            current(); return result;
+        });
+    },
+    iosVoiceModelDiscovery(json: string, owner: (json: string) => unknown): string {
+        return submit(async signal => {
+            if (iosConfigurationAIActive || iosConfigurationAIHost || iosCaptureAIHost || iosTaskAI?.active || iosInboxAI?.active || iosReviewAI?.active)
+                throw new Error('NOT_READY: Voice model discovery is already active');
+            iosConfigurationAIActive = true;
+            try {
+                const input = completionJson(json, 32 * 1024);
+                if (!input || typeof input !== 'object' || Array.isArray(input)
+                    || !taskEditValuesEqual(Object.keys(input).sort(), ['expected', 'session'])
+                    || !('session' in input) || typeof input.session !== 'string'
+                    || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(input.session)
+                    || !('expected' in input) || typeof owner !== 'function')
+                    throw new Error('INVALID_INPUT: Voice model discovery request is invalid');
+                unwrap(iosVoiceReadiness()); requireSaved();
+                const adapter = bootAdapter, settings = useTaskStore.getState().settings;
+                const frozen = JSON.parse(JSON.stringify(settings)), generation = getPersistenceStatus().generation;
+                const { ask, readReply } = aiModelDiscoveryOwner(owner);
+                const current = () => {
+                    const state = useTaskStore.getState();
+                    if (signal.aborted || bootAdapter !== adapter || getStorageAdapter() !== adapter
+                        || state.settings !== settings || !taskEditValuesEqual(state.settings, frozen)
+                        || getPersistenceStatus().generation !== generation || state.isLoading || state.editLockCount > 0
+                        || ask({ phase: 'current' }) !== '')
+                        throw new Error('STALE_REVISION: Voice model discovery owner changed');
+                    unwrap(iosVoiceReadiness()); requireSaved();
+                };
+                current();
+                const options = unwrap(await iosVoiceMethods.settingsOptions({}, current));
+                if (!taskEditValuesEqual(options.expected, input.expected))
+                    throw new Error('STALE_REVISION: Voice model discovery settings changed');
+                const provider = options.provider;
+                if (provider !== 'openai' && provider !== 'gemini')
+                    throw new Error('NOT_READY: Voice model discovery is unavailable for this provider');
+                const metadata = readReply({ phase: 'metadata', provider });
+                if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1
+                    || !('consent' in metadata) || typeof metadata.consent !== 'boolean')
+                    throw new Error('NOT_READY: Voice model discovery metadata is unavailable');
+                current();
+                const result = await discoverNativeVoiceModels({ provider, model: options.model, modelOptions: options.modelOptions,
+                    baseUrl: provider === 'openai' ? settings.ai?.speechToText?.baseUrl : undefined,
+                    consent: metadata.consent, aiEnabled: settings.ai?.enabled === true,
+                    aiProvider: settings.ai?.provider ?? 'openai', isFossBuild,
+                }, {
+                    current, signal,
+                    readCredential: async () => {
+                        current(); const loaded = readReply({ phase: 'credential', provider }); current();
+                        if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded) || Object.keys(loaded).length !== 1
+                            || !('value' in loaded) || loaded.value !== null && (typeof loaded.value !== 'string' || loaded.value.length > 4000))
+                            throw new Error('NOT_READY: Voice model discovery credential is unavailable');
+                        return loaded.value;
+                    },
+                    fetch: async (input, init) => {
+                        current();
+                        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+                        if (ask({ phase: 'http', url }) !== '') throw new Error('NOT_READY: Voice model discovery request is unavailable');
+                        const response = await globalThis.fetch(input, init); current(); return response;
+                    },
+                });
+                current();
+                let reply = { version: 1, provider, ...result, expected: options.expected };
+                if (new TextEncoder().encode(JSON.stringify(reply)).byteLength > 64 * 1024)
+                    reply = { version: 1, provider, status: 'fallback', modelOptions: options.modelOptions, expected: options.expected };
+                if (new TextEncoder().encode(JSON.stringify(reply)).byteLength > 64 * 1024)
+                    throw new Error('NOT_READY: Voice model discovery choices are unavailable');
+                return reply;
+            } finally { iosConfigurationAIActive = false; }
+        });
+    },
+    iosVoiceSettingsOptions(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.settingsOptions(iosVoiceJSON(json, 256), current));
+            current(); return result;
+        });
+    },
+    iosVoiceRuntimeOptions(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.runtimeOptions(iosVoiceJSON(json, 256), current));
+            current(); return result;
+        });
+    },
+    iosVoiceSettingsPrepare(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.prepareSettings(iosVoiceJSON(json, 32768), current));
+            current(); return result;
+        });
+    },
+    iosVoiceSettingsValidate(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(iosVoiceMethods.validateSettings(iosVoiceJSON(json, 4194304)));
+            current(); return result;
+        });
+    },
+    iosVoiceSettingsCommit(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.commitSettings(iosVoiceJSON(json, 4194304), current));
+            current(); return result;
+        });
+    },
+    iosVoiceSettingsRetryOutcome(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(iosVoiceMethods.settingsOutcome(iosVoiceJSON(json, 32768)));
+            current(); return result;
+        });
+    },
+    iosVoiceSettingsRecover(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.recoverSettings(iosVoiceJSON(json, 4194304), current));
+            current(); return result;
+        });
+    },
+    iosVoiceCapturePrepare(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.prepareCapture(iosVoiceJSON(json, 131072), current));
+            current(); return result;
+        });
+    },
+    iosVoiceCaptureValidate(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(iosVoiceMethods.validateCapture(iosVoiceJSON(json, 4194304)));
+            current(); return result;
+        });
+    },
+    iosVoiceCaptureCommit(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.commitCapture(iosVoiceJSON(json, 4194304), current));
+            current(); return result;
+        });
+    },
+    iosVoiceCaptureRetryOutcome(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(iosVoiceMethods.captureOutcome(iosVoiceJSON(json, 131072)));
+            current(); return result;
+        });
+    },
+    iosVoiceCaptureRecover(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.recoverCapture(iosVoiceJSON(json, 4194304), current));
+            current(); return result;
+        });
+    },
+    iosVoiceResultPrepare(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.prepareResult(iosVoiceJSON(json, 262144), current));
+            current(); return result;
+        });
+    },
+    iosVoiceResultValidate(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(iosVoiceMethods.validateResult(iosVoiceJSON(json, 4194304)));
+            current(); return result;
+        });
+    },
+    iosVoiceResultCommit(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.commitResult(iosVoiceJSON(json, 4194304), current));
+            current(); return result;
+        });
+    },
+    iosVoiceResultRetryOutcome(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(iosVoiceMethods.resultOutcome(iosVoiceJSON(json, 262144)));
+            current(); return result;
+        });
+    },
+    iosVoiceResultRecover(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const result = unwrap(await iosVoiceMethods.recoverResult(iosVoiceJSON(json, 4194304), current));
+            current(); return result;
+        });
+    },
+    iosVoiceOpenAITranscriptionBuild(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            let result;
+            try { result = buildWatchOpenAITranscription(iosVoiceJSON(json, 16 * 1024)); }
+            catch { throw new Error('INVALID_INPUT: OpenAI speech input is invalid'); }
+            current(); return result;
+        });
+    },
+    iosVoiceOpenAITranscriptionDecode(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            let result;
+            try { result = decodeWatchOpenAITranscription(iosVoiceJSON(json, 2 * 1024 * 1024)); }
+            catch { throw new Error('INVALID_INPUT: OpenAI speech input is invalid'); }
+            current(); return result;
+        });
+    },
+    iosVoiceOpenAIParseBuild(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            let result;
+            try { result = buildWatchOpenAIParse(iosVoiceJSON(json, 512 * 1024)); }
+            catch { throw new Error('INVALID_INPUT: OpenAI speech input is invalid'); }
+            current(); return result;
+        });
+    },
+    iosVoiceOpenAIParseDecode(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            let result;
+            try { result = decodeWatchOpenAIParse(iosVoiceJSON(json, 2 * 1024 * 1024)); }
+            catch { throw new Error('INVALID_INPUT: OpenAI speech input is invalid'); }
+            current(); return result;
+        });
+    },
+    iosVoiceGeminiRequestBuild(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const input = iosVoiceJSON(json, 8 * 1024 * 1024) as Record<string, unknown>;
+            const config = input && typeof input === 'object' && !Array.isArray(input) ? input.config : null;
+            if (!input || typeof input !== 'object' || Array.isArray(input)
+                || !taskEditValuesEqual(Object.keys(input).sort(), ['audioBase64', 'config', 'mimeType'])
+                || !config || typeof config !== 'object' || Array.isArray(config)
+                || !taskEditValuesEqual(Object.keys(config).sort(), ['fieldStrategy', 'language', 'mode', 'model', 'now', 'timeZone'])
+                || typeof input.audioBase64 !== 'string' || input.mimeType !== 'audio/mp4' && input.mimeType !== 'audio/wav')
+                throw new Error('INVALID_INPUT: Voice Gemini request is malformed');
+            const raw = config as Record<string, unknown>;
+            if (typeof raw.model !== 'string' || !raw.model.trim() || raw.model.length > 2000
+                || typeof raw.language !== 'string' || raw.language.length > 200
+                || raw.mode !== 'smart_parse' && raw.mode !== 'transcribe_only'
+                || raw.fieldStrategy !== 'smart' && raw.fieldStrategy !== 'title_only' && raw.fieldStrategy !== 'description_only'
+                || typeof raw.now !== 'string' || raw.now.length > 40 || !Number.isFinite(Date.parse(raw.now))
+                || new Date(raw.now).toISOString() !== raw.now
+                || raw.timeZone !== null && (typeof raw.timeZone !== 'string' || raw.timeZone.length > 200))
+                throw new Error('INVALID_INPUT: Voice Gemini configuration is malformed');
+            const selected: GeminiSpeechRequestConfig = { model: raw.model, language: raw.language, mode: raw.mode,
+                fieldStrategy: raw.fieldStrategy, now: new Date(raw.now), ...(raw.timeZone === null ? {} : { timeZone: raw.timeZone as string }) };
+            let result;
+            try { result = buildRemoteGeminiSpeechRequest(selected, input.audioBase64, input.mimeType); }
+            catch { throw new Error('INVALID_INPUT: Voice Gemini request is invalid'); }
+            current(); return result;
+        });
+    },
+    iosVoiceGeminiResponseDecode(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            let result;
+            try { result = decodeRemoteGeminiSpeechResponse(iosVoiceJSON(json, 2 * 1024 * 1024)); }
+            catch { throw new Error('INVALID_INPUT: Voice Gemini response is malformed'); }
+            current(); return result;
+        });
+    },
+    iosVoiceAcknowledged(stage: string, outcome: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const current = iosVoiceOwner(owner, signal);
+            const outcomes: Record<string, string[]> = {
+                settings: ['saved', 'failed'], capture: ['saved', 'save-pending', 'refused', 'failed', 'cancelled', 'permission-denied'],
+                speech: ['applied', 'discarded', 'empty', 'skipped', 'failed', 'cancelled'], credential: ['saved', 'cleared', 'failed'],
+            };
+            if (!Object.prototype.hasOwnProperty.call(outcomes, stage) || !outcomes[stage].includes(outcome))
+                throw new Error('INVALID_INPUT: Voice acknowledgment is invalid');
+            current();
+            try {
+                logInfo('Native iOS voice operation completed', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.9/ios-native-voice', provider: 'gemini', stage, outcome } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch { }
+            current(); return null;
+        });
+    },
+    iosAITextConfigurationSessionOpen(id: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || !/^[0-9a-f-]{36}$/.test(id))
+                throw new Error('NOT_READY: AI text configuration is unavailable');
+            requireSaved();
+            const settings = useTaskStore.getState().settings;
+            iosAITextConfigurationSession = { id, provider: 'openai', version: 1, adapter: bootAdapter, generation: getPersistenceStatus().generation,
+                settings, frozen: JSON.parse(JSON.stringify(settings)), acceptedAdvance: null, extraBodyAttempts: new Map() };
+            return null;
+        });
+    },
+    iosAITextConfigurationSessionCheck(id: string): string {
+        return submit(async () => { currentAITextConfigurationSession(id); return null; });
+    },
+    iosAITextConfigurationSessionRefresh(id: string): string {
+        return submit(async () => { refreshAITextConfigurationSession(id); return null; });
+    },
+    iosAITextConfigurationSessionClose(id: string): string {
+        return submit(async () => { if (iosAITextConfigurationSession?.id === id) iosAITextConfigurationSession = null; if (iosAITextEndpointRetry?.session === id) iosAITextEndpointRetry = null; return null; });
+    },
+    iosAITextConfigurationSessionOpenV2(id: string, provider: string): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || !/^[0-9a-f-]{36}$/.test(id)
+                || (provider !== 'openai' && provider !== 'gemini' && provider !== 'anthropic')
+                || (useTaskStore.getState().settings.ai?.provider ?? 'openai') !== provider)
+                throw new Error('NOT_READY: AI provider configuration is unavailable');
+            requireSaved();
+            const settings = useTaskStore.getState().settings;
+            iosAITextConfigurationSession = { id, provider, version: 2, adapter: bootAdapter, generation: getPersistenceStatus().generation,
+                settings, frozen: JSON.parse(JSON.stringify(settings)), acceptedAdvance: null, extraBodyAttempts: new Map() };
+            return null;
+        });
+    },
+    iosAITextConfigurationConsentTargetV2(json: string): string {
+        return submit(async () => {
+            const request = readNativeAITextConfigurationRequestV2(completionJson(json, 32 * 1024));
+            if (!request) throw new Error('INVALID_INPUT: AI provider request is malformed');
+            return { provider: nativeAITextConfigurationConsentTarget(request) };
+        });
+    },
+    iosAITextConfigurationOptionsV2(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiTextConfigurationMethods.optionsV2(completionJson(json, 256), aiTextConfigurationOwner(owner, signal))));
+    },
+    iosAITextModelDiscovery(json: string, owner: (json: string) => unknown): string {
+        return submit(async signal => {
+            if (iosConfigurationAIActive || iosConfigurationAIHost || iosCaptureAIHost || iosTaskAI?.active || iosInboxAI?.active || iosReviewAI?.active)
+                throw new Error('NOT_READY: AI model discovery is already active');
+            iosConfigurationAIActive = true;
+            try {
+                const input = completionJson(json, 32 * 1024);
+                if (!input || typeof input !== 'object' || Array.isArray(input)
+                    || !taskEditValuesEqual(Object.keys(input).sort(), ['expected', 'session'])
+                    || !('session' in input) || typeof input.session !== 'string' || !('expected' in input) || typeof owner !== 'function')
+                    throw new Error('INVALID_INPUT: AI model discovery request is invalid');
+                const session = currentAITextConfigurationSession(input.session);
+                if (session.version !== 2) throw new Error('NOT_READY: AI model discovery needs current provider setup');
+                const { ask, readReply } = aiModelDiscoveryOwner(owner);
+                const current = () => {
+                    if (signal.aborted || iosAITextConfigurationSession !== session
+                        || currentAITextConfigurationSession(session.id) !== session || ask({ phase: 'current' }) !== '')
+                        throw new Error('STALE_REVISION: AI model discovery owner changed');
+                };
+                current();
+                const options = unwrap(await aiTextConfigurationMethods.optionsV2({}, current));
+                if (!taskEditValuesEqual(options.expected, input.expected))
+                    throw new Error('STALE_REVISION: AI model discovery settings changed');
+                const metadata = readReply({ phase: 'metadata', provider: session.provider });
+                if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1
+                    || !('consent' in metadata) || typeof metadata.consent !== 'boolean')
+                    throw new Error('NOT_READY: AI model discovery metadata is unavailable');
+                current();
+                const result = await discoverNativeAITextModels({
+                    provider: session.provider, enabled: options.enabled, model: options.model, copilotModel: options.copilotModel,
+                    modelOptions: options.modelOptions, copilotModelOptions: options.copilotModelOptions,
+                    baseUrl: session.provider === 'openai' ? session.settings.ai?.baseUrl : undefined,
+                    consent: metadata.consent, isFossBuild,
+                }, {
+                    current, signal,
+                    readCredential: async () => {
+                        current();
+                        const loaded = readReply({ phase: 'credential', provider: session.provider });
+                        current();
+                        if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded) || Object.keys(loaded).length !== 1
+                            || !('value' in loaded) || loaded.value !== null && (typeof loaded.value !== 'string' || loaded.value.length > 4000))
+                            throw new Error('NOT_READY: AI model discovery credential is unavailable');
+                        return loaded.value;
+                    },
+                    fetch: async (input, init) => {
+                        current();
+                        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+                        if (ask({ phase: 'http', url }) !== '') throw new Error('NOT_READY: AI model discovery request is unavailable');
+                        const response = await globalThis.fetch(input, init);
+                        current(); return response;
+                    },
+                });
+                current();
+                let reply = { version: 1, provider: session.provider, ...result, expected: options.expected };
+                if (new TextEncoder().encode(JSON.stringify(reply)).byteLength > 64 * 1024)
+                    reply = { version: 1, provider: session.provider, status: 'fallback', modelOptions: options.modelOptions,
+                        copilotModelOptions: options.copilotModelOptions, expected: options.expected };
+                if (new TextEncoder().encode(JSON.stringify(reply)).byteLength > 64 * 1024)
+                    throw new Error('NOT_READY: AI model discovery choices are unavailable');
+                return reply;
+            } finally { iosConfigurationAIActive = false; }
+        });
+    },
+    iosAIAnthropicThinkingOptions(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiTextConfigurationMethods.anthropicThinkingOptions(completionJson(json, 256), aiTextConfigurationOwner(owner, signal))));
+    },
+    iosAITextConfigurationPrepareV2(json: string, owner: () => unknown, recordedFor: string | null): string {
+        return submit(async signal => {
+            if (recordedFor !== null && recordedFor !== 'openai' && recordedFor !== 'gemini' && recordedFor !== 'anthropic')
+                throw new Error('INVALID_INPUT: AI provider consent observation is invalid');
+            return unwrap(await aiTextConfigurationMethods.prepareV2(completionJson(json, 32 * 1024), aiTextConfigurationOwner(owner, signal), recordedFor));
+        });
+    },
+    iosAITextConfigurationValidateV2(json: string): string {
+        return submit(async () => unwrap(aiTextConfigurationMethods.validateV2(completionJson(json, 64 * 1024))));
+    },
+    iosAITextConfigurationCommitV2(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const session = iosAITextConfigurationSession, current = aiTextConfigurationOwner(owner, signal);
+            const result = unwrap(await aiTextConfigurationMethods.commitV2(completionJson(json, 64 * 1024), current));
+            current();
+            if (session && !(result.changed && result.change.type === 'provider')) retainAITextConfigurationAdvance(session);
+            return result;
+        });
+    },
+    iosAITextConfigurationRetryOutcomeV2(json: string): string {
+        return submit(async () => unwrap(aiTextConfigurationMethods.outcomeV2(completionJson(json, 32 * 1024))));
+    },
+    iosAITextConfigurationOptions(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiTextConfigurationMethods.options(completionJson(json, 256), aiTextConfigurationOwner(owner, signal))));
+    },
+    iosAITextConfigurationPrepare(json: string, owner: () => unknown, consentRecorded: boolean): string {
+        return submit(async signal => {
+            if (typeof consentRecorded !== 'boolean') throw new Error('INVALID_INPUT: AI consent observation is invalid');
+            return unwrap(await aiTextConfigurationMethods.prepare(completionJson(json, 32 * 1024), aiTextConfigurationOwner(owner, signal), consentRecorded));
+        });
+    },
+    iosAITextConfigurationValidate(json: string): string {
+        return submit(async () => unwrap(aiTextConfigurationMethods.validate(completionJson(json, 64 * 1024))));
+    },
+    iosAITextConfigurationCommit(json: string, owner: () => unknown): string {
+        return submit(async signal => {
+            const session = iosAITextConfigurationSession, current = aiTextConfigurationOwner(owner, signal);
+            const result = unwrap(await aiTextConfigurationMethods.commit(completionJson(json, 64 * 1024), current));
+            current();
+            if (session) retainAITextConfigurationAdvance(session);
+            return result;
+        });
+    },
+    iosAITextConfigurationRetryOutcome(json: string): string {
+        return submit(async () => unwrap(aiTextConfigurationMethods.outcome(completionJson(json, 32 * 1024))));
+    },
+    iosAITextConfigurationSensitive(json: string, owner: (json: string) => unknown): string {
+        return submit(signal => runAITextConfigurationSensitive(json, owner, signal, 1));
+    },
+    iosAITextConfigurationSensitiveV2(json: string, owner: (json: string) => unknown): string {
+        return submit(signal => runAITextConfigurationSensitive(json, owner, signal, 2));
+    },
+    iosAITextConfigurationAcknowledged(outcome: string = 'settings-saved', provider: string = 'openai', kind: string = 'scalar'): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios' || !['openai', 'gemini', 'anthropic'].includes(provider) || !['scalar', 'enabled', 'model', 'copilotModel', 'provider', 'anthropicThinking', 'thinkingBudget', 'extraBodyParams', 'credential', 'endpoint', 'consent'].includes(kind) || !['settings-saved', 'credential-saved', 'credential-cleared', 'endpoint-saved', 'consent-record-failed'].includes(outcome)) return null;
+            try {
+                logInfo('Native iOS AI text configuration completed', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.9/ios-ai-text-configuration', outcome, provider, kind } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch { }
+            return null;
+        });
+    },
+    iosAIRequestTimeoutOptions(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiRequestTimeoutMethods.options(completionJson(json, 256), aiRequestTimeoutOwner(owner, signal))));
+    },
+    iosAIRequestTimeoutPrepare(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiRequestTimeoutMethods.prepare(completionJson(json, 2048), aiRequestTimeoutOwner(owner, signal))));
+    },
+    iosAIRequestTimeoutValidate(json: string): string {
+        return submit(async () => unwrap(aiRequestTimeoutMethods.validate(completionJson(json, 8192))));
+    },
+    iosAIRequestTimeoutCommit(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiRequestTimeoutMethods.commit(completionJson(json, 8192), aiRequestTimeoutOwner(owner, signal))));
+    },
+    iosAIRequestTimeoutRetryOutcome(json: string): string {
+        return submit(async () => unwrap(aiRequestTimeoutMethods.outcome(completionJson(json, 2048))));
+    },
+    iosAIRequestTimeoutAcknowledged(): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') return null;
+            try {
+                logInfo('Native iOS AI request timeout saved', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-ai-request-timeout', outcome: 'saved' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                           }
+            return null;
+        });
+    },
+    iosAIReasoningEffortOptions(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiReasoningEffortMethods.options(completionJson(json, 256), aiReasoningEffortOwner(owner, signal))));
+    },
+    iosAIReasoningEffortPrepare(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiReasoningEffortMethods.prepare(completionJson(json, 2048), aiReasoningEffortOwner(owner, signal))));
+    },
+    iosAIReasoningEffortValidate(json: string): string {
+        return submit(async () => unwrap(aiReasoningEffortMethods.validate(completionJson(json, 8192))));
+    },
+    iosAIReasoningEffortCommit(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiReasoningEffortMethods.commit(completionJson(json, 8192), aiReasoningEffortOwner(owner, signal))));
+    },
+    iosAIReasoningEffortRetryOutcome(json: string): string {
+        return submit(async () => unwrap(aiReasoningEffortMethods.outcome(completionJson(json, 2048))));
+    },
+    iosAIReasoningEffortAcknowledged(): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') return null;
+            try {
+                logInfo('Native iOS AI reasoning effort saved', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-ai-reasoning-effort', outcome: 'saved' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                           }
+            return null;
+        });
+    },
+    iosAIGeminiThinkingBudgetOptions(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiGeminiThinkingBudgetMethods.options(completionJson(json, 256), aiGeminiThinkingBudgetOwner(owner, signal))));
+    },
+    iosAIGeminiThinkingBudgetPrepare(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiGeminiThinkingBudgetMethods.prepare(completionJson(json, 2048), aiGeminiThinkingBudgetOwner(owner, signal))));
+    },
+    iosAIGeminiThinkingBudgetValidate(json: string): string {
+        return submit(async () => unwrap(aiGeminiThinkingBudgetMethods.validate(completionJson(json, 8192))));
+    },
+    iosAIGeminiThinkingBudgetCommit(json: string, owner: () => unknown): string {
+        return submit(async signal => unwrap(await aiGeminiThinkingBudgetMethods.commit(completionJson(json, 8192), aiGeminiThinkingBudgetOwner(owner, signal))));
+    },
+    iosAIGeminiThinkingBudgetRetryOutcome(json: string): string {
+        return submit(async () => unwrap(aiGeminiThinkingBudgetMethods.outcome(completionJson(json, 2048))));
+    },
+    iosAIGeminiThinkingBudgetAcknowledged(): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') return null;
+            try {
+                logInfo('Native iOS AI Gemini thinking budget saved', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-ai-gemini-thinking-budget', outcome: 'saved' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                           }
+            return null;
+        });
+    },
+
+    iosAISummaryCheckpointSettled(owner: () => unknown): string {
+        if (typeof owner !== 'function' || owner() !== '') throw new Error('NOT_READY: AI summary checkpoint needs private fixture authority');
+        const { status } = settledAttachmentDiscardState();
+        return String(status.generation);
+    },
+
+    iosAISettingsProjection(json: string, owner: () => unknown): string {
+        return submit(async (signal) => {
+            const input = completionJson(json, 256);
+            if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 0
+                || typeof owner !== 'function') throw new Error('INVALID_INPUT: AI projection needs private read authority');
+            const adapter = bootAdapter;
+            const ready = () => {
+                if (signal.aborted || globalThis.__mindwtrHostPlatform !== 'ios' || !adapter || bootAdapter !== adapter
+                    || getStorageAdapter() !== adapter || !adapter.concurrentWritesGuarded
+                    || isSandboxMode() || isWorkspaceTransitionActive()) throw new Error('NOT_READY: AI projection is unavailable');
+                if (owner() !== '') throw new Error('NOT_READY: AI projection owner is unavailable');
+                requireSaved();
+                if (!contract.getDataSettings().ok) throw new Error('NOT_READY: AI projection is unavailable');
+                const status = getPersistenceStatus(), state = useTaskStore.getState();
+                if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+                    || state.isLoading || state.editLockCount > 0) throw new Error('NOT_READY: AI projection waits for saved data');
+                return status;
+            };
+            const status = ready(), settings = useTaskStore.getState().settings;
+            const frozen = JSON.parse(JSON.stringify(settings)) as unknown;
+            const current = () => {
+                if (ready().generation !== status.generation || useTaskStore.getState().settings !== settings
+                    || !taskEditValuesEqual(settings, frozen)) throw new Error('STALE_REVISION: AI projection changed; read again');
+            };
+            const baseline = async () => {
+                current();
+                const saved = await adapter!.readRowBaseline();
+                current();
+                if (!saved || !taskEditValuesEqual(stripSensitiveSettings(saved.settings), settings))
+                    throw new Error('STALE_REVISION: AI saved settings changed; reload before reading');
+                return saved.settings;
+            };
+            const projection = buildNativeAISettingsProjection(await baseline());
+            await baseline(); current();
+            try {
+                logInfo('Native iOS AI saved configuration projected', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-ai-settings-projection', outcome: 'read' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                   }
+            return projection;
+        });
+    },
+
+    iosAIProviderDeviceState(json: string, owner: () => unknown,
+        inspect: (provider: string, account: string, legacy: string) => unknown): string {
+        return submit(async (signal) => {
+            const input = completionJson(json, 256);
+            if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 0
+                || typeof owner !== 'function' || typeof inspect !== 'function') {
+                throw new Error('INVALID_INPUT: AI provider device metadata needs private read authority');
+            }
+            const adapter = bootAdapter;
+            const ready = () => {
+                if (signal.aborted || globalThis.__mindwtrHostPlatform !== 'ios' || !adapter || bootAdapter !== adapter
+                    || getStorageAdapter() !== adapter || !adapter.concurrentWritesGuarded
+                    || isSandboxMode() || isWorkspaceTransitionActive()) throw new Error('NOT_READY: AI provider device metadata is unavailable');
+                if (owner() !== '') throw new Error('NOT_READY: AI provider device metadata owner is unavailable');
+                requireSaved();
+                if (!contract.getDataSettings().ok) throw new Error('NOT_READY: AI provider device metadata is unavailable');
+                const status = getPersistenceStatus(), state = useTaskStore.getState();
+                if (status.failed || status.queued || status.inFlight || status.immediate || status.retrying
+                    || state.isLoading || state.editLockCount > 0) throw new Error('NOT_READY: AI provider device metadata waits for saved data');
+                return status;
+            };
+            const status = ready(), settings = useTaskStore.getState().settings;
+            const frozen = JSON.parse(JSON.stringify(settings)) as unknown;
+            const current = () => {
+                if (ready().generation !== status.generation || useTaskStore.getState().settings !== settings
+                    || !taskEditValuesEqual(settings, frozen)) throw new Error('STALE_REVISION: AI provider device metadata changed; read again');
+            };
+            const baseline = async () => {
+                current();
+                const saved = await adapter!.readRowBaseline();
+                current();
+                if (!saved || !taskEditValuesEqual(stripSensitiveSettings(saved.settings), settings)) {
+                    throw new Error('STALE_REVISION: AI saved settings changed; reload before reading');
+                }
+                return saved.settings;
+            };
+            const result = await readNativeAIProviderDeviceState(await baseline(), async (provider, account, legacy) => {
+                current();
+                const raw = checked(await inspect(provider, account, legacy));
+                current();
+                if (typeof raw !== 'string') throw new Error('INVALID_INPUT: AI provider device metadata is malformed');
+                return completionJson(raw, 1024);
+            });
+            await baseline(); current();
+            try {
+                logInfo('Native iOS AI provider device metadata inspected', { scope: 'native-ios', force: true,
+                    context: { releaseCheck: 'v1.3.5/ios-ai-device-state' } });
+                await diagnosticsLog.serialize(async () => undefined);
+            } catch {                                                                  }
+            await baseline(); current();
+            return result;
+        });
+    },
     iosAboutUpdateState(): string {
         return submit(async (signal) => {
             const adapter = bootAdapter;
@@ -4951,7 +8578,7 @@ globalThis.MindwtrHost = {
             return { updateAvailable: values[0][1] === 'true', shouldCheck: shouldCheckForAppUpdate(values[1][1]) };
         });
     },
-    /** The native storage owner calls this only after an acknowledged fixed update-state mutation. */
+
     iosAboutUpdateStateAcknowledged(outcome: string): string {
         return submit(async () => {
             if (globalThis.__mindwtrHostPlatform !== 'ios' || !['check-saved', 'badge-saved'].includes(outcome)) return {};
@@ -4960,11 +8587,11 @@ globalThis.MindwtrHost = {
                     message: 'Native iOS About update state saved',
                     context: { releaseCheck: 'v1.3.5/ios-about-update-state', outcome },
                 }, { force: true });
-            } catch { /* Diagnostics cannot change an acknowledged storage result. */ }
+            } catch {                                                                 }
             return {};
         });
     },
-    /** Read-only About lookup; the native invocation still owns HTTP admission. */
+
     iosAboutAppStoreInfo(bundleIdentifier: string, currentVersion: string): string {
         return submit(async (signal) => {
             const unavailable = () => new Error('NOT_READY: App Store lookup is unavailable');
@@ -5003,7 +8630,7 @@ globalThis.MindwtrHost = {
                         message: 'Native iOS App Store information fetched',
                         context: { releaseCheck: 'v1.3.5/ios-about-app-store', outcome: 'fetched' },
                     }, { force: true });
-                } catch { /* Diagnostics cannot change the lookup result. */ }
+                } catch {                                                    }
                 assertReady();
                 return result;
             } catch {
@@ -5012,16 +8639,113 @@ globalThis.MindwtrHost = {
             }
         });
     },
-    /** Only CoreHost.foregroundSync supplies this invocation-scoped physical cleanup callback. */
-    iosForegroundSync(name: string, json: string, cleanup: unknown, currentTargetURI?: unknown): string {
+    iosFileSyncDiagnostic(): string {
         return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('NOT_READY: File Sync diagnostic is unavailable');
+            try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
+                message: 'Native iOS File Sync app binding completed',
+                context: { releaseCheck: 'v1.3.9/ios-file-sync-app-binding', operation: 'foreground', outcome: 'completed' },
+            }, { force: true }); } catch { }
+            return null;
+        });
+    },
+    iosDirectoryFileSyncDiagnostic(): string {
+        return submit(async () => {
+            if (globalThis.__mindwtrHostPlatform !== 'ios') throw new Error('NOT_READY: Directory File Sync diagnostic is unavailable');
+            try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
+                message: 'Native iOS manual directory File Sync completed',
+                context: { releaseCheck: 'v1.3.9/ios-file-sync-directory-manual', operation: 'foreground', outcome: 'completed' },
+            }, { force: true }); } catch { }
+            return null;
+        });
+    },
+    iosForegroundFileSync(turn: string, rootURI: string, canonicalPath: string): string {
+        return submit(async () => {
+            const channel = (globalThis as typeof globalThis & { __mindwtrFileSyncCall?: import('./host-file-sync').NativeFileSyncCall }).__mindwtrFileSyncCall;
+            if (iosForegroundFailure || globalThis.__mindwtrHostPlatform !== 'ios' || nativeSync || !bootAdapter || !localAttachments
+                || iosCleanupCallback || iosTaskAttachmentPreparation || iosProjectFilePreparation || isSandboxMode() || isWorkspaceTransitionActive()
+                || typeof channel !== 'function' || typeof turn !== 'string' || !turn || typeof rootURI !== 'string' || typeof canonicalPath !== 'string'
+                || typeof native().kvMultiGet !== 'function' || !globalThis.__mindwtrSyncSecrets) throw new Error('NOT_READY: File Sync is unavailable');
+            const names = ['@mindwtr_sync_backend', '@mindwtr_sync_path', '@mindwtr_sync_path_bookmark'];
+            const before = await keyValue.multiGet(names);
+            const fresh = createIosFileSync({ ...nativeSyncBindings, emit: () => {}, trace: () => {}, scheduleBackgroundSync: () => {},
+                retireLocalAttachment: async () => { throw new NativeAttachmentCleanupUnconfirmedError(); },
+            }, { turn, rootURI, canonicalPath }, channel);
+            const unchanged = async () => {
+                if (JSON.stringify(await keyValue.multiGet(names)) !== JSON.stringify(before)) throw new Error('NOT_READY: File Sync configuration changed');
+            };
+            let result: Awaited<ReturnType<typeof fresh.settingsHost.performSync>>;
+            try {
+                result = await fresh.settingsHost.performSync(undefined, { manual: true, configOverride: { backend: 'file', syncPath: canonicalPath } });
+            } catch (error) { await unchanged(); throw error; }
+            await unchanged();
+            if (!result.success || result.skipped || result.fileSyncLockDeferred) throw new Error('NOT_READY: File Sync cycle did not complete');
+            return result;
+        });
+    },
+    iosWorkspaceRetirementStatus(): string {
+        if (globalThis.__mindwtrHostPlatform !== 'ios' || !bootAdapter || !readSyncSettingsRetirementStatus) {
+            return JSON.stringify({ version: 1, ready: false, pending: true, uncertain: true });
+        }
+        const persistence = getPersistenceStatus(), settings = readSyncSettingsRetirementStatus();
+        return JSON.stringify({ version: 1, ready: true,
+            pending: pending.size > 0 || persistence.queued > 0 || persistence.inFlight || persistence.immediate > 0 || persistence.retrying
+                || settings.pending || iosDirectorySync !== null || iosCleanupCallback !== null || iosTaskAttachmentPreparation || iosProjectFilePreparation
+                || iosProjectAttachmentDownload || iosRelocatedProjectAvailability || iosCachedProjectAvailability || iosSelfHostedProjectAttachments !== null,
+            uncertain: persistence.failed || settings.uncertain || iosForegroundFailure !== null,
+        });
+    },
+    iosDirectorySyncSettings(name: string, json: string, control: unknown): string {
+        return submit(async () => {
+            const channel = (globalThis as typeof globalThis & { __mindwtrFileSyncCall?: import('./host-file-sync').NativeFileSyncCall }).__mindwtrFileSyncCall;
+            const unavailable = () => new Error('NOT_READY: Directory File Sync is unavailable');
+            if (iosForegroundFailure || globalThis.__mindwtrHostPlatform !== 'ios' || nativeSync || !bootAdapter || !localAttachments
+                || iosDirectorySync || iosCleanupCallback || iosTaskAttachmentPreparation || iosProjectFilePreparation
+                || isSandboxMode() || isWorkspaceTransitionActive() || typeof control !== 'function' || typeof channel !== 'function'
+                || typeof json !== 'string' || new TextEncoder().encode(json).byteLength > 128 * 1024) throw unavailable();
+            const input = JSON.parse(json) as Record<string, unknown>;
+            if (!input || typeof input !== 'object' || Array.isArray(input)
+                || !['openSyncSettings', 'syncSettings', 'closeSyncSettings', 'selectSyncBackend', 'pickSyncFolder', 'syncNow', 'syncPull'].includes(name)) throw unavailable();
+            if (name === 'selectSyncBackend' && !['off', 'file'].includes(input.option as string)) throw unavailable();
+            if (['pickSyncFolder', 'syncNow'].includes(name)
+                && (typeof input.revision !== 'string' || !input.revision || input.revision.length > 100
+                    || Object.keys(input).some((field) => !['requestId', 'revision'].includes(field)))) throw unavailable();
+            if (name === 'syncPull' && Object.keys(input).length !== 0) throw unavailable();
+            requireSaved();
+            const persistence = getPersistenceStatus();
+            if (persistence.failed || persistence.queued || persistence.inFlight || persistence.immediate || persistence.retrying) throw unavailable();
+            ensureIosManualSync().settingsHost.encryption.mode = 'saved-webdav-or-local';
+            const directory = createIosDirectoryFileSync(nativeSyncBindings, channel, control as (request: string) => unknown);
+            iosDirectorySync = directory;
+            try {
+                if (name === 'syncPull') {
+                    const value = await ensureIosManualSync().performStoredManualSync();
+                    await flushPendingSave(); requireSaved();
+                    try { await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
+                        message: 'Native iOS pull Sync command settled',
+                        context: { releaseCheck: 'v1.3.9/ios-pull-sync', operation: name, outcome: 'settled' },
+                    }, { force: true }); } catch { }
+                    return { ok: true as const, value };
+                }
+                const result = name === 'syncSettings' ? contract.getSyncSettings(input)
+                    : await MENU_COMMANDS[name as SyncScreenCommand](input as never);
+                if (result.ok && (name === 'syncSettings' || name === 'openSyncSettings')) {
+                    const model = result.value as import('../../../packages/core/src/native-host-contract-settings-sync').NativeSyncSettings;
+                    model.backend.options = model.backend.options.filter(({ option }) => ['off', 'file', 'webdav', 'selfhosted'].includes(option));
+                }
+                return result;
+            } finally { try { directory.close(); } finally { iosDirectorySync = null; } }
+        });
+    },
+    iosForegroundSync(name: string, json: string, cleanup: unknown, currentTargetURI?: unknown, dropboxControl?: unknown): string {
+        return submit(async (signal) => {
             if (iosForegroundFailure) throw iosForegroundFailure;
             const unavailable = () => new Error('NOT_READY: Foreground sync is unavailable');
             if (globalThis.__mindwtrHostPlatform !== 'ios' || !localAttachments || nativeSync || !bootAdapter
                 || iosCleanupCallback || iosTaskAttachmentPreparation || iosProjectFilePreparation || typeof cleanup !== 'function' || isSandboxMode() || isWorkspaceTransitionActive()
-                || typeof native().kvMultiGet !== 'function' || !globalThis.__mindwtrSyncSecrets) throw unavailable();
+                || typeof native().kvMultiGet !== 'function' || (name !== 'archiveRetention' && !globalThis.__mindwtrSyncSecrets)) throw unavailable();
             const commands = ['syncSettings', 'openSyncSettings', 'closeSyncSettings', 'selectSyncBackend',
-                'saveSyncBackend', 'syncNow', 'testSyncConnection', 'syncStored', 'syncResume', 'projectAttachmentDownload', 'runSyncEncryptionAction'];
+                'saveSyncBackend', 'syncNow', 'testSyncConnection', 'syncStored', 'syncResume', 'syncPull', 'archiveRetention', 'projectAttachmentDownload', 'runSyncEncryptionAction', 'connectDropbox', 'disconnectDropbox'];
             if (currentTargetURI !== undefined && (name !== 'projectAttachmentDownload' || typeof currentTargetURI !== 'string'
                 || !currentTargetURI.startsWith('file:///') || currentTargetURI.length > 16_384 || !currentTargetURI.includes('/'))) {
                 throw new Error('INVALID_INPUT: Invalid selected Project availability target');
@@ -5033,12 +8757,15 @@ globalThis.MindwtrHost = {
             try { input = JSON.parse(json) as Record<string, unknown>; }
             catch { throw new Error('INVALID_INPUT: Invalid foreground sync request'); }
             if (!input || typeof input !== 'object' || Array.isArray(input)
-                || ['syncStored', 'syncResume'].includes(name) && Object.keys(input).length !== 0) throw new Error('INVALID_INPUT: Invalid foreground sync request');
+                || ['syncStored', 'syncResume', 'syncPull'].includes(name) && Object.keys(input).length !== 0) throw new Error('INVALID_INPUT: Invalid foreground sync request');
             if (name === 'projectAttachmentDownload' && (Object.keys(input).length !== 3
                 || ['projectId', 'attachmentId', 'revision'].some((field) => {
                     const value = input[field];
                     return typeof value !== 'string' || !value || value.length > (field === 'revision' ? 200 : 500);
                 }))) throw new Error('INVALID_INPUT: Invalid Project attachment download request');
+            if (name === 'archiveRetention' && (Object.keys(input).length !== 1 || typeof input.editorOpen !== 'boolean')) {
+                throw new Error('INVALID_INPUT: Archive retention requires the editor state');
+            }
             if (name === 'runSyncEncryptionAction') {
                 const action = input.action;
                 const invalid = () => new Error('INVALID_INPUT: Invalid selected encryption request');
@@ -5056,10 +8783,28 @@ globalThis.MindwtrHost = {
                         : ['cancel', 'decline', 'retry', 'recheck'].includes(target.type as string) && Object.keys(target).length === 1;
                 if (!valid) throw invalid();
             }
+            if (dropboxControl !== undefined && typeof dropboxControl !== 'function') throw unavailable();
+            const dropboxConfig = typeof dropboxControl === 'function' ? (() => {
+                const raw = (dropboxControl as (json: string) => unknown)(JSON.stringify({ phase: 'configuration' }));
+                if (typeof raw !== 'string' || new TextEncoder().encode(raw).length > 4096 || raw.startsWith('!MindwtrNativeError:')) throw unavailable();
+                try { return readNativeIosDropboxConfiguration(JSON.parse(raw)); } catch { throw unavailable(); }
+            })() : null;
             const refused = { ok: false as const, error: { code: 'ACTION_FAILED' as const,
                 message: 'This sync provider is not available in native iOS yet; the stored configuration is unchanged' } };
-            if (name === 'selectSyncBackend' && !['off', 'webdav', 'selfhosted'].includes(input.option as string)) return refused;
-            if (['saveSyncBackend', 'syncNow', 'testSyncConnection'].includes(name)) {
+            if (name === 'selectSyncBackend' && !['off', 'webdav', 'selfhosted', ...(iosCloudKitAvailable() ? ['cloudkit'] : []), ...(dropboxConfig ? ['dropbox'] : [])].includes(input.option as string)) return refused;
+            const shownDropbox = dropboxConfig && ['syncNow', 'testSyncConnection'].includes(name) ? contract.getSyncSettings({}) : null;
+            const dropboxPanelCall = shownDropbox?.ok === true && shownDropbox.value.panel?.kind === 'dropbox';
+            if (['connectDropbox', 'disconnectDropbox'].includes(name) || dropboxPanelCall) {
+                const fields = name === 'testSyncConnection' ? [] : ['requestId'];
+                if (Object.keys(input).length !== fields.length || fields.length && (typeof input.requestId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(input.requestId))) throw unavailable();
+                if (!dropboxConfig) throw unavailable();
+            }
+            const cloudKitSyncNow = !dropboxPanelCall && name === 'syncNow' && input.webdav === undefined && input.selfHosted === undefined && iosCloudKitAvailable();
+            if (cloudKitSyncNow && (Object.keys(input).length !== 1 || typeof input.requestId !== 'string'
+                || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.requestId))) {
+                throw new Error('INVALID_INPUT: CloudKit Sync requires a request UUID');
+            }
+            if (['saveSyncBackend', 'syncNow', 'testSyncConnection'].includes(name) && !cloudKitSyncNow && !dropboxPanelCall) {
                 const webdav = input.webdav;
                 const selfHosted = input.selfHosted;
                 const fields = webdav !== undefined ? webdav : selfHosted;
@@ -5080,13 +8825,35 @@ globalThis.MindwtrHost = {
             const persistence = getPersistenceStatus();
             if (persistence.failed || persistence.queued || persistence.inFlight || persistence.immediate || persistence.retrying) throw unavailable();
             iosCleanupCallback = cleanup as (requestJSON: string) => unknown;
+            iosDropboxControl = typeof dropboxControl === 'function' ? dropboxControl as (requestJSON: string) => unknown : null;
+            iosDropboxSignal = signal;
+            iosDropboxRequestId = name === 'connectDropbox' ? input.requestId as string : null;
             try {
+                if (name === 'archiveRetention') {
+                    let selectedBackend: string | null = null;
+                    try { selectedBackend = (await keyValue.get(SYNC_BACKEND_KEY))?.trim() || 'off'; }
+                    catch { }
+                    return await contract.runArchiveRetention({ editorOpen: input.editorOpen as boolean, selectedBackend });
+                }
                 const stored = (await keyValue.get(SYNC_BACKEND_KEY))?.trim();
                 const selfHosted = stored === 'cloud' && isNativeIosSelfHostedProvider(await keyValue.get(CLOUD_PROVIDER_KEY));
-                if (stored && stored !== 'off' && stored !== 'webdav' && !selfHosted) return refused;
-                if (['syncStored', 'syncResume'].includes(name) && stored !== 'webdav' && !selfHosted) return { ok: true as const, value: { success: true, skipped: true } };
+                const dropboxSelected = !!dropboxConfig && stored === 'cloud' && (await keyValue.get(CLOUD_PROVIDER_KEY))?.trim() === 'dropbox';
+                const cloudKitSelected = stored === 'cloudkit' && iosCloudKitAvailable();
+                const fileMetadata = stored === 'file' && ['openSyncSettings', 'syncSettings', 'closeSyncSettings'].includes(name);
+                if (stored && stored !== 'off' && stored !== 'webdav' && !selfHosted && !cloudKitSelected && !dropboxSelected && !fileMetadata) return refused;
+                if (cloudKitSyncNow && !cloudKitSelected) return refused;
+                if (['syncStored', 'syncResume', 'syncPull'].includes(name) && stored !== 'webdav' && !selfHosted
+                    && !(name === 'syncPull' && (cloudKitSelected || dropboxSelected))) {
+                    if (name === 'syncPull') try {
+                        await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
+                            message: 'Native iOS pull Sync command settled',
+                            context: { releaseCheck: 'v1.3.9/ios-pull-sync', operation: name, outcome: 'skipped' },
+                        }, { force: true });
+                    } catch { }
+                    return { ok: true as const, value: { success: true, skipped: true } };
+                }
                 if (name === 'projectAttachmentDownload' && stored !== 'webdav' && !selfHosted) return refused;
-                // Only native-owned relocated repair is admitted for cloud Projects.
+
                 if (name === 'projectAttachmentDownload' && selfHosted && typeof currentTargetURI !== 'string') return refused;
                 if (name === 'runSyncEncryptionAction' && selfHosted) return refused;
                 let downloadResult: Awaited<ReturnType<typeof contract.downloadAttachment>> | null = null;
@@ -5101,26 +8868,15 @@ globalThis.MindwtrHost = {
                         };
                     }
                 }
-                if (!downloadResult) iosManualSync ??= createNativeSync({ ...nativeSyncBindings, emit: () => {}, trace: () => {}, scheduleBackgroundSync: () => {},
-                    retireLocalAttachment: async (attachmentID, targetURI, keep) => {
-                        if (keep()) return false;
-                        const requestID = generateUUID();
-                        try {
-                            if (!iosCleanupCallback) throw new NativeAttachmentCleanupUnconfirmedError();
-                            const reply = iosCleanupCallback(JSON.stringify({ version: 1, requestID, attachmentID, targetURI }));
-                            if (typeof reply !== 'string' || new TextEncoder().encode(reply).byteLength > 1024) throw new Error();
-                            const result = JSON.parse(reply) as Record<string, unknown>;
-                            if (!result || typeof result !== 'object' || Array.isArray(result)
-                                || Object.keys(result).length !== 3 || result.version !== 1 || result.requestID !== requestID
-                                || !['removed', 'absent', 'retained'].includes(result.outcome as string)) throw new Error();
-                            return result.outcome !== 'retained';
-                        } catch { throw new NativeAttachmentCleanupUnconfirmedError(); }
-                    },
-                });
-                if (iosManualSync) iosManualSync.settingsHost.encryption.mode = 'saved-webdav-or-local';
+                if (!downloadResult) ensureIosManualSync();
+                if (cloudKitSyncNow) {
+                    const shown = contract.getSyncSettings({});
+                    if (!shown.ok || shown.value.panel?.kind !== 'cloudkit') return refused;
+                }
+                if (iosManualSync) iosManualSync.settingsHost.encryption.mode = dropboxSelected ? 'saved-dropbox' : 'saved-webdav-or-local';
                 if (name === 'selectSyncBackend' && input.option === 'selfhosted'
                     || ['saveSyncBackend', 'syncNow', 'testSyncConnection'].includes(name) && input.selfHosted !== undefined
-                    || ['syncStored', 'syncResume', 'projectAttachmentDownload'].includes(name) && selfHosted) {
+                    || ['syncStored', 'syncResume', 'syncPull', 'projectAttachmentDownload'].includes(name) && selfHosted) {
                     try { await iosManualSync!.assertSelfHostedSyncAdmission(); }
                     catch (error) {
                         if (error instanceof NativeAttachmentCleanupUnconfirmedError) throw error;
@@ -5130,7 +8886,7 @@ globalThis.MindwtrHost = {
                 }
                 if (name === 'projectAttachmentDownload') {
                     if (!downloadResult) {
-                        // The original contract remains local-only outside this owned call.
+
                         if (selfHosted) {
                             const channels = nativeFileChannels();
                             if (!channels) throw unavailable();
@@ -5158,8 +8914,9 @@ globalThis.MindwtrHost = {
                     if (after.failed || after.queued || after.inFlight || after.immediate || after.retrying) throw unavailable();
                 }
                 let storedResult: { success: boolean; skipped: boolean } | null = null;
-                if (name === 'syncStored' || name === 'syncResume') {
-                    const answer = await iosManualSync!.performStoredAutomaticSync(name === 'syncStored' ? 'startup' : 'resume');
+                if (name === 'syncStored' || name === 'syncResume' || name === 'syncPull') {
+                    const answer = name === 'syncPull' ? await iosManualSync!.performStoredManualSync()
+                        : await iosManualSync!.performStoredAutomaticSync(name === 'syncStored' ? 'startup' : 'resume');
                     await flushPendingSave();
                     requireSaved();
                     const after = getPersistenceStatus();
@@ -5169,33 +8926,37 @@ globalThis.MindwtrHost = {
                 const result = downloadResult ?? (storedResult ? { ok: true as const, value: storedResult }
                     : name === 'syncSettings' ? contract.getSyncSettings(input)
                     : await MENU_COMMANDS[name as SyncScreenCommand](input as never));
-                // Offer only the providers admitted by this entry; all labels and field policy remain core's.
+
                 if (result.ok && result.value && typeof result.value === 'object' && 'backend' in result.value) {
-                    // The command union includes non-view replies; only the two view commands reach this branch.
+
                     if (name === 'syncSettings' || name === 'openSyncSettings') {
                         const model = result.value as import('../../../packages/core/src/native-host-contract-settings-sync').NativeSyncSettings;
-                        model.backend.options = model.backend.options.filter(({ option }) => option === 'off' || option === 'webdav' || option === 'selfhosted');
+                        model.backend.options = model.backend.options.filter(({ option }) => option === 'off' || option === 'file' || option === 'webdav' || option === 'selfhosted'
+                            || option === 'cloudkit' && iosCloudKitAvailable() || option === 'dropbox' && !!dropboxConfig);
                     }
                 }
                 if (currentTargetURI === undefined && (name !== 'projectAttachmentDownload' || result.ok && result.value && typeof result.value === 'object'
                     && 'status' in result.value && result.value.status === 'available')) try {
                     const diagnostic = name === 'projectAttachmentDownload' ? { message: 'Native iOS Project file availability settled', releaseCheck: 'v1.3.5/ios-project-file-download' }
                         : name === 'syncStored' ? { message: 'Native iOS stored Sync command settled', releaseCheck: 'v1.3.5/ios-stored-sync' }
+                        : name === 'syncPull' ? { message: 'Native iOS pull Sync command settled', releaseCheck: 'v1.3.9/ios-pull-sync' }
                         : name === 'syncResume' ? { message: 'Native iOS resume Sync command settled', releaseCheck: 'v1.3.5/ios-resume-sync' }
                         : { message: 'Native iOS foreground Sync command settled', releaseCheck: 'v1.3.5/ios-foreground-sync-owned' };
                     await diagnosticsLog.append({ ts: new Date().toISOString(), level: 'info', scope: 'native-ios',
                         message: diagnostic.message,
                         context: { releaseCheck: diagnostic.releaseCheck, operation: name, outcome: name === 'projectAttachmentDownload' ? 'available' : 'settled' },
                     }, { force: true });
-                } catch { /* A diagnostic cannot change the settled command result. */ }
+                } catch {                                                              }
                 return result;
             } catch (error) {
                 if (error instanceof NativeAttachmentCleanupUnconfirmedError) iosForegroundFailure = error;
                 throw error;
-            } finally { iosCleanupCallback = null; }
+            } finally { iosCleanupCallback = null; iosDropboxControl = null; iosDropboxSignal = undefined; iosDropboxRequestId = null; }
         });
     },
-    /** `name` is one of MENU_COMMANDS; `json` is that command's input. Its request or capture UUID makes a retry exact. */
+    gettingStartedOutcome(json: string): string {
+        return submit(async () => unwrap(contract.probeGettingStartedOutcome(completionJson(json, 2048) as Parameters<typeof contract.probeGettingStartedOutcome>[0])));
+    },
     menuCommand(name: string, json: string): string {
         return submit(async () => {
             const command = MENU_COMMANDS[name as MenuCommand];
@@ -5208,5 +8969,5 @@ globalThis.MindwtrHost = {
 if (globalThis.__mindwtrIntlCheck === true) {
     try { runIntlCheck(); } catch (error) { native().log(`Native Android intl check failed: ${error instanceof Error ? error.message : String(error)}`); }
 }
-// Closes the bundle's init section, opened at the end of host-polyfills.js.
+
 native().trace?.('');

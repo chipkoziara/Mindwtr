@@ -10,6 +10,7 @@ const {
     ensureContextAutomationHeadlessService,
     ensureContextAutomationReceiver,
     removeContextIntentFilters,
+    removeComposePreviewActivity,
     setProfileable,
     mergeToolsRemove,
     ensureConfigChange,
@@ -98,10 +99,8 @@ describe('android-manifest-fixes', () => {
   });
 
   it('enrolls nothing in backup or device transfer', () => {
-    // expo-secure-store's rules include every sharedpref file, so any new one
-    // would be silently enrolled. Ours name a path that does not exist, which
-    // is how an exhaustive include list says "nothing" — an empty rule set
-    // would mean "everything".
+
+
     [BACKUP_RULES_XML, DATA_EXTRACTION_RULES_XML].forEach((xml) => {
       const includes = xml.match(/<include [^>]*\/>/g) ?? [];
       expect(includes.length).toBeGreaterThan(0);
@@ -114,6 +113,21 @@ describe('android-manifest-fixes', () => {
     expect(BACKUP_RULES_XML).toContain('<full-backup-content>');
     expect(DATA_EXTRACTION_RULES_XML).toContain('<cloud-backup>');
     expect(DATA_EXTRACTION_RULES_XML).toContain('<device-transfer>');
+  });
+
+  it('keeps the exported Compose PreviewActivity of expo-dev-client out of the app, idempotently', () => {
+
+
+    const application = { activity: [{ $: { 'android:name': '.MainActivity' } }] };
+
+    removeComposePreviewActivity(application);
+    removeComposePreviewActivity(application);
+
+    const previews = application.activity.filter(
+      (activity) => activity.$['android:name'] === 'androidx.compose.ui.tooling.PreviewActivity',
+    );
+    expect(previews).toEqual([{ $: { 'android:name': 'androidx.compose.ui.tooling.PreviewActivity', 'tools:node': 'remove' } }]);
+    expect(application.activity).toHaveLength(2);
   });
 
   it('removes profileable shell access by default', () => {

@@ -1,4 +1,4 @@
-import type { AppData, Attachment, Area, Person, Project, Task } from './types';
+import type { AppData, Attachment, Area, Person, Project, Section, Task } from './types';
 import { logInfo, logWarn } from './logger';
 import {
     PREPARED_UNCHANGED,
@@ -24,10 +24,11 @@ import {
     normalizeRevisionMetadata,
     normalizeSectionForSyncMerge,
     normalizeTaskForSyncMerge,
-    validateMergedSyncData,
+    validateMergedSyncDataPass,
 } from './sync-normalization';
 import { parseSyncDocument } from './sync-document';
 import { traceSection } from './perf-trace';
+import { mapPass, runSliced, runToEnd, SLICE_ITEMS, type CooperativePass } from './cooperative';
 import { mergeSettingsForSync } from './sync-merge-settings';
 import {
     chooseDeterministicWinner,
@@ -127,19 +128,14 @@ function createEmptyEntityStats(localTotal: number, incomingTotal: number): Enti
     };
 }
 
-/**
- * Stats for a cycle that skipped the empty-remote merge (`io.skipEmptyRemoteMerge`):
- * with no incoming document every entity is local-only, nothing conflicts and
- * nothing is clamped. Kept in step with what the real merge reports for an empty
- * remote by `sync-canonical-reads.contract.test.ts`.
- */
+
 function createLocalOnlyMergeStats(data: AppData): MergeStats {
     const forCollection = (items?: readonly unknown[]): EntityMergeStats => {
         const stats = createEmptyEntityStats(items?.length ?? 0, 0);
         stats.mergedTotal = stats.localTotal;
         stats.localOnly = stats.localTotal;
-        // The reconcile counts an entity with no counterpart as resolved using
-        // the local side, so a skipped merge has to report it the same way.
+
+
         stats.resolvedUsingLocal = stats.localTotal;
         return stats;
     };
@@ -225,7 +221,7 @@ const containsAttachmentTraversalSegment = (value: string): boolean => {
                 enqueueCandidate(decoded);
             }
         } catch {
-            // Ignore malformed URI segments and keep evaluating other candidates.
+
         }
 
         const trimmed = current.trim();
@@ -233,7 +229,7 @@ const containsAttachmentTraversalSegment = (value: string): boolean => {
             try {
                 enqueueCandidate(new URL(`file:${trimmed}`).pathname);
             } catch {
-                // Ignore URL parse failures and keep evaluating the raw candidate.
+
             }
             continue;
         }
@@ -242,7 +238,7 @@ const containsAttachmentTraversalSegment = (value: string): boolean => {
             try {
                 enqueueCandidate(new URL(trimmed).pathname);
             } catch {
-                // Ignore URL parse failures and keep evaluating the raw candidate.
+
             }
         }
     }
@@ -275,6 +271,9 @@ type MergeableEntity = {
 type MergeAppDataOptions = {
     nowIso?: string;
     preferIncomingAttachmentCloudKeys?: boolean;
+
+
+    preferIncomingAttachmentCloudKeyIds?: ReadonlySet<string>;
 };
 
 const getRecurrenceSeriesShape = (value: Task['recurrence']): string | null => {
@@ -303,8 +302,8 @@ const repairTaskRecurrenceSeriesIdentity = (
     if (!sameSeriesShape) {
         const identifiedTask = localSeriesId ? localTask : incomingTask;
         const legacyTask = localSeriesId ? incomingTask : localTask;
-        // Only the immediately following revision proves this was an edit of the known series.
-        // Equal or skipped revisions may be concurrent work or a cleared-and-recreated series.
+
+
         if ((legacyTask.rev ?? 0) !== (identifiedTask.rev ?? 0) + 1) return winner;
         if (normalizeRecurrenceForLoad(winner.recurrence)?.seriesId) return winner;
     }
@@ -326,9 +325,7 @@ const hasSamePersistedOperationIdentity = (left: MergeableEntity, right: Mergeab
     && left.updatedAt === right.updatedAt
 );
 
-/** A previous-version writer strips the new cancellation field while retaining the
- * operation's revision metadata. Preserve the marker only for that exact no-edit shape;
- * a real reactivation or completion bumps rev/updatedAt and continues to win normally. */
+
 const preserveTaskCancellationFromStrippedPeer = (
     localTask: Task,
     incomingTask: Task,
@@ -360,6 +357,22 @@ const preserveProjectCancellationFromStrippedPeer = (
     return winner.cancelledAt === cancelledAt ? winner : { ...winner, cancelledAt };
 };
 
+
+const isArchiveClockTwin = <T,>(
+    local: T,
+    incoming: T,
+    entityType: string,
+    normalizeForComparison?: ComparisonNormalizer<T>,
+): boolean => {
+    if (entityType !== 'task') return false;
+    const localTask = local as unknown as Task;
+    const incomingTask = incoming as unknown as Task;
+    if (localTask.status !== 'archived' || incomingTask.status !== 'archived') return false;
+    if (!hasValidArchiveClock(localTask.archivedAt) || !hasValidArchiveClock(incomingTask.archivedAt)) return false;
+    return getMergeComparableSignature({ ...local, archivedAt: undefined }, normalizeForComparison)
+        === getMergeComparableSignature({ ...incoming, archivedAt: undefined }, normalizeForComparison);
+};
+
 function mergeEntitiesWithStats<T extends MergeableEntity>(
     local: T[],
     incoming: T[],
@@ -368,6 +381,18 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
     entityType: string = 'entity',
     nowIso?: string,
 ): { merged: T[]; stats: EntityMergeStats } {
+    return runToEnd(mergeEntitiesPass(local, incoming, mergeConflict, normalizeForComparison, entityType, nowIso));
+}
+
+
+function* mergeEntitiesPass<T extends MergeableEntity>(
+    local: T[],
+    incoming: T[],
+    mergeConflict?: (localItem: T, incomingItem: T, winner: T) => T,
+    normalizeForComparison?: ComparisonNormalizer<T>,
+    entityType: string = 'entity',
+    nowIso?: string,
+): CooperativePass<{ merged: T[]; stats: EntityMergeStats }> {
     const localMap = new Map<string, T>(local.map((item) => [item.id, item]));
     const incomingMap = new Map<string, T>(incoming.map((item) => [item.id, item]));
     const allIds = new Set<string>([...localMap.keys(), ...incomingMap.keys()]);
@@ -379,6 +404,8 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
     let discardedLiveConflictWarnings = 0;
     let taskStatusResolutionWarnings = 0;
     let futureTimestampClampWarnings = 0;
+    let archiveTwinMerges = 0;
+    let strippedArchiveClockMerges = 0;
     const nowTime = nowIso ? new Date(nowIso).getTime() : NaN;
     const maxAllowedMergeTime = Number.isFinite(nowTime) ? nowTime : Date.now();
     const getStringField = (item: T, field: string): string | undefined => {
@@ -421,7 +448,10 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
         return { ...item, createdAt: normalizedCreatedAt };
     };
 
+    let visited = 0;
     for (const id of allIds) {
+        visited += 1;
+        if (visited % SLICE_ITEMS === 0) yield;
         const localItem = localMap.get(id);
         const incomingItem = incomingMap.get(id);
 
@@ -490,7 +520,26 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
         const shouldCheckContentDiff = hasRevision
             ? revDiff === 0 && localDeleted === incomingDeleted
             : localDeleted === incomingDeleted;
-        const contentDiff = shouldCheckContentDiff ? !comparableContentMatches : false;
+        let strippedArchiveClock: string | undefined;
+        if (shouldCheckContentDiff && !comparableContentMatches && (entityType === 'task' || entityType === 'project')) {
+            const localArchive = normalizedLocalItem as unknown as Task | Project;
+            const incomingArchive = normalizedIncomingItem as unknown as Task | Project;
+
+            if (hasValidArchiveClock(localArchive.archivedAt) !== hasValidArchiveClock(incomingArchive.archivedAt)
+                && localArchive.rev === incomingArchive.rev && localArchive.revBy === incomingArchive.revBy
+                && localArchive.updatedAt === incomingArchive.updatedAt
+                && localArchive.status === incomingArchive.status
+                && localArchive.deletedAt === incomingArchive.deletedAt
+                && localArchive.purgedAt === incomingArchive.purgedAt
+                && JSON.stringify(toComparableValue({ ...normalizedLocalItem, archivedAt: undefined }))
+                    === JSON.stringify(toComparableValue({ ...normalizedIncomingItem, archivedAt: undefined }))) {
+                strippedArchiveClock = hasValidArchiveClock(localArchive.archivedAt) ? localArchive.archivedAt : incomingArchive.archivedAt;
+            }
+        }
+
+        const archiveTwin = shouldCheckContentDiff && !comparableContentMatches && !localDeleted
+            && isArchiveClockTwin(normalizedLocalItem, normalizedIncomingItem, entityType, normalizeForComparison);
+        const contentDiff = shouldCheckContentDiff ? !comparableContentMatches && !archiveTwin && !strippedArchiveClock : false;
         const unresolvedDeleteStateDiff = localDeleted !== incomingDeleted && (!hasRevision || revDiff === 0);
         const conflictReasons: ConflictReason[] = [];
         if (unresolvedDeleteStateDiff) conflictReasons.push('deleteState');
@@ -637,8 +686,8 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
                 winner = revDiff > 0 ? normalizedLocalItem : normalizedIncomingItem;
             } else if (comparableUpdatedTimeDiff !== 0) {
                 winner = comparableUpdatedTimeDiff > 0 ? normalizedIncomingItem : normalizedLocalItem;
-            // Only use revBy when both sides provide it; otherwise older clients without revBy
-            // fall back to deterministic convergence instead of silently losing to partial metadata.
+
+
             } else if (revByDiff && localRevBy && incomingRevBy) {
                 winner = incomingRevBy > localRevBy ? normalizedIncomingItem : normalizedLocalItem;
             } else {
@@ -732,8 +781,8 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
         }
 
         if (differs && (stats.conflictSamples?.length || 0) < CONFLICT_SAMPLE_LIMIT) {
-            // Only conflict samples need the expanded comparable views; the loop's
-            // equality check runs on cached signatures now, so these are built lazily.
+
+
             const comparableLocalValue = contentDiff
                 ? toComparableValue(normalizeForComparison ? normalizeForComparison(normalizedLocalItem) : normalizedLocalItem)
                 : undefined;
@@ -767,22 +816,21 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
         }
 
         let mergedItem = mergeConflict ? mergeConflict(normalizedLocalItem, normalizedIncomingItem, winner) : winner;
-        if ((entityType === 'task' || entityType === 'project') && !hasValidArchiveClock((mergedItem as unknown as Task | Project).archivedAt)) {
-            const other = winner === normalizedLocalItem ? normalizedIncomingItem : normalizedLocalItem;
-            const withClock = other as unknown as Task | Project;
-            const withoutClock = mergedItem as unknown as Task | Project;
-            // A previous client can omit only this new field from the same saved operation.
-            // A newer operation with no clock must remain unknown and start a fresh period.
-            if (hasValidArchiveClock(withClock.archivedAt)
-                && withClock.rev === withoutClock.rev && withClock.revBy === withoutClock.revBy
-                && withClock.updatedAt === withoutClock.updatedAt
-                && withClock.status === withoutClock.status
-                && withClock.deletedAt === withoutClock.deletedAt
-                && withClock.purgedAt === withoutClock.purgedAt
-                && JSON.stringify(toComparableValue({ ...normalizedLocalItem, archivedAt: undefined }))
-                    === JSON.stringify(toComparableValue({ ...normalizedIncomingItem, archivedAt: undefined }))) {
-                mergedItem = { ...mergedItem, archivedAt: withClock.archivedAt };
-            }
+        if (archiveTwin) {
+
+
+            archiveTwinMerges += 1;
+            const localArchivedAt = (normalizedLocalItem as unknown as Task).archivedAt as string;
+            const incomingArchivedAt = (normalizedIncomingItem as unknown as Task).archivedAt as string;
+            const timeDiff = Date.parse(incomingArchivedAt) - Date.parse(localArchivedAt);
+            const archivedAt = timeDiff > 0 || (timeDiff === 0 && incomingArchivedAt > localArchivedAt)
+                ? incomingArchivedAt
+                : localArchivedAt;
+            if ((mergedItem as unknown as Task).archivedAt !== archivedAt) mergedItem = { ...mergedItem, archivedAt };
+        }
+        if (strippedArchiveClock) {
+            strippedArchiveClockMerges += 1;
+            mergedItem = { ...mergedItem, archivedAt: strippedArchiveClock };
         }
         merged.push(normalizeTimestamps(mergedItem));
     }
@@ -807,6 +855,19 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
                 total: taskStatusResolutionWarnings,
                 elided: taskStatusResolutionWarnings - 10,
             },
+        });
+    }
+
+    if (archiveTwinMerges > 0) {
+        logInfo('Sync merge joined copies archived on two devices', {
+            scope: 'sync',
+            context: { releaseCheck: 'v1.3.7/auto-archive-converge', count: archiveTwinMerges },
+        });
+    }
+    if (strippedArchiveClockMerges > 0) {
+        logInfo('Sync merge retained archive clocks omitted by an equivalent peer', {
+            scope: 'sync', force: true,
+            context: { releaseCheck: 'v1.3.8/archive-clock-converge', entityType, count: strippedArchiveClockMerges },
         });
     }
 
@@ -864,10 +925,14 @@ const getClockSkewWarning = (stats: MergeResult['stats']): ClockSkewWarning | un
 };
 
 export function mergeAppDataWithStats(local: AppData, incoming: AppData, options: MergeAppDataOptions = {}): MergeResult {
+    return runToEnd(mergeAppDataWithStatsPass(local, incoming, options));
+}
+
+
+export function* mergeAppDataWithStatsPass(local: AppData, incoming: AppData, options: MergeAppDataOptions = {}): CooperativePass<MergeResult> {
     const nowIso = isValidTimestamp(options.nowIso) ? options.nowIso : new Date().toISOString();
-    // Compaction repairs must converge to zero after one cycle; a steady nonzero
-    // count here is a rev-bump loop that rewrites every purged tombstone each
-    // cycle (#766). Counted per cycle and surfaced via stats.tombstoneRepairs.
+
+
     let tombstoneRepairs = 0;
     const countRepair = <T extends { rev?: number; purgedAt?: string }>(before: T, after: T): T => {
         if (before.purgedAt && after.rev !== before.rev) tombstoneRepairs += 1;
@@ -883,7 +948,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
     });
     const localNormalized = {
         ...local,
-        tasks: (local.tasks || []).map((task) => normalizeRevisionMetadata(countRepair(task, normalizeTaskForSyncMerge(task, nowIso, true)))),
+        tasks: yield* mapPass(local.tasks || [], (task) => normalizeRevisionMetadata(countRepair(task, normalizeTaskForSyncMerge(task, nowIso, true)))),
         projects: (local.projects || []).map((project) => normalizeRevisionMetadata(countRepair(project, normalizeProjectForSyncMerge(project, true)))),
         sections: localSections.map((section) => normalizeRevisionMetadata(normalizeSectionForSyncMerge(section))),
         areas: (local.areas || []).map((area) => normalizeRevisionMetadata(normalizeAreaForSyncMerge(area, nowIso))),
@@ -891,7 +956,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
     };
     const incomingNormalized = {
         ...incoming,
-        tasks: (incoming.tasks || []).map((task) => normalizeRevisionMetadata(countRepair(task, normalizeTaskForSyncMerge(task, nowIso)))),
+        tasks: yield* mapPass(incoming.tasks || [], (task) => normalizeRevisionMetadata(countRepair(task, normalizeTaskForSyncMerge(task, nowIso)))),
         projects: (incoming.projects || []).map((project) => normalizeRevisionMetadata(countRepair(project, normalizeProjectForSyncMerge(project)))),
         sections: incomingSections.map((section) => normalizeRevisionMetadata(normalizeSectionForSyncMerge(section))),
         areas: (incoming.areas || []).map((area) => normalizeRevisionMetadata(normalizeAreaForSyncMerge(area, nowIso))),
@@ -926,16 +991,19 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
             incomingAttachment?: Attachment,
         ): string | undefined => {
             if (mergedAttachment.deletedAt) return mergedAttachment.cloudKey;
-            // The first durable cycle after activation reads the exact remote
-            // document written by the candidate probe. Its live cloud key is
-            // therefore proof for the newly active destination; an equal-time
-            // deterministic winner from the previous backend must not replace
-            // it. An explicit missing key remains missing so the cycle fails
-            // safe and a later attachment pass can upload it.
+
+
             if (
                 options.preferIncomingAttachmentCloudKeys
                 && incomingAttachment
                 && !incomingAttachment.deletedAt
+            ) {
+                return incomingAttachment.cloudKey;
+            }
+            if (
+                incomingAttachment?.cloudKey
+                && !incomingAttachment.deletedAt
+                && options.preferIncomingAttachmentCloudKeyIds?.has(mergedAttachment.id)
             ) {
                 return incomingAttachment.cloudKey;
             }
@@ -944,29 +1012,12 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
                 || incomingAttachment?.cloudKey;
         };
 
-        // #1057: content-revision conflicts resolve independently of which side wins
-        // the task-level LWW above — a higher `contentRev` always wins outright. On a
-        // tie (including the common case where neither side ever set one — old
-        // clients, or genuinely identical content) there's no separate signal to
-        // prefer, so this defers to `winner`: deterministic and symmetric, since
-        // `winner` is computed the same way regardless of which side calls itself
-        // "local" vs "incoming", so both devices converge on the same merged object.
-        //
-        // `contentMtimeMs`/`contentSize` follow the same `contentSource` as `fileHash`
-        // (review B1's actual mechanism, not a separate rule): these two fields never
-        // travel over the wire (`sanitizeAppDataForRemote` strips them — see there), so
-        // `incomingAttachment`'s copy is always already absent by the time it reaches this
-        // merge. When `contentSource` is `incoming` (its `contentRev` won), the merged
-        // result correctly ends up with an ABSENT recorded stat — which is exactly what
-        // makes the receiving device's next check-on-touch pass detect a mismatch against
-        // its own (stale) disk file and re-download, per design point 4. If this instead
-        // preferred `localAttachment` unconditionally, a losing device's own unchanged
-        // stat would keep matching its own disk forever and it would never re-download.
+
         const resolveContentIdentity = (
             winner: Attachment,
             localAttachment: Attachment,
             incomingAttachment: Attachment,
-        ): Pick<Attachment, 'fileHash' | 'contentRev' | 'contentMtimeMs' | 'contentSize' | 'pendingContentUpload'> => {
+        ): Pick<Attachment, 'fileHash' | 'contentRev' | 'contentMtimeMs' | 'contentSize' | 'pendingContentUpload' | 'staleContentHash'> => {
             if (winner.deletedAt) {
                 return {
                     fileHash: winner.fileHash,
@@ -974,6 +1025,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
                     contentMtimeMs: winner.contentMtimeMs,
                     contentSize: winner.contentSize,
                     pendingContentUpload: undefined,
+                    staleContentHash: undefined,
                 };
             }
             const localRev = localAttachment.contentRev ?? 0;
@@ -982,12 +1034,8 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
                 ? winner
                 : (localRev > incomingRev ? localAttachment : incomingAttachment);
             const contentRev = contentSource.contentRev;
-            // An unproven local replacement is its own content generation. Falling
-            // back to the incoming digest here would falsely label its bytes as the
-            // previous remote blob and then let the restored metadata escape without
-            // a hash-bound upload. Keep the digest absent until the prepare lifecycle
-            // snapshots these local bytes; the durable pending marker blocks remote
-            // publication if that proof cannot be obtained.
+
+
             const localPendingCandidateWon = localAttachment.pendingContentUpload === true
                 && contentSource === localAttachment;
             const fileHash = localPendingCandidateWon
@@ -995,10 +1043,8 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
                 : contentSource.fileHash || localAttachment.fileHash || incomingAttachment.fileHash;
             const normalizedLocalFileHash = localAttachment.fileHash?.trim().toLowerCase();
             const normalizedResolvedFileHash = fileHash?.trim().toLowerCase();
-            // Merge kept the exact local content identity: same contentRev, same
-            // fileHash. This is the steady state of every device merging against its
-            // own stripped remote twin, and the attachment-level tie can still hand
-            // `winner` to the incoming copy.
+
+
             const localIdentitySurvived = (contentRev ?? 0) === localRev
                 && (
                     (Boolean(normalizedLocalFileHash)
@@ -1007,25 +1053,31 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
                         && !normalizedLocalFileHash
                         && !normalizedResolvedFileHash)
                 );
-            // `pendingContentUpload` is device-local retry state, never an LWW
-            // field. Preserve this device's marker whenever merge kept the exact
-            // local content identity, even if an otherwise-identical remote record
-            // won the attachment-level tie after its local-only fields were stripped.
+
+
             const localPendingIdentitySurvived = localAttachment.pendingContentUpload === true
                 && localIdentitySurvived;
-            // The recorded stat describes THIS device's disk file and never travels, so
-            // when the identity survived it must come from the local copy: taking it
-            // from an incoming winner yields an absent stat, the post-merge pass
-            // re-records it, and that local write triggers another sync, every cycle.
-            // Design point 4 is untouched: newer remote content arrives with a higher
-            // contentRev or a different fileHash and still lands with an absent stat.
-            const statSource = localIdentitySurvived ? localAttachment : contentSource;
+
+
+            const localFileStatSource = localIdentitySurvived ? localAttachment : contentSource;
+
+
+            const hasRecordedFileStat = (attachment: Attachment) => attachment.contentMtimeMs !== undefined && attachment.contentSize !== undefined;
+            const normalizedLocalStaleHash = localAttachment.staleContentHash?.trim().toLowerCase();
+            const staleContentHash = hasRecordedFileStat(localFileStatSource)
+                ? undefined
+                : localIdentitySurvived
+                    ? localAttachment.staleContentHash
+                    : hasRecordedFileStat(localAttachment)
+                        ? normalizedLocalFileHash
+                        : normalizedLocalStaleHash || normalizedLocalFileHash;
             return {
                 fileHash,
                 contentRev,
-                contentMtimeMs: statSource.contentMtimeMs,
-                contentSize: statSource.contentSize,
+                contentMtimeMs: localFileStatSource.contentMtimeMs,
+                contentSize: localFileStatSource.contentSize,
                 pendingContentUpload: localPendingIdentitySurvived ? true : undefined,
+                staleContentHash: staleContentHash || undefined,
             };
         };
 
@@ -1102,25 +1154,41 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
     };
 
     let unchangedAttachmentCopiesSkipped = 0;
-    // A winner from an older client that never carried viewSectionIds must not
-    // erase the peer's assignment; presence (even {}) is an intentional value.
+
+
     const keepViewSectionIdsFromPeer = <T extends Task | Project>(winner: T, other: T): T => (
         Object.prototype.hasOwnProperty.call(winner, 'viewSectionIds')
             || !Object.prototype.hasOwnProperty.call(other, 'viewSectionIds')
             ? winner
             : { ...winner, viewSectionIds: other.viewSectionIds }
     );
+
+
+    const keepProjectFlowFromPeer = (winner: Project, other: Project): Project => (
+        winner.perSectionFlow !== undefined || other.perSectionFlow === undefined || winner.purgedAt
+            ? winner
+            : { ...winner, perSectionFlow: other.perSectionFlow }
+    );
+
+    const keepReminderLeadsFromPeer = (winner: Task, other: Task): Task => {
+        let preserved = winner;
+        for (const field of ['dueReminderLeadMinutes', 'startReminderLeadMinutes'] as const) {
+            if (preserved[field] === undefined && other[field] !== undefined && !preserved.purgedAt) {
+                preserved = { ...preserved, [field]: other[field] };
+            }
+        }
+        return preserved;
+    };
     const withMergedAttachments = <T extends Task | Project>(winner: T, attachments: Attachment[] | undefined): T => {
-        // In the common no-attachment case there is no patch to apply. Keep
-        // the normalized winner instead of copying its full optional schema.
-        // Actual attachment merges and downstream repairs still run normally.
+
+
         if (winner.attachments === attachments) {
             unchangedAttachmentCopiesSkipped += 1;
             return winner;
         }
         return { ...winner, attachments };
     };
-    const tasksResult = mergeEntitiesWithStats(
+    const tasksResult = yield* mergeEntitiesPass(
         localNormalized.tasks,
         incomingNormalized.tasks,
         (localTask: Task, incomingTask: Task, winner: Task) => {
@@ -1140,7 +1208,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
                 preserveTaskCancellationFromStrippedPeer(
                     localTask,
                     incomingTask,
-                    withMergedAttachments(winnerWithForwardCompatibleViewSections, attachments),
+                    withMergedAttachments(keepReminderLeadsFromPeer(winnerWithForwardCompatibleViewSections, winner === localTask ? incomingTask : localTask), attachments),
                 ),
             );
         },
@@ -1149,7 +1217,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
         nowIso
     );
 
-    const projectsResult = mergeEntitiesWithStats(
+    const projectsResult = yield* mergeEntitiesPass(
         localNormalized.projects,
         incomingNormalized.projects,
         (localProject: Project, incomingProject: Project, winner: Project) => {
@@ -1163,7 +1231,10 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
                 localProject,
                 incomingProject,
                 withMergedAttachments(
-                    keepViewSectionIdsFromPeer(winner, winner === localProject ? incomingProject : localProject),
+                    keepProjectFlowFromPeer(
+                        keepViewSectionIdsFromPeer(winner, winner === localProject ? incomingProject : localProject),
+                        winner === localProject ? incomingProject : localProject,
+                    ),
                     attachments,
                 ),
             );
@@ -1176,7 +1247,15 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
     const sectionsResult = mergeEntitiesWithStats(
         localNormalized.sections,
         incomingNormalized.sections,
-        undefined,
+
+
+        (localSection: Section, incomingSection: Section, winner: Section) => {
+            const other = winner === localSection ? incomingSection : localSection;
+            return winner.isSequential !== undefined || other.isSequential === undefined
+                || (winner.deletedAt && !winner.projectArchivedAt)
+                ? winner
+                : { ...winner, isSequential: other.isSequential };
+        },
         normalizeSectionForContentComparison,
         'section',
         nowIso
@@ -1201,14 +1280,15 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData, options
         tombstoneRepairs,
     };
 
-    const data = repairMergedSyncReferences({
+    yield;
+    const data = traceSection('sync:mergeRepair', () => repairMergedSyncReferences({
         tasks: tasksResult.merged,
         projects: projectsResult.merged,
         sections: sectionsResult.merged,
         areas: areasResult.merged,
         people: peopleResult.merged as Person[],
         settings: mergeSettingsForSync(localNormalized.settings, incomingNormalized.settings),
-    }, nowIso);
+    }, nowIso));
     data.sections = compactSectionsForPurgedProjects(data.sections, data.projects);
     if (unchangedAttachmentCopiesSkipped > 0) {
         logInfo('Sync merge skipped unchanged attachment copies', {
@@ -1270,6 +1350,16 @@ const isLocalSyncAbortError = (error: unknown): boolean => (
     error instanceof Error && error.name === 'LocalSyncAbort'
 );
 
+
+const saveRemoteWriteRetrySchedule = async (io: SyncCycleIO, data: AppData): Promise<void> => {
+    try {
+        await io.writeLocal(data);
+    } catch (saveError) {
+        if (!io.slicer || !isLocalSyncAbortError(saveError)) throw saveError;
+        logWarn('Sync retry schedule save refused; the remote write error stands', { scope: 'sync' });
+    }
+};
+
 const getPendingRemoteWriteAttemptCount = (data: AppData): number => {
     const attempts = data.settings.pendingRemoteWriteAttempts;
     if (typeof attempts !== 'number' || !Number.isFinite(attempts) || attempts < 0) {
@@ -1308,8 +1398,8 @@ const withPendingRemoteWriteRetry = (data: AppData, nowIso: string, error?: unkn
         ...data,
         settings: {
             ...data.settings,
-            // This path only runs after the merged snapshot was saved locally and
-            // the remote write failed, so the UI should show an error until retry clears it.
+
+
             lastSyncStatus: 'error',
             lastSyncError: reachedAttemptCeiling
                 ? `Remote write failed after ${PENDING_REMOTE_WRITE_MAX_ATTEMPTS} attempts. Check your sync backend, then sync again.`
@@ -1322,6 +1412,8 @@ const withPendingRemoteWriteRetry = (data: AppData, nowIso: string, error?: unkn
 
 async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResult> {
     const nowIso = io.now ? io.now() : new Date().toISOString();
+
+    const slicer = io.slicer;
     const yieldToUi = async () => {
         if (typeof io.yieldToUi === 'function') {
             await io.yieldToUi();
@@ -1389,8 +1481,8 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
 
     io.onStep?.('merge');
     await yieldToUi();
-    // The skip is refused unless the remote really is empty, so a caller that
-    // sets the flag on a cycle that read a document cannot discard it.
+
+
     const remoteIsEmpty = remoteData.tasks.length === 0
         && remoteData.projects.length === 0
         && remoteData.sections.length === 0
@@ -1401,10 +1493,11 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
     const mergeStartedAt = performance.now();
     const mergeResult: MergeResult = skipMerge
         ? { data: localData, stats: createLocalOnlyMergeStats(localData) }
-        : traceSection('sync:merge', () => mergeAppDataWithStats(localData, remoteData, {
+        : await runSliced('sync:merge', mergeAppDataWithStatsPass(localData, remoteData, {
             nowIso,
             preferIncomingAttachmentCloudKeys: io.preferIncomingAttachmentCloudKeys,
-        }));
+            preferIncomingAttachmentCloudKeyIds: io.preferIncomingAttachmentCloudKeyIds,
+        }), slicer);
     if (!skipMerge) {
         logInfo('Full sync merge completed', {
             scope: 'sync',
@@ -1454,16 +1547,12 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
             lastSyncHistory: nextHistory,
         },
     };
-    // The union above re-adds every local-only section, including expired
-    // archive tombstones a <=1.3.0 peer already purged from the remote (it has
-    // no retention exception). Agreeing with that peer is what terminates the
-    // rewrite-every-cycle loop; a remote without the parent project is instead
-    // treated as "never published" and keeps the section.
+
+
     const remoteSectionIds = new Set(remoteData.sections.map((section) => section.id));
     const remoteProjectIds = new Set(remoteData.projects.map((project) => project.id));
-    // A section a merged task still points at has to stay: dropping it would
-    // fail validateMergedSyncData below. The peer that purged it cleared those
-    // references first, so the real loop shape is already covered.
+
+
     const referencedSectionIds = new Set(
         nextMergedData.tasks.map((task) => task.sectionId).filter((id): id is string => Boolean(id)),
     );
@@ -1502,7 +1591,7 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
         });
     }
     let finalData = pruned.data;
-    const validationErrors = traceSection('sync:validate', () => validateMergedSyncData(finalData));
+    const validationErrors = await runSliced('sync:validate', validateMergedSyncDataPass(finalData), slicer);
     if (validationErrors.length > 0) {
         const sample = validationErrors.slice(0, 3).join('; ');
         logWarn('Sync merge validation failed', {
@@ -1517,12 +1606,12 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
 
     if (typeof io.prepareRemoteWrite === 'function') {
         const preparedData = await io.prepareRemoteWrite(finalData);
-        // Only an explicit "unchanged" keeps the validation above; a new document or no answer is validated again.
+
         const unchanged = preparedData === PREPARED_UNCHANGED;
         if (preparedData && !unchanged) finalData = preparedData;
         const preparedValidationErrors = unchanged
             ? []
-            : traceSection('sync:validate', () => validateMergedSyncData(finalData));
+            : await runSliced('sync:validate', validateMergedSyncDataPass(finalData), slicer);
         if (preparedValidationErrors.length > 0) {
             const sample = preparedValidationErrors.slice(0, 3).join('; ');
             logWarn('Sync remote-write preparation validation failed', {
@@ -1536,13 +1625,7 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
         }
     }
 
-    // The merge produced nothing the local store does not already hold. Both
-    // document writes below would rewrite the same bytes, and the pending
-    // remote-write marker they carry has nothing to protect: it exists so a
-    // crash between the local write and the remote write cannot leave local
-    // holding merged-in remote changes that were never published, and here
-    // local absorbed nothing. Persist the cycle's own bookkeeping and go
-    // straight to the remote write, which keeps its own unchanged-guard.
+
     if (
         !pendingRemoteWriteMeta
         && typeof io.isLocalPersistUnchanged === 'function'
@@ -1555,20 +1638,19 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
             await io.writeRemote(finalData);
         } catch (error) {
             if (!isLocalSyncAbortError(error)) {
-                // Nothing durable to roll back, but the retry schedule still
-                // has to land or the next cycle hammers a failing backend.
+
+
                 io.onStep?.('write-local');
                 await yieldToUi();
-                await io.writeLocal(withPendingRemoteWriteRetry(finalData, nowIso, error));
+                await saveRemoteWriteRetrySchedule(io, withPendingRemoteWriteRetry(finalData, nowIso, error));
             }
             throw error;
         }
         try {
             await io.persistSyncStatusOnly(finalData);
         } catch (error) {
-            // The remote write already succeeded and no document changed locally;
-            // a failed status write must not report the whole cycle as an error
-            // (same swallow-and-warn as persistUnchangedSyncStatus).
+
+
             logWarn('Failed to persist sync status after an unchanged local write', {
                 error: error instanceof Error ? error.message : String(error),
             });
@@ -1598,33 +1680,25 @@ async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResul
     try {
         await io.writeRemote(persistedFinalData);
     } catch (error) {
-        if (isLocalSyncAbortError(error)) {
-            await io.clearPendingRemoteWriteAfterLocalAbort?.(finalDataWithPendingRemoteWrite.settings.pendingRemoteWriteAt as string);
-            throw error;
-        }
+
+        if (isLocalSyncAbortError(error)) throw error;
         const localDataWithRetry = withPendingRemoteWriteRetry(canonicalWithPendingRemoteWrite, nowIso, error);
         io.onStep?.('write-local');
         await yieldToUi();
-        await io.writeLocal(localDataWithRetry);
+        await saveRemoteWriteRetrySchedule(io, localDataWithRetry);
         throw error;
     }
 
     io.onStep?.('write-local');
     await yieldToUi();
-    try {
-        const canonicalPersistedData = await io.writeLocal(persistedFinalData) ?? persistedFinalData;
-        return {
-            data: canonicalPersistedData,
-            stats: mergeResult.stats,
-            status: nextSyncStatus,
-            clockSkewWarning: mergeResult.clockSkewWarning,
-        };
-    } catch (error) {
-        if (isLocalSyncAbortError(error)) {
-            await io.clearPendingRemoteWriteAfterLocalAbort?.(finalDataWithPendingRemoteWrite.settings.pendingRemoteWriteAt as string);
-        }
-        throw error;
-    }
+
+    const canonicalPersistedData = await io.writeLocal(persistedFinalData) ?? persistedFinalData;
+    return {
+        data: canonicalPersistedData,
+        stats: mergeResult.stats,
+        status: nextSyncStatus,
+        clockSkewWarning: mergeResult.clockSkewWarning,
+    };
 }
 
 export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult> {

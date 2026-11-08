@@ -1,3 +1,4 @@
+import { isValidProjectColorOverride } from './color-constants';
 import type { NativeHostResult } from './native-host-contract';
 import type { NativeAreaOrderToken } from './native-host-contract-area-order';
 import { detach, exact, iso, record } from './native-host-contract-project-shared';
@@ -12,12 +13,13 @@ import { areaRenameEffect, planAreaEditorSave, selectAreaRenameScope, type AreaR
 import { AREA_PRESET_COLORS, DEFAULT_AREA_COLOR } from './color-constants';
 import type { PreparedAreaRename } from './store-types';
 import { taskEditValuesEqual } from './json-value-equality';
+import { isManageAreaNameTaken } from './manage-settings-model';
 import type { Area, Project, Task } from './types';
 
 export type NativeAreaRenameRequest = { requestId: string; areaId: string; name: string;
     expected: NativeAreaOrderToken; manageColor?: string };
 export type NativeAreaRenameResult = AreaRenameResult;
-export type NativePreparedAreaRename = PreparedAreaRename & { version: 1; request: NativeAreaRenameRequest;
+export type NativePreparedAreaRename = PreparedAreaRename & { version: 1 | 2; request: NativeAreaRenameRequest;
     result: NativeAreaRenameResult };
 export type NativeAreaRenamePreparation = { kind: 'noop'; result: NativeAreaRenameResult }
     | { kind: 'prepared'; prepared: NativePreparedAreaRename };
@@ -76,7 +78,7 @@ const validProject = (value: unknown): value is Project => {
         || typeof value.id !== 'string' || !value.id || value.id.length > 500
         || typeof value.title !== 'string' || value.title.length > 100_000
         || !['active', 'someday', 'waiting', 'archived'].includes(String(value.status))
-        || typeof value.color !== 'string' || typeof value.order !== 'number' || !Number.isFinite(value.order)
+        || !isValidProjectColorOverride(value.colorOverride) || typeof value.color !== 'string' || typeof value.order !== 'number' || !Number.isFinite(value.order)
         || !Array.isArray(value.tagIds) || !value.tagIds.every((item) => typeof item === 'string')
         || !revision(value.rev) || !iso(value.createdAt) || !iso(value.updatedAt)
         || (value.areaId !== undefined && (typeof value.areaId !== 'string' || value.areaId.length > 500))
@@ -106,14 +108,14 @@ const revisionsAdvance = <T extends { rev?: number }>(pairs: Array<{ before: T; 
     pairs.every(({ before, after }) => typeof after.rev === 'number' && after.rev > (before.rev ?? 0)
         && after.rev <= MAX_SYNC_REVISION);
 
-/** Pure cold-journal validation before SQLite opens. */
+
 const readPrepared = (value: unknown): NativePreparedAreaRename | null => {
     const envelope = detach<Record<string, unknown>>(value);
     if (!envelope || !exact(envelope, ['request', 'prepared']) || !record(envelope.prepared)) return null;
     const request = readRequest(envelope.request);
     const raw = envelope.prepared;
     if (!request || !exact(raw, ['version', 'request', 'scope', 'effect', 'deviceIdBefore',
-        'deviceIdToInitialize', 'updateAt', 'result']) || raw.version !== 1 || !same(raw.request, request)
+        'deviceIdToInitialize', 'updateAt', 'result']) || (raw.version !== 1 && raw.version !== 2) || !same(raw.request, request)
         || !record(raw.scope) || !exact(raw.scope, ['areas', 'projects', 'tasks'])
         || !Array.isArray(raw.scope.areas) || !Array.isArray(raw.scope.projects) || !Array.isArray(raw.scope.tasks)
         || !record(raw.effect) || !exact(raw.effect, ['areas', 'projects', 'tasks'])
@@ -136,7 +138,7 @@ const readPrepared = (value: unknown): NativePreparedAreaRename | null => {
         const name = request.name.trim();
         if (!name || request.manageColor === undefined && name === source.name) return null;
         const planned = areaRenameEffect(scope, request.areaId, request.name,
-            prepared.deviceIdBefore ?? prepared.deviceIdToInitialize!, prepared.updateAt, request.manageColor);
+            prepared.deviceIdBefore ?? prepared.deviceIdToInitialize!, prepared.updateAt, request.manageColor, prepared.version);
         if (!planned || !same(planned.result, prepared.result) || !same(planned.effect, prepared.effect)
             || prepared.result.id !== request.areaId
             || scope.projects.some((row) => row.areaId !== request.areaId && row.areaId !== prepared.result.areaId)
@@ -154,7 +156,8 @@ export function createAreaRenameMethods(deps: {
     save: () => Promise<NativeHostResult<null>>;
 }) {
     const saves = createAreaSaveGuard(deps.save);
-    return {
+    const otherLiveAreas = (areaId: string) => useTaskStore.getState()._allAreas.filter((row) => !row.deletedAt && row.id !== areaId);
+    const methods = {
         probeAreaRenameOutcome(input: NativeAreaRenameRequest): NativeHostResult<NativeAreaRenameResult> {
             const ready = deps.readiness();
             if (!ready.ok) return ready;
@@ -193,7 +196,7 @@ export function createAreaRenameMethods(deps: {
                 request.manageColor);
             if (!effect || !same(effect.result, planned.result))
                 return fail('STALE_REVISION', 'Area changed; refresh before renaming');
-            const prepared: NativePreparedAreaRename = { version: 1, request, scope, effect: effect.effect,
+            const prepared: NativePreparedAreaRename = { version: 2, request, scope, effect: effect.effect,
                 deviceIdBefore: state.settings.deviceId ?? null,
                 deviceIdToInitialize: device.updated ? device.deviceId : null,
                 updateAt, result: planned.result };
@@ -226,5 +229,53 @@ export function createAreaRenameMethods(deps: {
             const saved = await saves.finish(prepared, read.value.adapter, applied.outcome === 'replayed', read.value.authority.saveBoundary);
             return saved.ok ? { ok: true, value: prepared.result } : saved;
         },
+
+        checkAreaRename(input: { areaId: string; name: string }): NativeHostResult<{ nameTaken: boolean; saveDisabled: boolean }> {
+            const ready = deps.readiness();
+            if (!ready.ok) return ready;
+            if (!record(input) || !exact(input, ['areaId', 'name']) || typeof input.areaId !== 'string' || !input.areaId
+                || input.areaId.length > 500 || typeof input.name !== 'string' || input.name.length > 10_000)
+                return fail('INVALID_INPUT', 'An Area ID and the name as typed are required');
+            const nameTaken = isManageAreaNameTaken('newArea', input.name, otherLiveAreas(input.areaId));
+            return { ok: true, value: { nameTaken, saveDisabled: nameTaken || !input.name.trim() } };
+        },
+
+        async runAreaRename(input: { requestId: string; areaId: string; name: string }): Promise<NativeHostResult<
+            { outcome: 'saved' | 'unchanged' | 'taken' } & NativeAreaRenameResult>> {
+            const ready = deps.readiness();
+            if (!ready.ok) return ready;
+            if (!record(input) || !exact(input, ['requestId', 'areaId', 'name'])
+                || !readRequest({ ...input, expected: { id: input.areaId, name: '', color: null, order: 0, rev: null, revBy: null, updatedAt: new Date(0).toISOString() } }))
+                return fail('INVALID_INPUT', 'A bounded Area rename request is required');
+            if (!input.name.trim()) return fail('INVALID_INPUT', 'An Area name is required');
+            try {
+                if (useTaskStore.getState().persistenceFailure) await useTaskStore.getState().retryPersistence();
+            } catch (error) { return fail('SAVE_FAILED', error instanceof Error ? error.message : String(error)); }
+            let stale = 'Area changed; refresh before renaming';
+            for (let attempt = 0; attempt < 4; attempt += 1) {
+                const current = useTaskStore.getState()._allAreas.find((row) => row.id === input.areaId && !row.deletedAt);
+                if (!current) return fail('STALE_REVISION', 'The Area is no longer there');
+                const kept = { id: current.id, areaId: current.id, name: current.name };
+                if (isManageAreaNameTaken('newArea', input.name, otherLiveAreas(current.id))) return { ok: true, value: { outcome: 'taken', ...kept } };
+                const request = { ...input, expected: token(current) };
+                const planned = await methods.prepareAreaRename(request);
+                if (!planned.ok) {
+                    if (planned.error.code !== 'STALE_REVISION') return planned;
+                    stale = planned.error.message;
+                    continue;
+                }
+                if (planned.value.kind === 'noop') {
+                    const saved = await deps.save();
+                    return saved.ok ? { ok: true, value: { outcome: 'unchanged', ...planned.value.result } } : saved;
+                }
+                if (planned.value.prepared.result.areaId !== current.id) return { ok: true, value: { outcome: 'taken', ...kept } };
+                const committed = await methods.commitPreparedAreaRename({ request, prepared: planned.value.prepared });
+                if (committed.ok) return { ok: true, value: { outcome: 'saved', ...committed.value } };
+                if (committed.error.code !== 'STALE_REVISION') return committed;
+                stale = committed.error.message;
+            }
+            return fail('STALE_REVISION', stale);
+        },
     };
+    return methods;
 }

@@ -4,11 +4,12 @@ import { Platform } from 'react-native';
 
 import {
     buildShareCaptureDraft,
+    buildShareIntentFileCaptureParams,
     generateUUID,
     resolveEntityOpenTarget,
     useTaskStore,
-    validateAttachmentForUpload,
-    type Attachment,
+    type ShareIntentFileCaptureHost,
+    type SharedIntentFile,
     type Task,
 } from '@mindwtr/core';
 
@@ -42,21 +43,17 @@ type RouterLike = {
     replace: (...args: any[]) => void;
 };
 
-type SharedIntentFile = {
-    fileName?: string | null;
-    mimeType?: string | null;
-    path?: string | null;
-    size?: number | null;
-};
-
 type UseRootLayoutExternalCaptureParams = {
     canonicalDataReady: boolean;
-    /** The startup snapshot has painted; entity links may open from it (#1310). */
+
     dataReady: boolean;
     disabled?: boolean;
     hasShareIntent: boolean;
     incomingUrl: string | null;
     incomingUrlKey: number;
+
+
+    locked?: boolean;
     providerReady: boolean;
     resolveText: ResolveText;
     resetShareIntent: () => void;
@@ -94,115 +91,16 @@ const inferSharePayloadType = ({
     return 'unknown';
 };
 
-const SHARE_INTENT_MAX_FILES = 6;
 
-const stripFileExtension = (value: string): string => value.replace(/\.[A-Za-z0-9]{1,8}$/, '');
-
-type ShareIntentFileCaptureResult = {
-    params: Record<string, string> | null;
-    candidateCount: number;
-    attachedCount: number;
+const shareFileCaptureHost: ShareIntentFileCaptureHost = {
+    newId: generateUUID,
+    persistAttachmentLocallyDetailed,
+    deleteFile: (uri) => FileSystem.deleteAsync(uri, { idempotent: true }),
+    logWarn,
+    logError,
 };
 
-// Shared files (PDFs, images, audio, ...) become copied attachments on the
-// capture draft, mirroring the in-app attach flow: the share-extension file
-// lives in a temporary container, so the bytes must be re-homed into the
-// managed attachments dir before the capture sheet ever sees them.
-async function buildShareIntentFileCaptureParams({
-    files,
-    shareSubject,
-    shareText,
-}: {
-    files?: SharedIntentFile[] | null;
-    shareSubject?: string | null;
-    shareText?: string | null;
-}): Promise<ShareIntentFileCaptureResult> {
-    const candidates = (files ?? [])
-        .filter((file): file is SharedIntentFile & { path: string } => (
-            typeof file?.path === 'string' && file.path.trim().length > 0
-        ))
-        .slice(0, SHARE_INTENT_MAX_FILES);
-    if (candidates.length === 0) return { params: null, candidateCount: 0, attachedCount: 0 };
 
-    const attachments: Attachment[] = [];
-    for (const file of candidates) {
-        const now = new Date().toISOString();
-        const sourceUri = file.path.startsWith('/') ? `file://${file.path}` : file.path;
-        const attachment: Attachment = {
-            id: generateUUID(),
-            kind: 'file',
-            title: trimSharedValue(file.fileName) || 'Shared file',
-            uri: sourceUri,
-            mimeType: trimSharedValue(file.mimeType) || undefined,
-            size: typeof file.size === 'number' && Number.isFinite(file.size) ? file.size : undefined,
-            createdAt: now,
-            updatedAt: now,
-            localStatus: 'available',
-        };
-        try {
-            // Some providers omit the size; 0 still runs the mime blocklist,
-            // and the post-copy check below enforces the size cap.
-            const validation = await validateAttachmentForUpload(attachment, attachment.size ?? 0);
-            if (!validation.valid) {
-                void logWarn('Skipped shared file failing attachment validation', {
-                    scope: 'share-intent',
-                    extra: { error: validation.error ?? 'unknown', size: String(attachment.size ?? 'unknown') },
-                });
-                continue;
-            }
-            const persisted = await persistAttachmentLocallyDetailed(attachment);
-            if (persisted.status !== 'copied' && persisted.status !== 'already-local') {
-                // A share-container path goes stale as soon as the intent is
-                // consumed, so a failed copy means the file is lost to us.
-                void logWarn('Failed to copy shared file into attachments', {
-                    scope: 'share-intent',
-                    extra: { status: persisted.status },
-                });
-                continue;
-            }
-            const cached = persisted.attachment;
-            if (typeof attachment.size !== 'number' && typeof cached.size === 'number') {
-                // The copy revealed the real size of a sizeless share; drop the
-                // bytes again if they exceed the attachment cap.
-                const sizeValidation = await validateAttachmentForUpload(cached, cached.size);
-                if (!sizeValidation.valid) {
-                    void FileSystem.deleteAsync(cached.uri, { idempotent: true }).catch(() => undefined);
-                    void logWarn('Skipped shared file failing attachment validation', {
-                        scope: 'share-intent',
-                        extra: { error: sizeValidation.error ?? 'unknown', size: String(cached.size) },
-                    });
-                    continue;
-                }
-            }
-            attachments.push(cached);
-        } catch (error) {
-            void logError(error, { scope: 'share-intent', extra: { step: 'copy-shared-file' } });
-        }
-    }
-    if (attachments.length === 0) {
-        return { params: null, candidateCount: candidates.length, attachedCount: 0 };
-    }
-
-    const subject = trimSharedValue(shareSubject);
-    const text = trimSharedValue(shareText);
-    const title = subject || text || stripFileExtension(attachments[0].title);
-    const props: Partial<Task> = { attachments };
-    // Only a real email subject earns a description; plain file shares keep
-    // their long-standing shape (title only, no body).
-    if (subject && text) {
-        props.description = text;
-    }
-    return {
-        params: {
-            initialValue: encodeURIComponent(title),
-            initialProps: encodeURIComponent(JSON.stringify(props satisfies Partial<Task>)),
-        },
-        candidateCount: candidates.length,
-        attachedCount: attachments.length,
-    };
-}
-
-// The capture a text or link share opens is core's (buildShareCaptureDraft), shared with the native Android app.
 function buildShareIntentCaptureParams(share: {
     shareSubject?: string | null;
     shareText?: string | null;
@@ -221,8 +119,7 @@ function buildShareIntentCaptureParams(share: {
     return params;
 }
 
-// Deep links are untrusted input (#1017): core's resolveEntityOpenTarget opens an entity only while its id still
-// exists in the store, and falls back to the default view otherwise.
+
 function resolveEntityOpenPath(kind: EntityOpenKind, id: string): { pathname: string; params?: Record<string, string> } | null {
     const state = useTaskStore.getState();
     const target = resolveEntityOpenTarget(kind, id, state);
@@ -241,6 +138,7 @@ export function useRootLayoutExternalCapture({
     hasShareIntent,
     incomingUrl,
     incomingUrlKey,
+    locked = false,
     providerReady,
     resolveText,
     resetShareIntent,
@@ -252,12 +150,12 @@ export function useRootLayoutExternalCapture({
     shareWebUrl,
     showToast,
 }: UseRootLayoutExternalCaptureParams) {
-    // Keyed per delivery, not per URL string: an Action Button shortcut sends
-    // the same capture link every time, and each press must open the sheet.
+
+
     const lastHandledKey = useRef<number>(0);
-    // The async file-copy branch outlives a render; a dep-identity change
-    // mid-copy (language load swaps resolveText, for instance) must not start
-    // a second copy of the same share.
+    const lastHeldKey = useRef<number>(0);
+
+
     const shareHandlingRef = useRef(false);
     const lastProviderReadyRef = useRef<boolean | null>(null);
     const lastObservedShareUrlKeyRef = useRef<number | null>(null);
@@ -327,12 +225,7 @@ export function useRootLayoutExternalCapture({
         }
     }, [canonicalDataReady, disabled, hasShareIntent, providerReady, shareFiles, shareText, shareWebUrl]);
 
-    // Arms the AppSearch index (#1017) once per app start if the device-local
-    // preference is on. This hook already owns every other OS-level entry
-    // point (share intents, deep links) and runs unconditionally on mount, so
-    // it is the natural place to also arm the search-index subscription —
-    // there is no dedicated root-layout-startup file in this task's scope.
-    // No-op (and no AsyncStorage read) when unsupported or off.
+
     useEffect(() => {
         if (disabled) return;
         void syncAppSearchIndexingWithPreference();
@@ -367,10 +260,7 @@ export function useRootLayoutExternalCapture({
         }
     }, [router]);
 
-    // The native module reports failures (unreadable URI, resolver errors) on a
-    // separate error channel that used to vanish silently: the app just opened
-    // with no sheet and no clue (#1117). Surface it so a broken share is at
-    // least visible and diagnosable from the log.
+
     const lastShareErrorRef = useRef<string | null>(null);
     const lastShareDiagnosticErrorRef = useRef<{ error: string; shareUrlKey: number | null } | null>(null);
     useEffect(() => {
@@ -406,13 +296,10 @@ export function useRootLayoutExternalCapture({
     }, [canonicalDataReady, disabled, incomingUrl, incomingUrlKey, providerReady, resolveText, shareError, showToast]);
 
     useEffect(() => {
-        if (disabled) return;
+        if (disabled || locked) return;
         if (!hasShareIntent) return;
-        // Cold start: navigating before the root navigator and store are up
-        // swallows the replace and the share dies silently (#1117). The provider
-        // holds the intent, so waiting for canonical data just re-runs this effect —
-        // the same gate the deep-link effect below uses. The startup snapshot is
-        // not enough: the capture sheet and entity links read its tasks and projects.
+
+
         if (!canonicalDataReady) return;
         if (shareHandlingRef.current) return;
         shareHandlingRef.current = true;
@@ -447,8 +334,8 @@ export function useRootLayoutExternalCapture({
         };
         const hasSharedFiles = (shareFiles ?? []).some((file) => typeof file?.path === 'string' && file.path.trim().length > 0);
         if (!hasSharedFiles) {
-            // Text/URL shares stay synchronous; only file shares need the
-            // async copy into the managed attachments dir.
+
+
             finish(buildShareIntentCaptureParams({ shareSubject, shareText, shareWebUrl }));
             logIosShareDiagnostic({ stage: 'reset-requested' });
             resetShareIntent();
@@ -456,7 +343,7 @@ export function useRootLayoutExternalCapture({
             shareHandlingRef.current = false;
             return;
         }
-        void buildShareIntentFileCaptureParams({ files: shareFiles, shareSubject, shareText })
+        void buildShareIntentFileCaptureParams({ files: shareFiles, shareSubject, shareText }, shareFileCaptureHost)
             .then((result) => {
                 const skippedCount = result.candidateCount - result.attachedCount;
                 logIosShareDiagnostic({
@@ -484,8 +371,8 @@ export function useRootLayoutExternalCapture({
                     });
                     logIosShareDiagnostic({ stage: 'navigation-returned', type: payloadType });
                 } else if (skippedCount === 0) {
-                    // Nothing readable at all; when files were skipped the
-                    // toast above already explains why nothing arrived.
+
+
                     finish(null);
                 }
             })
@@ -495,17 +382,26 @@ export function useRootLayoutExternalCapture({
                 logIosShareDiagnostic({ stage: 'reset-returned' });
                 shareHandlingRef.current = false;
             });
-    }, [canonicalDataReady, disabled, hasShareIntent, resolveText, resetShareIntent, router, shareFiles, shareSubject, shareText, shareWebUrl, showToast]);
+    }, [canonicalDataReady, disabled, hasShareIntent, locked, resolveText, resetShareIntent, router, shareFiles, shareSubject, shareText, shareWebUrl, showToast]);
 
     useEffect(() => {
         if (!dataReady || disabled) return;
         if (!incomingUrl) return;
         if (lastHandledKey.current === incomingUrlKey) return;
+        if (locked) {
 
-        // An entity link only navigates, so it opens from the startup snapshot when
-        // the entity is already there, as a tap on a snapshot row does; waiting for
-        // canonical data made a cold widget tap sit on the Inbox (#1310). A link to
-        // an entity the snapshot lacks waits for canonical data before falling back.
+            if (lastHeldKey.current !== incomingUrlKey) {
+                lastHeldKey.current = incomingUrlKey;
+                void logInfo('Incoming link held until unlock', {
+                    scope: 'routing',
+                    extra: { releaseCheck: 'v1.3.8/app-lock-link-hold', kind: parseEntityOpenUrl(incomingUrl)?.kind ?? 'link' },
+                    force: true,
+                }).catch(() => undefined);
+            }
+            return;
+        }
+
+
         const entityPayload = parseEntityOpenUrl(incomingUrl);
         if (entityPayload) {
             const target = resolveEntityOpenPath(entityPayload.kind, entityPayload.id);
@@ -518,6 +414,18 @@ export function useRootLayoutExternalCapture({
                 });
             }
             router.replace(target ?? '/inbox');
+            if (entityPayload.kind === 'task') {
+                if (!target) {
+                    showToast({
+                        message: resolveText('task.linkNotFound', 'This task is not in this library. It may have been deleted or not synced to this device.'),
+                        tone: 'error',
+                    });
+                }
+                void logInfo('Task link route requested', {
+                    scope: 'routing',
+                    extra: { releaseCheck: 'v1.3.5/task-link-open', outcome: target ? 'opened' : 'missing' },
+                }).catch(() => undefined);
+            }
             return;
         }
         if (!canonicalDataReady) return;
@@ -565,11 +473,11 @@ export function useRootLayoutExternalCapture({
             });
         } catch {
             lastHandledKey.current = 0;
-            // Router errors can echo the private capture parameters too.
+
             void logWarn('Shortcut capture confirmation failed', {
                 scope: 'shortcuts',
                 extra: { releaseCheck: 'v1.3.1/shortcut-failure-privacy', stage: 'navigation' },
             });
         }
-    }, [canonicalDataReady, dataReady, disabled, incomingUrl, incomingUrlKey, resolveText, openCaptureConfirmation, router, showToast]);
+    }, [canonicalDataReady, dataReady, disabled, incomingUrl, incomingUrlKey, locked, resolveText, openCaptureConfirmation, router, showToast]);
 }

@@ -102,7 +102,8 @@ export const summarizeMergeStats = (stats?: MergeStats | null): MergeStatsSummar
     for (const entity of MERGE_STAT_ENTITIES) {
         const entityStats = stats[entity] ?? emptyEntityStats;
         summary.conflicts += entityStats.conflicts || 0;
-        summary.conflictIds.push(...(entityStats.conflictIds || []));
+
+        for (const id of entityStats.conflictIds || []) summary.conflictIds.push(id);
         summary.maxClockSkewMs = Math.max(summary.maxClockSkewMs, entityStats.maxClockSkewMs || 0);
         summary.timestampAdjustments += entityStats.timestampAdjustments || 0;
         summary.deleteVsLiveConflicts += entityStats.conflictReasonCounts?.deleteState ?? 0;

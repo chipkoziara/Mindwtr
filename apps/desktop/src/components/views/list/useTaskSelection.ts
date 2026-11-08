@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+    batchUpdateTasksFromLatest,
+    buildBulkOrganizeTaskUpdate,
     buildBulkOrganizeTaskUpdates,
     buildBulkTaskTokenUpdates,
     buildTaskMovePatch,
@@ -99,9 +101,8 @@ export function useTaskSelection(
     const activeActionRef = useRef<TaskSelectionAction | null>(null);
 
     const visibleIdSet = useMemo(() => new Set(visibleIds), [visibleIds]);
-    // Derive action inputs from the current selectable collection immediately.
-    // The effect below also prunes state, but it runs after render; intersecting
-    // here closes the window where a newly read-only row could reach a bulk write.
+
+
     const selectedIdsArray = useMemo(
         () => Array.from(multiSelectedIds).filter((id) => visibleIdSet.has(id)),
         [multiSelectedIds, visibleIdSet],
@@ -301,9 +302,13 @@ export function useTaskSelection(
         }
         const updates = buildBulkOrganizeTaskUpdates(selectedIdsArray, tasksById, input);
         if (updates.length === 0) return Promise.resolve(false);
+
         return runSelectedTaskAction(
             'organize',
-            () => batchUpdateTasks(updates),
+            (taskIds) => batchUpdateTasksFromLatest(taskIds, (task) => {
+                const latest = buildBulkOrganizeTaskUpdate(task, input);
+                return Object.keys(latest).length > 0 ? latest : null;
+            }),
             options,
         );
     }, [batchUpdateTasks, runSelectedTaskAction, selectedIdsArray, tasksById]);
@@ -326,8 +331,16 @@ export function useTaskSelection(
             options?.afterNoop?.();
             return Promise.resolve(false);
         }
-        return updateSelectedTasks(updates, options);
-    }, [selectedIdsArray, tasksById, updateSelectedTasks]);
+        if (!batchUpdateTasks) return Promise.resolve(false);
+
+        return runSelectedTaskAction(
+            'update',
+            (taskIds) => batchUpdateTasksFromLatest(taskIds, (task) => (
+                buildBulkTaskTokenUpdates([task.id], new Map([[task.id, task]]), field, value, action)[0]?.updates ?? null
+            )),
+            options,
+        );
+    }, [batchUpdateTasks, runSelectedTaskAction, selectedIdsArray, tasksById]);
 
     return {
         activeAction,

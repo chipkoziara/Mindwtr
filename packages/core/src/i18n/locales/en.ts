@@ -1,5 +1,69 @@
-// Split from i18n-translations.ts to make community translation contributions easier.
+
 export const en: Record<string, string> = {
+    "taskEdit.startAdvanceReminderLabel": "Before start",
+    "taskEdit.advanceReminderLabel": "Advance reminder",
+    "taskEdit.advanceReminderMinutes": "{count} min before",
+    "taskEdit.advanceReminderHour": "1 hour before",
+    "taskEdit.advanceReminderDay": "1 day before",
+    "taskEdit.advanceReminderTwoDays": "2 days before",
+    "taskEdit.advanceReminderWeek": "1 week before",
+    "taskEdit.advanceReminderNeedsDueTime": "Add a due date and time to set an advance reminder.",
+    "taskEdit.advanceReminderSkipped": "Enable start/due reminders for this task to use an advance reminder.",
+    "settings.speechUseGemini": "Use Gemini",
+    "settings.speechNativeUnsupported": "This speech provider is not supported here yet. Select Gemini, OpenAI or Whisper to use voice capture.",
+    "settings.speechGeminiDisclosure": "Recordings are sent directly to Gemini for transcription. Mindwtr does not collect them.",
+    "settings.speechGeminiCredentialShared": "This Gemini API key is also used by Gemini text AI on this device.",
+    "settings.speechOpenAIDisclosure": "Recordings are sent directly to OpenAI or your configured transcription server. In smart mode, the transcript is also sent to OpenAI when an API key is available. Mindwtr does not collect this data.",
+    "settings.speechOpenAICredentialShared": "This API key is also used by OpenAI text AI on this device and sent to the configured transcription server.",
+    "quickAdd.audioStopAndSave": "Stop & save",
+    "quickAdd.audioTooLarge": "Recording is too large. Try a shorter recording.",
+    "quickAdd.audioNoSpeech": "No speech was found in the recording.",
+    "quickAdd.audioNotRetained": "Audio retention is off. Transcription will not resume after restarting the app.",
+    "quickAdd.audioSingleTaskOnly": "A recording can be saved to one task. Remove extra task lines.",
+    "settings.aiConfigureTextAssistant": "Configure text assistant",
+    "settings.aiRefreshModels": "Refresh models",
+    "settings.aiCredentialPresent": "API key available",
+    "settings.aiCredentialMissing": "No API key saved",
+    "settings.aiConsentRecordFailed": "Your agreement was accepted, but could not be saved on this device. You may be asked again.",
+    "settings.aiConfigurationSaved": "AI settings saved",
+    "settings.aiCredentialSaved": "API key saved",
+    "settings.aiCredentialCleared": "API key cleared",
+    "settings.gmailCapture": "Gmail",
+    "settings.gmailCaptureDesc": "Connect Google and capture emails from a label you choose.",
+    "settings.gmailCaptureDisclosure": "Google grants read-only access to your whole mailbox, even though Mindwtr imports only emails with your selected label. Mindwtr never changes email or labels. Imported sender and email text become ordinary task data and may enter your configured sync, backups, exports, or optional AI features. Only use a designated test account.",
+    "settings.gmailCaptureUnavailable": "Gmail capture is unavailable in this build.",
+    "settings.gmailCaptureConnect": "Connect Gmail",
+    "settings.gmailCaptureConnecting": "Waiting for Google…",
+    "settings.gmailCaptureCancel": "Cancel connection",
+    "settings.gmailCaptureReconnect": "Reconnect Gmail",
+    "settings.gmailCaptureDisconnect": "Disconnect Gmail",
+    "settings.gmailCaptureDisconnected": "Gmail disconnected. Existing tasks were kept.",
+    "settings.gmailCaptureRevokeManually": "Local credentials were removed. Google could not confirm revocation; remove Mindwtr access in your Google Account permissions.",
+    "settings.gmailCaptureAccount": "Connected account",
+    "settings.gmailCaptureLabel": "Gmail label",
+    "settings.gmailCaptureChooseLabel": "Choose a label",
+    "settings.gmailCaptureLabelHint": "Create a label in Gmail first if needed. Selecting a label does not start import; confirm with Start capture.",
+    "settings.gmailCaptureSave": "Start capture / save label",
+    "settings.gmailCaptureSaving": "Saving…",
+    "settings.gmailCaptureActive": "Capturing emails from the saved label.",
+    "settings.gmailCapturePaused": "Capture is paused until you confirm a label.",
+    "settings.gmailCaptureCheckNow": "Check now",
+    "settings.gmailCaptureChecking": "Checking…",
+    "settings.gmailCaptureLastChecked": "Last checked",
+    "settings.gmailCaptureNeverChecked": "Not checked yet",
+    "settings.gmailCaptureImportedCount": "Imported {{count}} emails",
+    "settings.gmailCaptureFailed": "Gmail capture failed. Try again.",
+    "settings.gmailCaptureAuthFailed": "Reconnect Gmail to restore access.",
+    "settings.gmailCaptureNetworkFailed": "Gmail is temporarily unreachable. Capture will retry later.",
+    "settings.gmailCaptureConfigFailed": "Check your Gmail label and connection.",
+    "settings.gmailCaptureStorageFailed": "Gmail capture could not save securely. Check secure storage and available disk space.",
+    "settings.gmailCaptureReceiptsReset": "Gmail capture's record of saved emails was damaged, so it was reset and capture is off. Choose a label and start capture again.",
+    "settings.gmailCaptureCancelled": "Gmail connection cancelled.",
+
+    "task.addToChecklist": "Add to checklist…",
+
+    "task.addedToChecklist": "Added to checklist",
+
     "task.expandChecklist": "Turn checklist items into project tasks",
     "task.keepChecklistDescription": "Keep the original task and its checklist inside the project.",
     "task.expandChecklistDescription": "Create one task per checklist item, keeping their order and checked state. Move notes, attachments and dates to the new project; keep tags and contexts on the new tasks. The original goes to Trash. Focus is not copied. You can undo this conversion.",
@@ -24,16 +88,24 @@ export const en: Record<string, string> = {
     "settings.mcpPrivacy": "The connection stays on this computer. Your AI client may send task data to a remote service; this does not make the AI entirely local.",
     "settings.mcpRunning": "Running",
     "settings.mcpStopped": "Stopped",
-    "settings.mcpAllowWrite": "Allow changes",
-    "settings.mcpAllowWriteDesc": "Allow connected AI clients to add, edit, complete, and delete tasks, and to add, edit, or delete projects. Off means read-only access.",
+    "settings.mcpAllowWrite": "Allow task and project edits",
+    "settings.mcpAllowWriteDesc": "Allow connected AI clients to add, edit, complete, and restore tasks, and to add or edit projects. Archiving and deletion have separate permissions in Advanced.",
+    "settings.mcpAllowArchive": "Allow archiving",
+    "settings.mcpAllowArchiveDesc": "Allow connected AI clients to archive tasks and projects without deleting them.",
+    "settings.mcpAllowDelete": "Allow deletion",
+    "settings.mcpAllowDeleteDesc": "Allow connected AI clients to delete tasks and projects.",
+    "settings.mcpPort": "MCP port",
+    "settings.mcpPortDesc": "Choose a port from 1024 to 65535. Saving restarts the server and requires updating your AI client connection.",
     "settings.mcpCopyHint": "Connection details include a private access token. Share them only with an AI client you trust.",
     "settings.mcpCopy": "Copy connection details",
+    "settings.mcpCopyCodex": "Copy for Codex",
     "settings.mcpRotate": "Regenerate access token",
     "settings.mcpRotateHint": "Regenerating revokes all old connections. Update your AI client with the new connection details.",
     "settings.mcpCopied": "Connection details copied.",
     "settings.mcpCopyFailed": "Could not copy connection details.",
     "settings.mcpTokenRotated": "Access token regenerated. Old connections are revoked.",
-    "settings.mcpError.port_in_use": "Port 8722 is in use. Close the other listener and retry.",
+    "settings.mcpError.port_in_use": "The selected port is in use. Choose another port in Advanced, or close the other listener and retry.",
+    "settings.mcpError.invalid_port": "Enter a whole-number port from 1024 to 65535.",
     "settings.mcpError.start_failed": "The MCP server could not start. Try again.",
     "settings.mcpError.exited": "The MCP server stopped unexpectedly. Try again.",
     "settings.mcpError.config_failed": "Could not load or save the MCP configuration. Try again.",
@@ -89,6 +161,28 @@ export const en: Record<string, string> = {
     'sandbox.confirmTitle': "Enter sandbox?",
     'sandbox.confirmDescription': "Use fictional tasks and projects to record a bug or give a demo. Your personal data stays separate. Sandbox changes are discarded when you exit.",
     'sandbox.enter': "Enter sandbox",
+    'workspaces.title': "Workspaces",
+    'workspaces.description': "Keep separate tasks, attachments, sync servers and settings on this computer. One workspace is open at a time, and only the open one syncs and sends reminders.",
+    'workspaces.defaultName': "Default",
+    'workspaces.open': "Open",
+    'workspaces.add': "Add workspace",
+    'workspaces.namePlaceholder': "Workspace name",
+    'workspaces.switch': "Switch",
+    'workspaces.switchTitle': "Switch workspace?",
+    'workspaces.switchDesc': "Mindwtr restarts to open {{name}}.",
+    'workspaces.switchNow': "Switch now",
+    'workspaces.createdTitle': "Workspace added",
+    'workspaces.later': "Later",
+    'workspaces.saveFailed': "Your changes could not be saved, so the workspace was not switched. Try again.",
+    'workspaces.failed': "The workspace could not be changed.",
+    'workspaces.deleteTitle': "Delete {{name}}?",
+    'workspaces.deleteDesc': "This removes the workspace's local tasks, attachments and settings from this computer. Nothing changes on its sync server.",
+    'workspaces.dataFolder': "Data folder",
+    'workspaces.cliHint': "The MCP server and command line open the default workspace. For another workspace, pass its mindwtr.db file with --db.",
+    'workspaces.unavailable': "Workspaces are unavailable until Mindwtr finishes moving its profile folder. Restart Mindwtr and try again.",
+    'workspaces.unreadable': "The workspace list could not be read, so the default workspace opened. Check workspaces.toml in the Mindwtr config folder.",
+    'workspaces.iCloudDefaultOnly': "iCloud sync is available only in the default workspace.",
+    'workspaces.switcherLabel': "Workspace",
     'sandbox.title': "Sandbox · Sample data",
     'sandbox.exit': "Exit sandbox",
     'sandbox.reset': "Reset sample data",
@@ -109,7 +203,7 @@ export const en: Record<string, string> = {
         'settings.automationCaptureCopyFailed': "Couldn't copy the capture token.",
         'settings.automationCaptureLoadFailed': "Couldn't load automation capture settings.",
         'settings.automationCaptureUpdateFailed': "Couldn't update automation capture settings.",
-        // App
+
         'app.name': 'Mindwtr',
         'app.closeStillSavingTitle': 'Mindwtr is still saving',
         'app.closeStillSavingBody': 'Mindwtr has not finished saving your recent changes. Close anyway? Unsaved changes will be lost.',
@@ -117,6 +211,12 @@ export const en: Record<string, string> = {
         'donationPrompt.body': "Mindwtr has no ads, tracking, or paywalls. It is built by one person and supported by people who find it useful. If it helps you stay clear, a small donation helps keep it improving.",
         'donationPrompt.dismiss': "Maybe later",
         'donationPrompt.action': "Support Mindwtr",
+        'updateReminder.title': "Update available",
+        'updateReminder.body': "Mindwtr {{latestVersion}} is available. You are using {{currentVersion}}. Update when you have a minute to keep fixes and improvements current.",
+        'updateReminder.updateNow': "Update now",
+        'updateReminder.viewRelease': "View release",
+        'common.notNow': "Not now",
+        'announcement.dismiss': "Dismiss announcement",
         'settings.donateLinkValue': "Donate",
         'settings.documentationLinkValue': "Docs",
         'markdown.copyCode': 'Copy code',
@@ -124,7 +224,7 @@ export const en: Record<string, string> = {
         'markdown.openLinkFailed': "Could not open this link. Make sure the app that handles it is installed. You can copy the link and open it there.",
         'markdown.copyLinkFailed': "Could not copy this link.",
 
-        // Navigation
+
         'nav.main': 'Main',
         'nav.inbox': 'Inbox',
         'nav.board': 'Board View',
@@ -143,6 +243,11 @@ export const en: Record<string, string> = {
         'timeline.dateEditFailed': "Could not update dates. Check the date range and try again.",
         'timeline.dateUndoConflict': "Dates changed since this edit. Undo was skipped.",
         'timeline.dateUndoFailed': "Could not undo date changes. Try again.",
+        "timeline.reorderTask": "Reorder task",
+        "timeline.reorderProject": "Reorder project",
+        "timeline.reorderConflict": "Order changed elsewhere. Try again.",
+        "timeline.reorderFailed": "Could not save the new order. Try again.",
+        "timeline.reorderInstructions": "Press Space to pick up a row, Up or Down to move within its group, Space to drop, or Escape to cancel.",
         'nav.projects': 'Projects',
         'nav.contexts': 'Contexts',
         'nav.next': 'Next Actions',
@@ -162,12 +267,12 @@ export const en: Record<string, string> = {
         'nav.sectionOrganize': 'Organize',
         'nav.sectionArchive': 'Archive',
 
-        // Accessibility
+
         'accessibility.skipToContent': 'Skip to content',
         'accessibility.mainContent': 'Main content',
 
-        // Quick Add
-        'quickAdd.help': 'Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %"Full Name"). Due dates stay date-only unless you include a time.',
+
+        'quickAdd.help': 'Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %"Full Name"). Due dates stay date-only unless you include a time.',
         'quickAdd.example': 'e.g. Call mom /due:tomorrow @phone',
         'quickAdd.pastedImageTitle': 'Screenshot',
         'quickAdd.pastedImageSaving': 'Attaching image...',
@@ -176,6 +281,7 @@ export const en: Record<string, string> = {
         'quickAdd.pastedImagesAttached': '{{count}} images attached',
         'quickAdd.inlineHint': 'Try: Call mom /due:tomorrow 5pm @phone #family',
         'quickAdd.syntaxHelp': 'Quick Add syntax help',
+        'quickAdd.pasteImagesHint': 'Paste images or screenshots with {{shortcut}} to attach them.',
         'quickAdd.placeholder': 'Add a task… use @context +Project #tag',
         'quickAdd.addAnother': 'Add another',
         'quickAdd.inputLabel': 'Task title',
@@ -186,6 +292,7 @@ export const en: Record<string, string> = {
         'quickAdd.audioRecording': 'Recording...',
         'quickAdd.audioReady': 'Recording ready to save.',
         'quickAdd.audioQueued': 'Saved. Audio will be transcribed when you open Mindwtr.',
+        'quickAdd.textQueued': 'Saved. Your task will be added when Mindwtr opens.',
         'quickAdd.audioProcessing': 'Processing audio capture...',
         'quickAdd.audioSavingSpeechToText': 'Saving the recording and applying speech-to-text.',
         'quickAdd.audioNoteTitle': 'Audio Note',
@@ -204,10 +311,10 @@ export const en: Record<string, string> = {
         'quickAdd.bulkCreateError': 'Could not create all tasks.',
         'quickAdd.saveAndEdit': 'Save & edit',
 
-        // Checklist
+
         'checklist.progress': 'Checklist progress',
 
-        // Keybindings (Desktop)
+
         'keybindings.helpTitle': 'Keyboard Shortcuts',
         'keybindings.helpSubtitle': 'Press Esc to close',
         'keybindings.styleLabel': 'Keybinding Style',
@@ -262,7 +369,7 @@ export const en: Record<string, string> = {
         'keybindings.list.toggleDetails': 'Toggle list details',
         'keybindings.list.toggleDensity': 'Toggle density',
 
-        // Tabs (Mobile)
+
         'tab.inbox': 'Inbox',
         'tab.next': 'Focus',
         'tab.board': 'Board',
@@ -271,7 +378,7 @@ export const en: Record<string, string> = {
         'tab.calendar': 'Calendar',
         'tab.review': 'Review',
 
-        // List Views
+
         'list.inbox': 'Inbox',
         'list.todo': 'Todo',
         'list.inProgress': 'In Progress',
@@ -289,6 +396,9 @@ export const en: Record<string, string> = {
         'list.taskDeleted': 'Task deleted',
         'list.taskCopied': 'Task copied to clipboard',
         'task.copyTitle': 'Copy Title',
+        "task.copyTaskLink": "Copy Mindwtr link",
+        "task.copyTaskId": "Copy task ID",
+        "task.linkNotFound": "This task is not in this library. It may have been deleted or not synced to this device.",
         'task.titleCopied': 'Title copied',
         'task.titlesCopied': 'Titles copied',
         'list.taskCopyFailed': 'Could not copy task',
@@ -323,7 +433,7 @@ export const en: Record<string, string> = {
         'reference.empty': 'Nothing filed yet',
         'reference.emptyHint': 'Reference holds info you might want later — no action required.',
 
-        // Status Labels
+
         'status.inbox': 'Inbox',
         'status.todo': 'Todo',
         'status.next': 'Next',
@@ -335,7 +445,7 @@ export const en: Record<string, string> = {
         'status.archived': 'Archived',
         'status.active': 'Active',
 
-        // Priority Labels
+
         'priority.low': 'Low',
         'priority.medium': 'Medium',
         'priority.high': 'High',
@@ -344,11 +454,16 @@ export const en: Record<string, string> = {
         'energyLevel.medium': 'Medium energy',
         'energyLevel.high': 'High energy',
 
-        // Task Edit
+
         'taskEdit.editTask': 'Edit Task',
         'taskEdit.aiAssistant': 'AI assistant',
         'task.dateIssue.startAfterDue': 'Starts after due date',
         'taskEdit.checklist': 'Checklist',
+        'taskEdit.dragChecklistItem': "Drag to reorder",
+        'taskEdit.checklistItemActions': "Checklist item actions",
+        'taskEdit.moveChecklistTop': "Move to top",
+        'taskEdit.moveChecklistBottom': "Move to bottom",
+        'taskEdit.addChecklistBelow': "Add item below",
         'taskEdit.tab.task': 'Task',
         'taskEdit.tab.list': 'List',
         'taskEdit.tab.view': 'View',
@@ -359,6 +474,8 @@ export const en: Record<string, string> = {
         'taskEdit.shoppingListPrompt': 'Shopping list?',
         'taskEdit.openChecklistMode': 'Open Checklist Mode',
         'taskEdit.addItem': 'Add Item',
+        'taskEdit.resetChecklistOnRepeat': "Reset checklist for the next occurrence",
+        'taskEdit.resetChecklistOnRepeatHint': "Turn off to keep checked items checked when this task repeats.",
         'taskEdit.resetChecklist': 'Reset checklist',
         'task.convertToReference': 'Convert to Reference',
         'task.convertToSection': 'Convert to Section',
@@ -446,6 +563,9 @@ export const en: Record<string, string> = {
         'markdown.toolbar.italic': 'Italic',
         'markdown.toolbar.strikethrough': 'Strikethrough',
         'markdown.toolbar.bulletList': 'Bullet list',
+        'markdown.toolbar.quote': 'Quote',
+        'markdown.toolbar.orderedList': 'Numbered list',
+        'markdown.toolbar.taskList': 'Task list',
         'markdown.toolbar.horizontalRule': 'Horizontal rule',
         'markdown.toolbar.link': 'Insert link',
         'markdown.toolbar.code': 'Inline code',
@@ -469,6 +589,13 @@ export const en: Record<string, string> = {
         'attachments.attachObsidianNote': 'Attach Obsidian note',
         'attachments.obsidianLinkPlaceholder': 'obsidian://open?vault=Vault&file=Note',
         'attachments.obsidianLinkInputHint': 'Paste an obsidian:// note link, or use "Title | obsidian://...".',
+        "attachments.webUploadRequiresCloud": "Browser uploads require self-hosted Cloud sync.",
+        "attachments.webUploadEncrypted": "Browser uploads require sync encryption to be off.",
+        "attachments.webUploadOffline": "Files cannot be uploaded while offline.",
+        "attachments.webUploadChanged": "The draft or sync configuration changed. Reselect the file.",
+        "attachments.webUploadFailed": "The attachment was not saved.",
+        "attachments.webUploadRetry": "Retry Save or remove the file to continue.",
+        "attachments.webProjectUploadUnsupported": "Browser project uploads are unavailable. Add the file to a task instead.",
         'attachments.fileNotSupported': 'File attachments are only supported in the desktop app.',
         'attachments.webUnavailable': 'This attachment is not available in the web app.',
         'attachments.fileTooLarge': 'File is too large to upload.',
@@ -562,13 +689,13 @@ export const en: Record<string, string> = {
         'task.aria.dueTime': 'Due time',
         'task.aria.location': 'Location',
 
-        // Compact unit labels (time-estimate chips, calendar duration labels)
+
         'units.minutesShort': '{{minutes}}m',
         'units.hoursShort': '{{hours}}h',
         'units.hoursMinutesShort': '{{hours}}h {{minutes}}m',
         'units.hoursPlusShort': '{{hours}}h+',
 
-        // Recurrence Labels
+
         'recurrence.none': 'None',
         'recurrence.daily': 'Daily',
         'recurrence.weekly': 'Weekly',
@@ -583,7 +710,7 @@ export const en: Record<string, string> = {
         'recurrence.endsOnDate': 'On date',
         'recurrence.endsAfterCount': 'After',
         'recurrence.occurrenceUnit': 'occurrence(s)',
-        // Separator for the "After 6 of 10 occurrence(s)" progress form.
+
         'recurrence.occurrenceProgressOf': 'of',
         'recurrence.dayUnit': 'day(s)',
         'recurrence.weekUnit': 'week(s)',
@@ -616,7 +743,7 @@ export const en: Record<string, string> = {
         'recurrence.showFutureInCalendarHint': 'Planning-only preview; the next task is still created when this one is completed.',
         'recurrence.nextCalendarPreview': 'Next calendar preview',
 
-        // Inbox (Mobile)
+
         'inbox.title': 'Inbox',
         'inbox.processButton': 'Process Inbox',
         'inbox.projectHint': 'Something that takes more than one action? While processing, choose “Yes, make it a project” to name the outcome and its first next action.',
@@ -667,7 +794,7 @@ export const en: Record<string, string> = {
         'inbox.movedToTrash': '{{title}} moved to Trash',
         'inbox.fileIt': 'File it',
 
-        // Next Actions (Mobile)
+
         'next.title': 'Next Actions',
         'next.ready': 'tasks ready to go',
         'next.current': 'Current Actions',
@@ -678,8 +805,12 @@ export const en: Record<string, string> = {
         'next.warningCount': 'items in Next Actions',
         'next.warningHint': 'Consider focusing on fewer projects. GTD recommends keeping Next Actions to 10-15 items for clarity.',
 
-        // Contact / Contexts (Mobile updates)
+
+    'contexts.new': 'New context',
+    'tags.new': 'New tag',
         'contexts.title': 'Contexts',
+        "contexts.collapseSidebar": "Collapse contexts panel",
+        "contexts.expandSidebar": "Expand contexts panel",
         'contexts.filter': 'Filter tasks by context',
         'contexts.dropAdd': 'Add {context}',
         'contexts.dropAdded': 'Added {context}',
@@ -705,6 +836,13 @@ export const en: Record<string, string> = {
         'filters.starred': 'Starred',
         'filters.notStarred': 'Not starred',
         'filters.datePreset.today': 'Today',
+        "filters.taskDates": "Task dates",
+        "filters.anyTime": "Any time",
+        "filters.datePreset.next_7_days": "Next 7 days",
+        "filters.datePreset.overdue_next_7_days": "Overdue + next 7 days",
+        "filters.datePreset.next_14_days": "Next 14 days",
+        "filters.datePreset.next_30_days": "Next 30 days",
+        "filters.datePreset.upcoming": "All upcoming",
         'filters.datePreset.this_week': 'This week',
         'filters.datePreset.this_month': 'This month',
         'filters.datePreset.overdue': 'Overdue',
@@ -725,7 +863,7 @@ export const en: Record<string, string> = {
         'contexts.noContexts': 'No contexts found. Add contexts like @home, @work, @computer to your tasks',
         'contexts.noTasks': 'No active tasks for this context',
 
-        // Board
+
         'board.title': 'Board View',
         'board.next': 'Next Actions',
         'board.todo': 'Todo',
@@ -736,7 +874,7 @@ export const en: Record<string, string> = {
         'board.dragTask': 'Drag task',
         'board.delete': 'Delete',
 
-        // Calendar
+
         'calendar.title': 'Calendar',
         'calendar.tasksAndEvents': 'Tasks and external events by date',
         'calendar.today': 'Today',
@@ -820,7 +958,7 @@ export const en: Record<string, string> = {
         'shortcuts.captureUnavailable': 'Capture shortcut unavailable',
         'shortcuts.missingTitle': 'Mindwtr could not read a task title from that shortcut link.',
 
-        // Projects
+
         'projects.title': 'Projects',
         'projects.statusLabel': 'Status',
         'projects.activeSection': 'Active Projects',
@@ -832,6 +970,11 @@ export const en: Record<string, string> = {
         'projects.noActiveTasks': 'No active tasks in this project.',
         'projects.projectName': 'Project Name',
         'projects.color': 'Color',
+        'projects.useAreaColor': 'Use Area color',
+        'projects.colorSaveFailed': 'Color could not be saved.',
+        'projects.sequenceMode': "Flow Mode",
+        'projects.perSection': "Per section",
+        'projects.perSectionTooltip': "Per section: each section is Parallel or Sequential, chosen from its menu.",
         'projects.colorBlue': 'Blue',
         'projects.colorGreen': 'Green',
         'projects.colorAmber': 'Amber',
@@ -899,6 +1042,7 @@ export const en: Record<string, string> = {
         'projects.moveDown': 'Move down',
         'projects.reorderSections': 'Reorder sections',
         'focus.reorderPosition': '{{title}}. Position {{position}} of {{count}}',
+        'focus.hiddenByArea': "{{count}} selected in other areas",
         'focus.reorderHint': 'Long press and drag to reorder',
         'focus.reorderScreenHint': 'Opens a focused screen for reordering these tasks',
         'projects.tagFilter': 'Tag filter',
@@ -923,6 +1067,7 @@ export const en: Record<string, string> = {
         'projects.convertNavigationFailed': 'Converted, but could not change the Area filter.',
         'projects.convertBlocked.missing-source': 'Project no longer exists.',
         'projects.convertBlocked.source-inactive': 'Only active projects can be converted.',
+        'projects.convertBlocked.destination-section-sequence': 'Choose a destination set to Sequential → Within sections. The new section keeps its task sequence; other sections keep progressing independently.',
         'projects.convertBlocked.source-sequential': 'Switch this project to Parallel first.',
         'projects.convertBlocked.source-sections': 'Move or remove this project’s sections first.',
         'projects.convertBlocked.source-attachments': 'Remove this project’s attachments first.',
@@ -997,7 +1142,7 @@ export const en: Record<string, string> = {
         'projects.collapseSidebar': 'Collapse projects panel',
         'projects.resizeSidebar': 'Resize projects panel',
 
-        // Review Steps
+
         'review.title': 'Review',
         'review.openTasks': 'Open tasks',
         'review.intro': 'Get clear, get current, and get creative.',
@@ -1068,6 +1213,7 @@ export const en: Record<string, string> = {
         'review.projectsStepDesc': 'Ensure every active project has a next action.',
         'review.projectsHint': 'Review each project. Does it have at least one concrete Next Action? If not, add one now. Mark completed projects as done.',
         'review.hasNextAction': 'Has Next Action',
+    'review.projectDeferred': 'Scheduled',
         'review.needsAction': 'Needs Action',
         'review.noActiveTasks': 'No active tasks',
         'review.somedayStep': 'Someday/Maybe',
@@ -1097,7 +1243,7 @@ export const en: Record<string, string> = {
         'review.nextStepBtn': 'Next Step',
         'review.stuckQuestion': 'Is this item stuck?',
         'review.stuckPrompt': 'Try rewording it to be more actionable, or delete/incubate it if it\'s no longer relevant.',
-        // Mobile Review keys
+
         'review.notSet': 'Not set',
         'review.description': 'Description',
         'review.startTime': 'Defer until',
@@ -1126,7 +1272,7 @@ export const en: Record<string, string> = {
         'review.expandEverything': 'Expand projects',
         'review.collapseEverything': 'Collapse all',
 
-        // Processing
+
         'process.title': 'Process Item',
         'process.refineTitle': 'Refine the task',
         'process.refineDesc': 'Clarify what this is before deciding what to do with it.',
@@ -1200,7 +1346,7 @@ export const en: Record<string, string> = {
         'process.delegateSendError': 'Could not send the delegation message.',
         'process.delegateRequestCopied': 'Request copied — paste it into an email or chat.',
 
-        // Settings
+
         'settings.title': 'Settings',
         'settings.subtitle': 'Customize your Mindwtr experience',
         'settings.appearance': 'Appearance',
@@ -1216,6 +1362,8 @@ export const en: Record<string, string> = {
         'settings.nord': 'Nord',
         'settings.catppuccinMacchiato': 'Catppuccin Macchiato',
         'settings.dracula': 'Dracula',
+        'settings.gruvboxLight': 'Gruvbox Light',
+        'settings.gruvboxDark': 'Gruvbox Dark',
         'settings.sepia': 'Sepia',
         'settings.oled': 'OLED / Midnight',
         'settings.material3Light': 'Material 3 (Light)',
@@ -1268,7 +1416,7 @@ export const en: Record<string, string> = {
         'settings.logCleared': 'Log file cleared.',
         'settings.logClearFailed': 'Could not clear the log file.',
         'settings.shareUnavailable': 'Sharing is not available on this device.',
-        // Mobile Settings
+
         'settings.useSystem': 'Use System Theme',
         'settings.followDevice': 'Follow device appearance settings',
         'settings.darkMode': 'Dark Mode',
@@ -1283,6 +1431,11 @@ export const en: Record<string, string> = {
         'settings.terms': 'Terms of Use',
         'settings.mobile.appLock': 'App lock',
         'settings.mobile.appLockDesc': 'Require your device lock when opening Mindwtr or returning to the app. This protects the app view, not the on-device database.',
+        'settings.mobile.appLockRelock': 'Require unlock',
+        'settings.mobile.appLockRelockImmediately': 'Immediately',
+        'settings.mobile.appLockRelockAfter1': 'After 1 minute',
+        'settings.mobile.appLockRelockAfter5': 'After 5 minutes',
+        'settings.mobile.appLockRelockAfter15': 'After 15 minutes',
         'appLock.title': 'Mindwtr is locked',
         'appLock.description': 'Use your device lock to open Mindwtr. This protects the app view, not the on-device database.',
         'appLock.prompt': 'Unlock Mindwtr',
@@ -1293,6 +1446,14 @@ export const en: Record<string, string> = {
         'appLock.unavailable': 'Set up a device passcode or biometrics to use app lock.',
         'appLock.cancelled': 'Mindwtr is still locked.',
         'appLock.failed': 'Authentication failed. Try again.',
+        "settings.desktopAppLockDesc": "Require Windows Hello or Touch ID (or your Mac password) when Mindwtr opens and after you step away. This hides the app window only; the macOS widget, local API, and MCP server can still read your data.",
+        "settings.desktopAppLockUnavailable": "Set up Windows Hello or a Mac login password to use the app lock.",
+        "appLock.lockNow": "Lock Mindwtr",
+        "appLock.lockedReminder": "Mindwtr reminder",
+        "appLock.turnOff": "Turn off app lock",
+        "appLock.osCheckUnavailable": "Windows Hello or Touch ID is not available on this device right now.",
+        "appLock.macUnlockReason": "unlock and show your tasks",
+        "appLock.macEnableReason": "turn on the app lock",
         'settings.data': 'Data',
         'settings.menuDesc.general': 'Appearance, language, display',
         'settings.menuDesc.gtd': 'Capture, review, task editor',
@@ -1432,6 +1593,10 @@ export const en: Record<string, string> = {
         'settings.syncServerUnreachable': "Couldn't reach the sync server. Check that Mindwtr is allowed to use the network (cellular data, VPN, or firewall).",
         'settings.syncQueuedBody': 'Local changes arrived during sync. A retry was queued automatically.',
         'settings.syncActivationRequeuedBody': 'Mindwtr found new changes while testing this sync setup. Run Sync Now again.',
+        'settings.syncMissingFilesTitle': 'Some attachment files are missing',
+        'settings.syncMissingFilesBody': 'These attachment files are not on this device and not at the new sync location:\n\n{files}\n\nYou can continue without them. The attachments stay in your tasks and projects and show as missing. The files stay where they were and are not deleted.',
+        'settings.syncMissingFilesMore': 'and {count} more',
+        'settings.syncMissingFilesContinue': 'Continue without these files',
         'settings.syncCompleted': 'Sync completed!',
         'settings.syncCompletedWithConflicts': 'Sync completed with {count} conflicts (resolved automatically).',
         'settings.syncClockSkewWarning': 'Large device clock skew detected ({skew}). Check time settings on each device.',
@@ -1447,6 +1612,7 @@ export const en: Record<string, string> = {
         'settings.allowInsecureHttpHint': 'Only use this on trusted networks. Data will be sent unencrypted.',
         'settings.cleartextSyncWarningWebdav': 'WebDAV sync is using HTTP. Data is unencrypted; use it only on a trusted network.',
         'settings.cleartextSyncWarningCloud': 'Self-hosted sync is using HTTP. Data is unencrypted; use it only on a trusted network.',
+        'settings.cleartextSyncDismiss': 'Dismiss for this sync destination',
         'settings.webdavBrowserStorageWarning': 'WebDAV passwords are stored in browser storage. Use only on trusted devices.',
         'settings.cloudUrl': 'Self-hosted URL',
         'settings.cloudUrlPlaceholder': 'https://example.com',
@@ -1483,6 +1649,10 @@ export const en: Record<string, string> = {
         'settings.notifications': 'Notifications',
         'settings.notificationsDesc': 'Enable reminders for tasks with start or due dates.',
         'settings.notificationsEnable': 'Task reminders',
+        'settings.appIconBadge': 'App icon badge',
+        'settings.appIconBadgeHint': 'Count tasks due today and overdue on this device. Updates when Mindwtr runs; the count may be outdated while the app is closed.',
+        'settings.appIconBadgeDenied': 'Allow badges for Mindwtr in iOS Settings to enable this count.',
+        'settings.appIconBadgeError': 'Could not update the app icon badge setting. Please try again.',
         'settings.notificationsDisabled': 'Notifications disabled',
         'settings.notificationsDisabledMessage': 'Mindwtr can no longer schedule reminders until notification access is restored.',
         'settings.startDateNotifications': 'Start date reminders',
@@ -1496,6 +1666,7 @@ export const en: Record<string, string> = {
         'settings.advanced': 'Advanced',
         'settings.aiDesc': 'Optional help for clarifying and breaking down tasks.',
         'settings.aiEnable': 'Enable AI assistant',
+        'settings.aiSummaryReadOnly': "AI requests are not available in this native app yet.",
         'ai.appleClarification.stale': 'The item or its available associations changed. Ask for a fresh suggestion.',
         'ai.appleClarification.suggestionTitle': 'On-device suggestion',
         'settings.appleClarification.title': 'Inbox clarification',
@@ -1551,6 +1722,7 @@ export const en: Record<string, string> = {
         'settings.aiProviderOpenAI': 'OpenAI',
         'settings.aiProviderGemini': 'Gemini',
         'settings.aiProviderAnthropic': 'Anthropic (Claude)',
+        'settings.aiEffortMinimalSaved': 'Saved: Minimal',
         'settings.aiEffortLow': 'Low',
         'settings.aiEffortMedium': 'Medium',
         'settings.aiEffortHigh': 'High',
@@ -1574,6 +1746,7 @@ export const en: Record<string, string> = {
         'ai.addSteps': 'Add steps',
         'ai.working': 'Working...',
         'ai.breakdownTitle': 'Suggested steps',
+        'copilot.suggest': 'Suggest',
         'copilot.suggested': 'Suggested',
         'copilot.applyHint': 'Tap to apply',
         'copilot.applyAll': 'Apply all',
@@ -1708,7 +1881,7 @@ export const en: Record<string, string> = {
         'digest.reviewDue': 'Review due',
         'digest.noItems': 'No urgent items today.',
 
-        // Common
+
         'common.tasks': 'tasks',
         'common.day': 'day',
         'common.days': 'days',
@@ -1778,7 +1951,7 @@ export const en: Record<string, string> = {
         'attachments.transcriptionUnavailable': 'Speech-to-text is not ready. Check your AI settings and try again.',
         'attachments.transcriptionFailed': 'Transcription failed. Please try again.',
 
-        // Bulk Actions
+
         'bulk.select': 'Select',
         'bulk.exitSelect': 'Done',
         'bulk.selected': 'selected',
@@ -1811,7 +1984,7 @@ export const en: Record<string, string> = {
         'bulk.moveFailed': 'Failed to move selected tasks',
         'bulk.updateFailed': 'Failed to update selected tasks',
 
-        // Sorting
+
         'sort.label': 'Sort',
         'sort.default': 'Default',
         'sort.due': 'Due date',
@@ -1823,7 +1996,7 @@ export const en: Record<string, string> = {
         'sort.created-desc': 'Newest',
         'sort.completed': 'Completion date',
 
-        // Agenda
+
         'agenda.title': 'Focus',
         'agenda.active': 'active items',
         'agenda.collapseOtherSections': 'Focus only',
@@ -1851,6 +2024,13 @@ export const en: Record<string, string> = {
         'agenda.reviewDue': 'Review Due',
         'agenda.reviewDueProjects': 'Projects to review',
         'agenda.upcoming': 'Upcoming',
+        'widget.upcomingStarts': 'Starts',
+        'widget.upcomingReturns': 'Returns',
+        'widget.background': 'Background',
+        'widget.backgroundLightText': 'Transparent, light text',
+        'widget.backgroundDarkText': 'Transparent, dark text',
+        'widget.availableActions': 'Available actions',
+        'widget.includeAvailableActions': 'Add Next Actions whose start date has arrived',
         'agenda.laterToday': 'Later today',
         'agenda.allClear': 'All Clear!',
         'agenda.noTasks': 'Nothing to focus on right now. Star a task or give it a due date and it will show up here.',
@@ -1867,7 +2047,7 @@ export const en: Record<string, string> = {
         'focus.group.noEnergy': 'No energy',
         'focus.group.noPriority': 'No priority',
 
-        // Task Age
+
         'taskAge.day': 'day old',
         'taskAge.days': 'days old',
         'taskAge.week': 'week old',
@@ -1875,13 +2055,13 @@ export const en: Record<string, string> = {
         'taskAge.month': 'month old',
         'taskAge.months': 'months old',
 
-        // Energy Contexts
+
         'context.energy.focused': 'Focused',
         'context.energy.lowenergy': 'Low Energy',
         'context.energy.creative': 'Creative',
         'context.energy.routine': 'Routine',
 
-        // Waiting (Mobile)
+
         'waiting.title': 'Waiting For',
         'waiting.subtitle': 'Tasks waiting on someone else or external events',
         'waiting.count': 'Waiting',
@@ -1891,7 +2071,7 @@ export const en: Record<string, string> = {
         'waiting.empty': 'Nothing you\'re waiting on',
         'waiting.emptyHint': 'Park tasks here when the next move is someone else\'s — you\'ll see them until they clear.',
 
-        // Someday (Mobile)
+
         'someday.title': 'Someday/Maybe',
         'someday.subtitle': 'Ideas and goals you might want to pursue in the future',
         'someday.ideas': 'Ideas',
@@ -1911,7 +2091,7 @@ export const en: Record<string, string> = {
         'viewSections.updateFailed': 'Could not update Someday sections.',
         'done.emptyHint': 'Completed tasks land here — a running log of what you finished.',
 
-        // Search
+
         'search.title': 'Search',
         'search.placeholder': 'Search tasks and projects...',
         'search.scopeHint': 'Tasks, projects, people',
@@ -1928,6 +2108,7 @@ export const en: Record<string, string> = {
         'search.saveSearchPrompt': 'Name this search',
         'search.savedSearches': 'Saved Searches',
         'search.noSavedSearches': 'No saved searches yet.',
+        'search.sortUseGlobal': 'Use global setting ({sort})',
         'search.deleteConfirm': 'Delete this saved search?',
         'search.helpOperators': 'Use operators like status:, context:, tag:, project:, due:<=7d.',
         'search.hiddenCompletedMatches': '{{count}} more in Done and Archived',
@@ -1950,7 +2131,7 @@ export const en: Record<string, string> = {
         'search.due.nextWeek': 'Next week',
         'search.due.none': 'No due date',
 
-        // Archived
+
         'archived.tasksSegment': 'Tasks',
         'archived.title': 'Archived',
         'archived.searchPlaceholder': 'Search archived tasks...',
@@ -2128,6 +2309,10 @@ export const en: Record<string, string> = {
         'settings.feedbackWhereOther': 'Other',
         'settings.feedbackEmail': 'Reply email (optional, recommended)',
         'settings.feedbackEmailPlaceholder': 'Email for replies and follow-up',
+        "settings.feedbackNoEmailTitle": "Send without follow-up?",
+        "settings.feedbackNoEmailDesc": "Mindwtr is local-first and has no account email to contact you. Without a reply email, we cannot reply or follow up on your feedback. Would you like to add an email address or send without follow-up?",
+        "settings.feedbackAddEmail": "Add email",
+        "settings.feedbackSendWithoutEmail": "Send without follow-up",
         'settings.feedbackIncludeDiagnostics': 'Include recent diagnostics',
         'settings.feedbackIncludeDiagnosticsDesc': 'Recent activity and errors. Reproduce the issue on this device before sending.',
         'settings.feedbackPrivacy': 'This sends your message, app version, platform, and diagnostics only if you choose to include them. A reply email is sent only if you enter one. Task content is not attached.',
@@ -2184,7 +2369,7 @@ export const en: Record<string, string> = {
         'settings.sync.incompleteAfterSwitch': 'The new sync settings are active, but this sync did not finish. Mindwtr will retry on its own.',
         'settings.sync.remoteWriteDeferred': 'Your changes are saved on this device. Another device is writing to the sync location right now; Mindwtr will upload them on its own shortly.',
         'settings.selectSyncFolderTitle': 'Select sync folder',
-        // Mobile-only copy migrated from keyed helpers.
+
         'calendar.mobile.1Day': '1 day',
         'calendar.mobile.day': 'Day',
         'calendar.mobile.dayDetailsPanelHandle': 'Day details panel handle',
@@ -2257,6 +2442,10 @@ export const en: Record<string, string> = {
         'settings.backupMobile.recoverySnapshotSaved': 'Recovery snapshot saved as {{snapshotName}}.',
         'settings.backupMobile.restoreBackup': 'Restore backup?',
         'settings.backupMobile.restoreComplete': 'Restore complete',
+        'settings.backupMobile.undoUnavailableTitle': 'Undo may not be available',
+        'settings.backupMobile.undoUnavailableConfirm': 'This library may be too large to undo this change. A recovery snapshot is still saved first. Continue?',
+        'settings.backupMobile.undoUnavailableContinue': 'Continue',
+        'settings.backupMobile.undoUnavailableResult': 'Undo is not available for this change: the library is too large.',
         'settings.backupMobile.restoreFailed': 'Restore failed',
         'settings.backupMobile.restoreRecoverySnapshot': 'Restore recovery snapshot?',
         'settings.backupMobile.restoreSnapshotReplaceLocalData': 'Restore {{snapshotName}}? This will replace current local data.',
@@ -2484,7 +2673,7 @@ export const en: Record<string, string> = {
         'captureNotification.text': 'Tap to capture to your Inbox',
         'captureNotification.channelName': 'Quick capture',
 
-        // Mind sweep (guided capture)
+
         'mindSweep.launchButton': 'Mind Sweep',
         'mindSweep.title': 'Mind Sweep',
         'mindSweep.intro': "Walk through a few cue lists and write down whatever surfaces. Don't filter or organize — every item lands in your Inbox to sort out later.",
@@ -2569,7 +2758,7 @@ export const en: Record<string, string> = {
         'obsidian.filesUpdated': 'Updated {{count}} Obsidian file(s).',
         'obsidian.sourceAttachmentTitle': 'Obsidian source',
 
-        // First-run onboarding modal (both platforms).
+
         'onboarding.title': 'Welcome to Mindwtr',
         'onboarding.subtitle': 'Capture what’s on your mind, sort it out later, and focus on a few things at a time. Bring your existing data, or start with a small guided project.',
         'onboarding.skip': 'Skip onboarding',
@@ -2597,21 +2786,21 @@ export const en: Record<string, string> = {
         'onboarding.toastReady': 'Getting Started is ready in Projects.',
         'onboarding.toastFailed': 'Failed to create Getting Started onboarding.',
 
-        // Seeded Getting Started content (first-run tutorial data).
+
         'starter.projectTitle': 'Getting Started',
         'starter.projectNotes': 'These getting-started tasks are optional. Delete this project anytime when Mindwtr feels set up.',
         'starter.processInbox.title': 'Start here: process your first inbox item',
-        'starter.processInbox.desc': 'Turn one captured thought into a small, doable step.',
+        "starter.processInbox.desc": "Try a project called Home repairs: capture 'Check the leaking tap' and 'Compare paint colors' as Inbox tasks assigned to it. Process only the item you are ready to act on and make it a Next Action. The other ideas stay in Inbox or project notes until your review; they do not have to be Someday/Maybe.",
         'starter.processInbox.check1': 'Open Inbox',
         'starter.processInbox.check2': 'Tap Process Inbox',
         'starter.processInbox.check3': 'Decide the next step for one sample item, or park it for later',
         'starter.quickCapture.title': 'Capture a task in one line',
-        'starter.quickCapture.desc': 'Type a thought and add details right in the text - no forms needed.',
+        "starter.quickCapture.desc": "Capture 'Clean the kitchen' in Inbox. In its editor, set Start to the next day you want to do it and choose a weekly repeat on that weekday. Start keeps it out of the actionable Focus lists until that day, and completing it advances the next occurrence; Upcoming may still preview it. Use Due for a real deadline.",
         'starter.quickCapture.check1': 'Tap the capture button',
         'starter.quickCapture.check2': 'Try: Call Alex @phone /due:tomorrow',
         'starter.quickCapture.check3': 'Only give dates to things with real deadlines',
         'starter.focus.title': "Star up to 3 tasks for Today's Focus",
-        'starter.focus.desc': 'Pick the few things you will actually do today.',
+        "starter.focus.desc": "Next Actions are choices you can act on, not a promise to finish them all today. Star a few for Today's Focus, then use Focus only to fold the other sections; Upcoming is a preview. For ordered project steps, a sequential project normally shows one Next Action at a time. Stars and due or review dates can still bring other items into Focus.",
         'starter.focus.check1': 'Open Focus',
         'starter.focus.check2': 'Use the star to pick your top tasks',
         'starter.focus.check3': 'Defer a task to hide it until you need it',
@@ -2631,14 +2820,14 @@ export const en: Record<string, string> = {
         'starter.import.check2': 'Import Todoist, DGT GTD, OmniFocus, or a backup file',
         'starter.import.check3': 'Review imported items from Inbox',
         'starter.weeklyReview.title': 'Run your first weekly review',
-        'starter.weeklyReview.desc': 'A short weekly tidy-up keeps your lists worth trusting.',
+        "starter.weeklyReview.desc": "Review the Home repairs project and choose the next item that is ready to do. Incubate is for an idea you want to reconsider: it stays in Someday/Maybe with a review date and returns to Process Inbox on that date as Back to clarify. It does not automatically become a Next Action. Look in Someday/Maybe or search before capturing the same idea again.",
         'starter.weeklyReview.check1': 'Open Review',
         'starter.weeklyReview.check2': 'Empty your Inbox',
         'starter.weeklyReview.check3': 'Pick the next few tasks and let the rest wait',
         'starter.sampleBuyMilk': 'Buy milk',
         'starter.sampleReplySam': 'Reply to Sam',
 
-        // Settings — moved from apps/desktop settings/labels.ts (settings-i18n-20260724-01)
+
         'settings.integrations': 'Integrations',
         'settings.searchPlaceholder': 'Search settings…',
         'settings.lookAndFeel': 'Look & Feel',
@@ -2750,6 +2939,8 @@ export const en: Record<string, string> = {
         'settings.networkProxyInvalid': 'Enter a valid http(s) proxy URL.',
         'settings.networkProxySave': 'Save proxy',
         'settings.syncPreferenceSavedFilters': 'Saved filters',
+        'savedFilters.saveTitle': "Save filter",
+        'savedFilters.namePlaceholder': "Filter name",
         'settings.backgroundSync': 'Background sync',
         'settings.backgroundSyncDesc': 'Desktop sync runs on startup, when the app regains focus, every 15 minutes while Mindwtr is running, and shortly after task/project changes. Close-to-tray keeps it active; launch-at-startup can start it after sign-in. Quitting the app stops desktop background sync.',
         'settings.attachmentsCleanupPendingDeletes': 'Pending remote deletes',
@@ -2861,6 +3052,11 @@ export const en: Record<string, string> = {
         'settings.importDiagnostics.missingParent': "{{count}} record(s) had no matching parent and were imported at the nearest safe level.",
         'settings.importDiagnostics.skippedArchiveEntries': "{{count}} unsupported archive entry/entries were skipped.",
         'settings.importDiagnostics.skippedExistingRecords': "{{count}} previously imported or deleted record(s) were skipped.",
+        'settings.importDiagnostics.unknownColumns': "{{count}} unknown column(s) were ignored.",
+        'settings.importDiagnostics.csvLocation': "row {{row}}, column {{column}}",
+        'settings.importDiagnostics.csvArchiveLocation': "CSV entry {{entry}}, row {{row}}, column {{column}}",
+        'settings.importDiagnostics.csvLocations': "Locations (CSV records; header = row 1): {{locations}}.",
+        'settings.importDiagnostics.csvLocationsMore': "{{count}} more location(s) not shown.",
         'settings.importDiagnostics.unmappedDate': "{{count}} date value(s) could not be mapped and were omitted.",
         'settings.importDiagnostics.unmappedStatus': "{{count}} status value(s) could not be mapped and used a safe default.",
         'settings.importDiagnostics.unsupportedRecurrence': "{{count}} unsupported repeat rule(s) were kept as notes.",
@@ -2899,4 +3095,14 @@ export const en: Record<string, string> = {
         'shareCard.reviewTitle': 'Weekly review',
         'shareCard.reviewBody': "This week, I made space to think.",
         'shareCard.qrLabel': "Get Mindwtr",
+        "taskEdit.reminders": "Start/due reminders",
+        "taskEdit.reminderPolicyInherit": "Use default ({value})",
+        "taskEdit.reminderPolicySend": "Send",
+        "taskEdit.reminderPolicySkip": "Skip",
+        "taskEdit.reminderPolicyHint": "Start and due reminders need an explicit time. Focus and review reminders are unchanged.",
+        "taskEdit.remindersDisabledHint": "Task reminders are turned off in Notifications settings on this device.",
+        "settings.taskReminderDefault": "Default task reminders",
+        "settings.taskReminderDefaultDesc": "Applies to new tasks and tasks using the default. Sending requires task reminders to be enabled and a start or due time.",
+        "settings.taskReminderDefaultSend": "Send",
+        "settings.taskReminderDefaultSkip": "Skip",
 };

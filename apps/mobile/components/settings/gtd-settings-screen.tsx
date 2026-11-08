@@ -11,6 +11,7 @@ import { dispatchMobileOnboardingEvent } from '@/lib/mobile-onboarding-events';
 import { logSettingsError } from '@/lib/settings-utils';
 import { useToast } from '@/contexts/toast-context';
 import {
+    updateSettingsFromLatest,
     DEFAULT_TASK_EDITOR_SECTION_OPEN,
     buildGtdSettingsModel,
     buildGtdSettingsUpdate,
@@ -27,6 +28,7 @@ import {
 
 import { ExactAlarmNoticeRow, useExactAlarmPermission } from './exact-alarm-notice';
 import { AndroidCaptureIntentSection } from './android-capture-intent-section';
+import { GmailCaptureSection } from './gmail-capture-section';
 import { SettingRow, SettingToggleRow } from './setting-row';
 import type { SettingsScreen } from './settings.constants';
 import { useSettingsLocalization, useSettingsScrollContent } from './settings.hooks';
@@ -73,8 +75,7 @@ export function GtdSettingsScreen({
     const [taskEditorSelectedField, setTaskEditorSelectedField] = useState<TaskEditorFieldId | null>(null);
     const [defaultAreaPickerVisible, setDefaultAreaPickerVisible] = useState(false);
 
-    // Every row's text, value, visibility and write comes from core's GTD model,
-    // shared with the native host.
+
     const model = buildGtdSettingsModel({ settings, areas, taskOpenMode, t });
     const { hub, capture, review, inbox, archive } = model;
     const pomodoroModel = model.pomodoro;
@@ -123,12 +124,11 @@ export function GtdSettingsScreen({
         setDefaultScheduleTimeDraft(defaultScheduleTime);
     }, [defaultScheduleTime]);
 
-    // Re-picking the stored value writes nothing, as the native host's contract:
-    // a repeat write saves the whole document again for no change.
+
     const writeSetting = (edit: GtdSettingsEdit, afterWrite?: () => void) => {
-        const update = buildGtdSettingsUpdate(settings, edit);
-        if (!update || isGtdSettingStored(settings, edit)) return;
-        updateSettings(update).then(afterWrite).catch(logSettingsError);
+        updateSettingsFromLatest((latest) => (
+            isGtdSettingStored(latest, edit) ? null : buildGtdSettingsUpdate(latest, edit)
+        ), { write: updateSettings, read: () => useTaskStore.getState().settings }).then((wrote) => { if (wrote) afterWrite?.(); }).catch(logSettingsError);
     };
 
     const showPomodoroAutoStartNotice = () => {
@@ -568,6 +568,7 @@ export function GtdSettingsScreen({
                         />
                     </View>
                     <AndroidCaptureIntentSection />
+                    <GmailCaptureSection />
                 </ScrollView>
                 <Modal
                     visible={defaultAreaPickerVisible}

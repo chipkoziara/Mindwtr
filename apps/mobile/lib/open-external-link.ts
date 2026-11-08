@@ -4,7 +4,7 @@ import * as Clipboard from 'expo-clipboard';
 import { isSandboxMode, tFallback } from '@mindwtr/core';
 import { logInfo, logWarn } from './app-log';
 
-/** Only explicit user actions call this; retain the exact target for open/copy. */
+
 export async function openExternalLink(
   href: string,
   t: (key: string) => string,
@@ -20,7 +20,7 @@ export async function openExternalLink(
     const log = outcome === 'opened' ? logInfo : logWarn;
     void log('External app link handoff', {
       scope: 'links', force: true,
-      extra: { releaseCheck: 'v1.3.4/upnote-links', outcome, surface, scheme: 'upnote' },
+      extra: { outcome, surface, scheme: 'upnote' },
     }).catch(() => undefined);
   };
   try {

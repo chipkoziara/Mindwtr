@@ -11,6 +11,7 @@ import {
     countActiveRecords,
     createBackupFileName,
     flushPendingSave,
+    IMPORT_PICKER_MIME_TYPES,
     isSandboxMode,
     prepareRestoredBackupDataForSync,
     runDataTransferTransactionWithoutSnapshot,
@@ -51,6 +52,7 @@ import {
 import { serializeMindwtrCsv } from '@mindwtr/core/mindwtr-csv-export';
 import { buildTaskNotesExportZip } from '@mindwtr/core/tasknotes-export';
 import { logError, logInfo } from './app-log';
+import { getLocalAttachmentPresence } from './attachment-sync-utils';
 import {
     createMobileRecoverySnapshot,
     getLocalChangeAt,
@@ -68,8 +70,7 @@ const StorageAccessFramework = FileSystem.StorageAccessFramework;
 const assertPersonalWorkspace = (): void => {
     if (isSandboxMode()) throw new Error('Unavailable in sandbox');
 };
-// Deliberately does not match SNAPSHOT_FILE_PATTERN, so a half-written snapshot
-// is invisible to the restore roster and to pruning.
+
 
 export type TransferDocument = {
     fileName: string;
@@ -81,12 +82,6 @@ export type TransferDocument = {
 type SnapshotApplyResult = {
     snapshotName: string;
 };
-
-
-
-
-
-
 
 
 const readTextFile = async (fileUri: string): Promise<string> => {
@@ -104,7 +99,7 @@ const readTextFile = async (fileUri: string): Promise<string> => {
                 return await file.text();
             }
         } catch {
-            // Fall back to legacy API below.
+
         }
     }
 
@@ -129,7 +124,7 @@ const readBinaryFile = async (fileUri: string): Promise<Uint8Array> => {
                 return new Uint8Array(await file.bytes());
             }
         } catch {
-            // Fall back to legacy API below.
+
         }
     }
 
@@ -180,12 +175,13 @@ const mobileDataTransferBoundaries = (): Omit<DataTransferBoundaries, 'createRec
     getCurrentChangeAt: getLocalChangeAt,
     readCurrentData: () => mobileStorage.getData(),
     persistData: async (data: AppData): Promise<void> => {
-        // Storage adapters may return their canonical persisted snapshot. The transfer contract
-        // intentionally reloads through refreshData, so consume that return value here.
+
+
         await mobileStorage.saveData(data);
     },
     refreshData: () => useTaskStore.getState().fetchData({ silent: true }),
     onStale: logStaleDataTransfer,
+    getLocalAttachmentPresence: (uri) => getLocalAttachmentPresence(uri),
 });
 
 const mobileBoundaries: DataTransferBoundaries = {
@@ -229,75 +225,22 @@ export const inspectBackupDocument = async (
     });
 };
 
-// Core owns parser dispatch; only mobile document-picker metadata stays here.
-type ImportPickerDescriptor = {
-    mimeTypes: string[];
-};
-
-const IMPORT_PICKER_DESCRIPTORS: Record<ImportPickerSourceId, ImportPickerDescriptor> = {
-    todoist: {
-        mimeTypes: [
-            'text/csv',
-            'text/comma-separated-values',
-            'application/zip',
-            'application/x-zip-compressed',
-            'application/octet-stream',
-        ],
-    },
-    ticktick: {
-        mimeTypes: [
-            'text/csv',
-            'text/comma-separated-values',
-            'application/zip',
-            'application/x-zip-compressed',
-            'application/octet-stream',
-        ],
-    },
-    dgt: {
-        mimeTypes: [
-            'application/json',
-            'application/zip',
-            'application/x-zip-compressed',
-            'application/octet-stream',
-        ],
-    },
-    omnifocus: {
-        mimeTypes: [
-            'text/csv',
-            'text/comma-separated-values',
-            'application/json',
-            'application/zip',
-            'application/x-zip-compressed',
-            'application/octet-stream',
-        ],
-    },
-    'mindwtr-csv': {
-        mimeTypes: [
-            'text/csv',
-            'text/comma-separated-values',
-            'application/zip',
-            'application/x-zip-compressed',
-            'application/octet-stream',
-        ],
-    },
-};
 
 const pickImportDocument = (source: ImportPickerSourceId): Promise<TransferDocument | null> =>
     isSandboxMode()
         ? Promise.reject(new Error('Unavailable in sandbox'))
-        : pickDocument(IMPORT_PICKER_DESCRIPTORS[source].mimeTypes);
+        : pickDocument([...IMPORT_PICKER_MIME_TYPES[source]]);
 
 const resolveDocumentSize = async (document: TransferDocument, kind: 'backup' | 'import'): Promise<number> => {
     try {
-        // The picker reports the source-provider metadata, but imports read the
-        // URI copied into Mindwtr's cache. Stat that actual read target so stale
-        // or dishonest metadata cannot bypass the pre-read memory bound.
+
+
         const info = await FileSystem.getInfoAsync(document.uri);
         if (info.exists && typeof info.size === 'number' && Number.isFinite(info.size) && info.size >= 0) {
             return info.size;
         }
     } catch {
-        // The safe fallback for an unreadable provider is to stop before a bulk read.
+
     }
     if (kind === 'backup') {
         throw new BackupSourceFileError(
@@ -344,8 +287,7 @@ export const inspectOmniFocusDocument = (document: TransferDocument): Promise<Im
 export const inspectMindwtrCsvDocument = (document: TransferDocument): Promise<ImportSourceParseResultMap['mindwtr-csv']> =>
     inspectImportDocument('mindwtr-csv', document);
 
-// Mobile's snapshot writer never returns null (unlike desktop's Tauri-only snapshot), so the
-// shared `string | null` contract can be narrowed back for mobile's public result type.
+
 export const restoreDataFromBackup = async (backupData: AppData): Promise<SnapshotApplyResult> => {
     assertPersonalWorkspace();
     const { snapshotName } = await runImport('backup', backupData, mobileBoundaries, mobileLog);
@@ -426,6 +368,8 @@ export const restoreLocalDataSnapshot = async (snapshotName: string): Promise<vo
     if (!file.exists) {
         throw new Error('Snapshot file not found.');
     }
+
+    if (typeof file.size === 'number') assertBackupSourceFileSize(file.size);
     const validation = validateBackupJson(await file.text(), { fileName: snapshotName });
     if (!validation.valid || !validation.data) {
         throw new Error(validation.errors[0] || 'Snapshot is not a valid backup.');
@@ -452,11 +396,90 @@ export const restoreLocalDataSnapshot = async (snapshotName: string): Promise<vo
     }
 };
 
-// One export path for both formats: the SAF/sharing dance below is identical,
-// only the filename, body and mime type differ.
+
+const EXPORT_PENDING_FILE_NAME = 'export-pending.json';
+type ExportPendingEntry = { uri: string; owner?: string };
+
+const EXPORT_PENDING_OWNER = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const exportPendingFiles = (): { record: File; pending: File } | null => {
+    const baseUri = String(Paths.document?.uri ?? FileSystem.documentDirectory ?? '').trim().replace(/\/$/u, '');
+    return baseUri
+        ? { record: new File(`${baseUri}/${EXPORT_PENDING_FILE_NAME}`), pending: new File(`${baseUri}/${EXPORT_PENDING_FILE_NAME}.pending`) }
+        : null;
+};
+const sameEntry = (left: ExportPendingEntry, right: ExportPendingEntry): boolean => left.uri === right.uri && left.owner === right.owner;
+
+
+const parseExportPending = (file: File): ExportPendingEntry[] | null => {
+    if (!file.exists) return null;
+    try {
+        const parsed = JSON.parse(file.textSync()) as { pending?: unknown; uri?: unknown };
+        if (typeof parsed.uri === 'string') return [{ uri: parsed.uri }];
+        if (!Array.isArray(parsed.pending)) return null;
+        return parsed.pending.flatMap((entry): ExportPendingEntry[] => {
+            if (typeof entry === 'string') return [{ uri: entry }];
+            if (!entry || typeof entry !== 'object') return [];
+            const { uri, owner } = entry as Record<string, unknown>;
+            return typeof uri === 'string' ? [{ uri, owner: typeof owner === 'string' ? owner : undefined }] : [];
+        });
+    } catch {
+        return null;
+    }
+};
+
+
+const readExportPending = (): ExportPendingEntry[] => {
+    const files = exportPendingFiles();
+    if (!files) return [];
+    return parseExportPending(files.pending) ?? parseExportPending(files.record) ?? [];
+};
+
+
+const updateExportPending = (change: (pending: ExportPendingEntry[]) => ExportPendingEntry[]): void => {
+    const files = exportPendingFiles();
+    if (!files) return;
+    const next = change(readExportPending());
+
+
+    if (parseExportPending(files.pending) !== null) {
+        if (files.record.exists) files.record.delete();
+        files.pending.move(files.record);
+    }
+    const pending = exportPendingFiles()!.pending;
+    if (!pending.exists) pending.create({ intermediates: true, overwrite: true });
+    pending.write(JSON.stringify({ pending: next }));
+    if (files.record.exists) files.record.delete();
+    pending.move(files.record);
+};
+
+
+const deleteExportDocument = async (uri: string): Promise<boolean> => {
+    await StorageAccessFramework.deleteAsync(uri, { idempotent: true });
+    return (await FileSystem.getInfoAsync(uri)).exists === false;
+};
+
+export const cleanupInterruptedBackupExport = async (): Promise<void> => {
+    if (!StorageAccessFramework) return;
+    const listed = readExportPending().filter((entry) => entry.owner !== EXPORT_PENDING_OWNER);
+    for (const entry of listed) {
+        try {
+            if (entry.uri.startsWith('content://')) {
+                if (!(await deleteExportDocument(entry.uri))) continue;
+                void logInfo('Interrupted backup export removed', { scope: 'transfer', extra: { operation: 'exportBackup', releaseCheck: 'v1.3.5/mobile-export-cleanup' } });
+            }
+            updateExportPending((pending) => pending.filter((item) => !sameEntry(item, entry)));
+        } catch (error) {
+
+            void logError(error, { scope: 'transfer', extra: { operation: 'exportBackup' } });
+        }
+    }
+};
+
+
 export const exportCurrentDataBackup = async (data: AppData, format: 'json' | 'csv' | 'tasknotes' = 'json'): Promise<void> => {
     assertPersonalWorkspace();
     addBreadcrumb('transfer:export');
+    await cleanupInterruptedBackupExport();
     const isCsv = format === 'csv';
     const isTaskNotes = format === 'tasknotes';
     const snapshotName = isTaskNotes
@@ -464,8 +487,8 @@ export const exportCurrentDataBackup = async (data: AppData, format: 'json' | 'c
         : isCsv
             ? createBackupFileName().replace(/\.json$/u, '.csv')
             : createBackupFileName();
-    // The TaskNotes export is a ZIP, written and shared as base64 bytes; the
-    // other formats stay plain text.
+
+
     const base64Content = isTaskNotes
         ? Buffer.from(buildTaskNotesExportZip(data).zip).toString('base64')
         : null;
@@ -481,8 +504,8 @@ export const exportCurrentDataBackup = async (data: AppData, format: 'json' | 'c
 
     try {
         if (Platform.OS === 'android' && StorageAccessFramework) {
-            // Tracked outside the try so a failed write can remove the document
-            // the picker already created in the user's folder.
+
+
             let createdFileUri: string | null = null;
             try {
                 const permissions = await StorageAccessFramework.requestDirectoryPermissionsAsync();
@@ -494,6 +517,9 @@ export const exportCurrentDataBackup = async (data: AppData, format: 'json' | 'c
                         mimeType
                     );
                     createdFileUri = fileUri;
+
+                    const created: ExportPendingEntry = { uri: fileUri, owner: EXPORT_PENDING_OWNER };
+                    updateExportPending((pending) => [...pending, created]);
                     if (base64Content !== null) {
                         await StorageAccessFramework.writeAsStringAsync(fileUri, base64Content, {
                             encoding: FileSystem.EncodingType.Base64,
@@ -501,6 +527,8 @@ export const exportCurrentDataBackup = async (data: AppData, format: 'json' | 'c
                     } else {
                         await StorageAccessFramework.writeAsStringAsync(fileUri, jsonContent);
                     }
+
+                    updateExportPending((pending) => pending.filter((entry) => !sameEntry(entry, created)));
                     void logInfo('Backup export complete', {
                         scope: 'transfer',
                         extra: {
@@ -514,12 +542,14 @@ export const exportCurrentDataBackup = async (data: AppData, format: 'json' | 'c
                 }
             } catch (error) {
                 void logError(error, { scope: 'transfer', extra: { operation: 'exportBackup' } });
-                // Otherwise an empty file stays behind in the chosen folder and
-                // looks like a finished backup. Best effort; the share fallback
-                // below still runs either way.
+
+
                 if (createdFileUri) {
                     try {
-                        await StorageAccessFramework.deleteAsync(createdFileUri, { idempotent: true });
+                        const removed = createdFileUri;
+                        if (await deleteExportDocument(removed)) {
+                            updateExportPending((pending) => pending.filter((entry) => entry.owner !== EXPORT_PENDING_OWNER || entry.uri !== removed));
+                        }
                     } catch (cleanupError) {
                         void logError(cleanupError, { scope: 'transfer', extra: { operation: 'exportBackup' } });
                     }
@@ -558,5 +588,5 @@ export const exportCurrentDataBackup = async (data: AppData, format: 'json' | 'c
     }
 };
 
-// Settings-side callers keep importing this from data-transfer.
+
 export { createMobileRecoverySnapshot } from './recovery-snapshot';

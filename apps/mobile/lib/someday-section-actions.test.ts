@@ -13,9 +13,9 @@ const storeState = vi.hoisted(() => ({
 }));
 
 vi.mock('@mindwtr/core', async (importOriginal) => ({
-  // The section list edits are core's own logic.
-  ...(({ buildSomedaySectionsSettingsUpdate, planSomedaySectionCreate, sortViewSectionDefinitions }) => ({
-    buildSomedaySectionsSettingsUpdate, planSomedaySectionCreate, sortViewSectionDefinitions,
+
+  ...(({ buildSomedaySectionsSettingsUpdate, planSomedaySectionCreate, runStoreCommand, sortViewSectionDefinitions }) => ({
+    buildSomedaySectionsSettingsUpdate, planSomedaySectionCreate, runStoreCommand, sortViewSectionDefinitions,
   }))(await importOriginal<typeof import('@mindwtr/core')>()),
   flushPendingSave: storeState.flushPendingSave,
   useTaskStore: {
@@ -68,7 +68,7 @@ describe('createSomedaySection', () => {
   });
 
   it('keeps every stored entry as it is, in stored order, including ones this build cannot show', async () => {
-    // A newer app's entry this build cannot show.
+
     const folder = { kind: 'folder', children: ['books'] } as unknown as { id: string; title: string; order: number };
     const books = { id: 'books', title: 'Books to read', order: 1 };
     const films = { id: 'films', title: 'Films', order: 0 };

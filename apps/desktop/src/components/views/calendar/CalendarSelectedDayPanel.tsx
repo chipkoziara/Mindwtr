@@ -1,7 +1,7 @@
 import { format } from 'date-fns';
 import type { DragEvent } from 'react';
 import { Check, Clock, MoreHorizontal, Plus, X } from 'lucide-react';
-import { getTaskCalendarOccurrenceDate, hasTimeComponent, isProjectedRecurringTask, safeFormatDate, safeParseDate, type Task } from '@mindwtr/core';
+import { getProjectedRecurrenceDisplayLabel, hasTimeComponent, isProjectedRecurringTask, safeFormatDate, safeParseDate } from '@mindwtr/core';
 
 import { cn } from '../../../lib/utils';
 import { reportError } from '../../../lib/report-error';
@@ -46,16 +46,6 @@ type CalendarSelectedDayPanelProps = {
     controller: CalendarSelectedDayPanelController;
 };
 
-const PROJECTED_RECURRENCE_LABEL_DATE_FORMAT = 'MMM d';
-
-function getProjectedRecurrenceDisplayLabel(task: Task, projectedLabel: string): string {
-    const occurrenceDateLabel = safeFormatDate(
-        getTaskCalendarOccurrenceDate(task),
-        PROJECTED_RECURRENCE_LABEL_DATE_FORMAT
-    );
-    return occurrenceDateLabel ? `${projectedLabel} · ${occurrenceDateLabel}` : projectedLabel;
-}
-
 export function CalendarSelectedDayPanel({ controller }: CalendarSelectedDayPanelProps) {
     const {
         beginEditScheduledTime,
@@ -96,9 +86,8 @@ export function CalendarSelectedDayPanel({ controller }: CalendarSelectedDayPane
     if (!selectedDate) return null;
 
     return (
-        // A size container: the two-column layout below asks how wide THIS panel is, not the
-        // window. The sidebar and the planning panel both take width from it, so a viewport
-        // breakpoint went two-column while the list column had room for a time label only.
+
+
         <div className="rounded-lg border border-border bg-card [container-type:inline-size]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
                 <div>
@@ -183,7 +172,7 @@ export function CalendarSelectedDayPanel({ controller }: CalendarSelectedDayPane
                                         style={{ borderLeftColor: getExternalCalendarColor(event.sourceId) }}
                                     >
                                         <span className="w-28 shrink-0 text-xs font-medium text-muted-foreground">{timeLabel}</span>
-                                        {/* The title keeps a floor; in a narrow panel the source and the button wrap under it. */}
+                                        {                                                                                         }
                                         <span className="min-w-[8rem] flex-1 truncate">{event.title}</span>
                                         {sourceLabel && <span className="truncate text-xs text-muted-foreground">{sourceLabel}</span>}
                                         <button
@@ -213,7 +202,7 @@ export function CalendarSelectedDayPanel({ controller }: CalendarSelectedDayPane
                             {selectedTaskRows.map(({ id, kind, task, start }) => {
                                 const projected = isProjectedRecurringTask(task);
                                 const projectedLabel = projected
-                                    ? getProjectedRecurrenceDisplayLabel(task, resolveText('calendar.projectedRecurrence', 'Projected'))
+                                    ? getProjectedRecurrenceDisplayLabel(task, resolveText('calendar.projectedRecurrence', 'Projected'), safeFormatDate)
                                     : '';
                                 const durationMinutes = timeEstimateToMinutes(task.timeEstimate);
                                 const isAllDayScheduled = kind === 'scheduled' && !hasTimeComponent(task.startTime);
@@ -263,8 +252,8 @@ export function CalendarSelectedDayPanel({ controller }: CalendarSelectedDayPane
                                                 {kind === 'scheduled' && <Clock className="h-3 w-3" aria-hidden="true" />}
                                                 {timeLabel}
                                             </span>
-                                            {/* One truncating button clipped the title to nothing once the label
-                                                filled it. The title has a floor now and drops under the label. */}
+                                            {
+                                                                                                                  }
                                             <span className="min-w-[8rem] flex-1 truncate">{task.title}</span>
                                         </button>
                                         {projected && (

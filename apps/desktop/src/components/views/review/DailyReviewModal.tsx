@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Calendar, Check, CheckSquare, ChevronLeft, X, type LucideIcon } from 'lucide-react';
 import {
     buildReviewSteps,
@@ -6,6 +6,7 @@ import {
     getUsedTaskTokens,
     formatFocusTaskLimitText,
     getFocusStarBlockedText,
+    hasTimeComponent,
     isDueForReview,
     normalizeFocusTaskLimit,
     parseStoredReviewStepSession,
@@ -22,15 +23,19 @@ import {
     isSandboxMode,
 } from '@mindwtr/core';
 import { cn } from '../../../lib/utils';
+import { isImeComposing } from '../../../lib/ime';
 import { useLanguage } from '../../../contexts/language-context';
 import { FocusStarIcon } from '../../FocusStarIcon';
 import { InboxProcessor } from '../InboxProcessor';
 import { Dialog, DialogHeader } from '../../ui/Dialog';
 import { TaskItem } from '../../TaskItem';
+import { getUrgencyColor } from '../../Task/TaskItemDisplay';
+import { useTaskDisplayClock } from '../../../hooks/useTaskDisplayClock';
 import { fetchExternalCalendarEvents, summarizeExternalCalendarWarnings } from '../../../lib/external-calendar-events';
 import { resolveNonDoneTaskSortBy } from '@mindwtr/core';
 import { useLocalDayKey } from '../../../hooks/useLocalDayKey';
 import { getWorkspaceCache } from '../../../lib/workspace-cache';
+import { filterVisibleReviewCalendarEvents } from '../calendar/use-calendar-external-events';
 
 type DailyReviewStep = 'today' | 'focus' | 'inbox' | 'waiting' | 'completed';
 type DailyReviewStepDefinition = {
@@ -96,9 +101,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
 
     const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
 
-    // Token autocomplete for the inbox processor wants every non-reference
-    // active task, not the review-candidate subset (a done task can still
-    // carry useful contexts/tags for autocomplete).
+
     const activeTasks = useMemo(
         () => tasks.filter((task) => !task.deletedAt && task.status !== 'reference' && isTaskInActiveProject(task, projectMap)),
         [projectMap, tasks],
@@ -106,8 +109,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
     const allContexts = getUsedTaskTokens(activeTasks, (task) => task.contexts, { prefix: '@' });
     const allTags = getUsedTaskTokens(activeTasks, (task) => task.tags, { prefix: '#' });
 
-    // Single source of "what needs reviewing today" (#867): shared with
-    // mobile via core so a raw startTime-vs-now check can't drift back in.
+
     const dailyBuckets = useMemo(
         () => getDailyReviewBuckets(tasks, projects, { now: today, sortBy, sections }),
         [tasks, projects, sections, today, sortBy],
@@ -118,6 +120,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
     const dueTodayTasks = dailyBuckets.dueToday;
     const overdueTasks = dailyBuckets.overdue;
     const focusCandidates = dailyBuckets.focusCandidates;
+    useTaskDisplayClock(currentStep === 'focus' && focusCandidates.some((task) => Boolean(task.dueDate)));
 
     useEffect(() => {
         if (currentStep !== 'inbox' && isProcessing) {
@@ -131,7 +134,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') {
+            if (event.key === 'Escape' && !isImeComposing(event)) {
                 event.preventDefault();
                 onClose();
             }
@@ -152,9 +155,9 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                 const tomorrowEnd = new Date(todayStart);
                 tomorrowEnd.setDate(tomorrowEnd.getDate() + 2);
                 tomorrowEnd.setMilliseconds(-1);
-                const { events, warnings } = await fetchExternalCalendarEvents(todayStart, tomorrowEnd);
+                const { calendars, events, warnings } = await fetchExternalCalendarEvents(todayStart, tomorrowEnd);
                 if (cancelled) return;
-                setExternalCalendarEvents(events);
+                setExternalCalendarEvents(filterVisibleReviewCalendarEvents(events, calendars));
                 setExternalCalendarError(summarizeExternalCalendarWarnings(warnings));
             } catch (error) {
                 if (cancelled) return;
@@ -207,8 +210,8 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
             { id: 'today', title: t('dailyReview.todayStep'), description: t('dailyReview.todayDesc'), icon: Calendar, hasWork: stepHasWork.get('today') ?? false },
         ];
         visibleSteps.push({ id: 'inbox', title: t('dailyReview.inboxStep'), description: t('dailyReview.inboxDesc'), icon: CheckSquare, hasWork: stepHasWork.get('inbox') ?? false });
-        // Waiting For comes before focus selection: items unblocked today can be
-        // switched to Next here and then picked up in the focus step.
+
+
         visibleSteps.push({ id: 'waiting', title: t('dailyReview.waitingStep'), description: t('dailyReview.waitingDesc'), icon: ArrowRight, hasWork: stepHasWork.get('waiting') ?? false });
         if (includeFocusStep) {
             visibleSteps.push({ id: 'focus', title: t('dailyReview.focusStep'), description: t('dailyReview.focusDesc'), icon: CheckSquare, hasWork: stepHasWork.get('focus') ?? false });
@@ -231,6 +234,11 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
             setCurrentStep(activeStep);
         }
     }, [activeStep, currentStep, setCurrentStep]);
+    const stepScrollRef = useRef<HTMLDivElement>(null);
+
+    useLayoutEffect(() => {
+        if (stepScrollRef.current) stepScrollRef.current.scrollTop = 0;
+    }, [activeStep]);
 
     const finishReview = () => {
         getWorkspaceCache()?.removeItem(DAILY_REVIEW_STEP_STORAGE_KEY);
@@ -331,8 +339,8 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
             <div className="space-y-2">
                 {focusCandidates.map((task) => {
                     const project = task.projectId ? projectMap.get(task.projectId) : null;
-                    // Same contract as every other star surface: core decides
-                    // eligibility, and a refusal is shown rather than swallowed.
+
+
                     const starAction = useTaskStore.getState().getFocusStarAction(task);
                     const blockedText = getFocusStarBlockedText(t, starAction, focusTaskLimit);
                     const canFocus = starAction.canToggle;
@@ -367,6 +375,18 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                                             {task.contexts.slice(0, 2).join(', ')}
                                         </span>
                                     ) : null}
+                                    {task.startTime && (
+                                        <span className="inline-flex items-center gap-1">
+                                            <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                                            {t('taskEdit.startDateLabel')}: {safeFormatDate(task.startTime, hasTimeComponent(task.startTime) ? 'Pp' : 'P')}
+                                        </span>
+                                    )}
+                                    {task.dueDate && (
+                                        <span className={cn('inline-flex items-center gap-1', getUrgencyColor(task))}>
+                                            <Calendar className="h-3 w-3" aria-hidden="true" />
+                                            {t('taskEdit.dueDateLabel')}: {safeFormatDate(task.dueDate, hasTimeComponent(task.dueDate) ? 'Pp' : 'P')}
+                                        </span>
+                                    )}
                                 </div>
                             </div>
                             <button
@@ -579,7 +599,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                     {renderStepRail()}
                 </div>
 
-                <div className="flex-1 overflow-y-auto pr-2">
+                <div ref={stepScrollRef} className="flex-1 overflow-y-auto pr-2">
                     {renderStepContent()}
                 </div>
 

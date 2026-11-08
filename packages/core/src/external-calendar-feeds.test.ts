@@ -10,11 +10,7 @@ import {
     type ExternalCalendarFeedsHost,
 } from './external-calendar-feeds';
 
-/**
- * The feed and device calendar ports as a native host binds them. React Native's
- * own suite (apps/mobile/tests/external-calendar.test.ts) runs the same code
- * through its binding.
- */
+
 const ics = (events: [string, string, string][]) => [
     'BEGIN:VCALENDAR', 'VERSION:2.0',
     ...events.flatMap(([uid, start, summary]) => ['BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${start}`, `DURATION:PT1H`, `SUMMARY:${summary}`, 'END:VEVENT']),
@@ -24,12 +20,13 @@ const ics = (events: [string, string, string][]) => [
 function device(options: {
     storage?: Record<string, string>;
     platform?: string;
-    feeds?: Record<string, string | 'hang' | { status: number }>;
+    feeds?: Record<string, string | 'hang' | { status: number } | Response>;
     files?: Record<string, string>;
     calendars?: DeviceCalendar[];
     events?: DeviceCalendarEvent[];
     permission?: string;
     pushed?: { calendarId: string; calendarEventId: string }[];
+    synced?: ReturnType<typeof feed>[];
 } = {}) {
     const storage = new Map(Object.entries(options.storage ?? {}));
     const calls: unknown[][] = [];
@@ -48,6 +45,7 @@ function device(options: {
                     init?.signal?.addEventListener('abort', () => reject(init.signal!.reason ?? new Error('aborted')));
                 });
             }
+            if (feed instanceof Response) return feed;
             if (feed === undefined || typeof feed !== 'string') return { ok: false, status: typeof feed === 'object' ? feed.status : 404, text: async () => '' };
             return { ok: true, status: 200, text: async () => feed };
         }) as unknown as typeof fetch,
@@ -74,6 +72,7 @@ function device(options: {
         },
         getAllCalendarSyncEntries: async () => options.pushed ?? [],
         logInfo: (message, context) => { logs.push([message, context]); },
+        syncedSubscriptions: () => options.synced,
     };
     return { host, storage, calls, logs, feeds: createExternalCalendarFeeds(host) };
 }
@@ -105,8 +104,20 @@ describe('external calendar feeds behind the host ports', () => {
             ['readLocalFile', 'content://downloads/42'],
             ['fetch', 'https://example.com/broken.ics'],
         ]);
-        // The list still names every stored subscription, the failed one included.
+
         expect(result.calendars.map((calendar) => calendar.id)).toEqual(['team', 'local', 'broken', 'off']);
+    });
+
+    it('reads the synced subscriptions, not a stale device copy: one added or removed on another device counts at once', async () => {
+        const { feeds, calls } = device({
+            storage: { [EXTERNAL_CALENDARS_KEY]: JSON.stringify([feed('removed', 'https://example.com/removed.ics')]) },
+            synced: [feed('added', 'https://example.com/added.ics')],
+            feeds: { 'https://example.com/added.ics': ics([['a1', '20260910T090000Z', 'Added']]), 'https://example.com/removed.ics': ics([['r1', '20260910T090000Z', 'Removed']]) },
+        });
+        const result = await feeds.fetchExternalCalendarEvents(...SEPT);
+        expect(result.events.map((event) => event.title)).toEqual(['Added']);
+        expect(calls.filter(([name]) => name === 'fetch')).toEqual([['fetch', 'https://example.com/added.ics']]);
+        expect(result.calendars.map((calendar) => calendar.id)).toEqual(['added']);
     });
 
     it('names each enabled feed that failed to load, for the Test button', async () => {
@@ -123,6 +134,26 @@ describe('external calendar feeds behind the host ports', () => {
         const result = await feeds.fetchExternalCalendarEvents(...SEPT, { onFeedError: (calendarId) => { failed.push(calendarId); } });
         expect(result.events).toHaveLength(1);
         expect(failed).toEqual(['broken', 'missing-file']);
+    });
+
+    it('refuses a feed or local file over 20 MiB and still loads the others', async () => {
+        const oversized = ics([['big', '20260910T090000Z', 'Big']]) + ' '.repeat(20 * 1024 * 1024);
+        const { feeds } = device({
+            storage: { [EXTERNAL_CALENDARS_KEY]: JSON.stringify([
+                feed('huge', 'https://example.com/huge.ics'),
+                feed('huge-file', 'file:///huge.ics'),
+                feed('team', 'https://example.com/team.ics'),
+            ]) },
+            feeds: {
+                'https://example.com/huge.ics': new Response(oversized),
+                'https://example.com/team.ics': ics([['t1', '20260910T090000Z', 'Planning']]),
+            },
+            files: { 'file:///huge.ics': oversized },
+        });
+        const failed: string[] = [];
+        const result = await feeds.fetchExternalCalendarEvents(...SEPT, { onFeedError: (calendarId) => { failed.push(calendarId); } });
+        expect(failed).toEqual(['huge', 'huge-file']);
+        expect(result.events.map((event) => event.title)).toEqual(['Planning']);
     });
 
     it('gives up on a feed after 15 s without failing the others', async () => {
@@ -225,7 +256,7 @@ describe('external calendar feeds behind the host ports', () => {
             ],
             events: [
                 { id: 'e1', calendarId: 'work', title: 'Secret meeting', startDate: '2026-09-10T09:00:00.000Z', endDate: '2026-09-10T10:00:00.000Z' },
-                // Android's provider stores an all-day event at UTC midnights.
+
                 { id: 'e2', calendarId: 'work', title: 'Holiday', startDate: '2026-09-14T00:00:00.000Z', endDate: '2026-09-15T00:00:00.000Z', allDay: true },
                 { id: 'e3', calendarId: 'work', title: 'Pushed by marker', notes: '[Mindwtr Calendar Mirror]\nMindwtr-Task-ID: t1\n[/Mindwtr Calendar Mirror]', startDate: '2026-09-11T09:00:00.000Z', endDate: '2026-09-11T10:00:00.000Z' },
                 { id: 'e4', calendarId: 'work', title: 'Pushed by map', startDate: '2026-09-12T09:00:00.000Z', endDate: '2026-09-12T10:00:00.000Z' },
@@ -241,9 +272,9 @@ describe('external calendar feeds behind the host ports', () => {
             ['Secret meeting', '2026-09-10T09:00:00.000Z', '2026-09-10T10:00:00.000Z', false],
             ['Holiday', new Date(2026, 8, 14).toISOString(), new Date(2026, 8, 15).toISOString(), true],
         ]);
-        // Android's query is widened by 92 days on each side, then clipped to the window.
+
         expect(calls.find(([name]) => name === 'getEvents')).toEqual(['getEvents', ['work'], '2026-06-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z']);
-        // Logs carry counts only.
+
         expect(JSON.stringify(logs)).not.toMatch(/Secret meeting|Holiday|Pushed by|Copy in Mindwtr/);
         expect(logs.map(([message]) => message)).toContain('Mirrored device calendar events excluded');
     });

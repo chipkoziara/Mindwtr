@@ -7,10 +7,12 @@ import { reactivateArchivedProject } from './archive-view-model';
 import { flushPendingSave, resetForTests, setStorageAdapter, useTaskStore } from './store';
 import { loadNativeRequestReceipts, NativeReceiptSqliteAdapter, resetNativeRequestReceipts } from './native-request-receipts';
 import type { SqliteClient } from './sqlite-adapter';
+import { getSavedTaxonomyTokens } from './taxonomy-catalog';
+import * as logger from './logger';
 import type { AppData, Project, Section, Task } from './types';
 
 const AT = '2026-10-01T12:00:00.000Z';
-// The 'done' child must stay done: a fixed completion date would age past auto-archive's 7 days and turn it archived on load.
+
 const DONE_AT = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 const ID = 'project-lifecycle';
 const COMPLETE_ID = '8bebf523-dd4e-40dc-9fce-37e456295d49';
@@ -76,7 +78,7 @@ async function open(start: AppData = initial(), shouldFail: () => boolean = () =
         saves: () => saves, reopen: async () => open(durable, shouldFail, recoveryLoad) };
 }
 
-// A peer can edit a child while its Project is archived, even though local UI edits are disabled.
+
 async function peerEditTask(id: string, updates: Partial<Task>) {
     const state = useTaskStore.getState();
     useTaskStore.setState({ _allTasks: state._allTasks.map((row) => row.id === id
@@ -89,6 +91,69 @@ async function peerEditTask(id: string, updates: Partial<Task>) {
 afterEach(async () => { await flushPendingSave(); resetForTests(); vi.useRealTimers(); });
 
 describe('prepared Project Complete and Reactivate', () => {
+    it('reads Weekly Review completion without writing and rejects child changes before prepare', async () => {
+        const env = await open();
+        const options = value(env.host.getReviewProjectCompletionOptions({ projectId: ID }));
+        expect(Object.keys(options).sort()).toEqual(['projectId', 'projectRevision', 'requiresConfirmation', 'scopeRevision', 'title']);
+        expect(options).toMatchObject({ projectId: ID, title: 'Saved Project', requiresConfirmation: true });
+        expect(env.saves()).toBe(0);
+        const request = env.request('complete');
+        useTaskStore.setState({ _allTasks: [...env.state()._allTasks, task('new-child')] });
+        expect(env.host.prepareReviewProjectCompletion({ request, scopeRevision: options.scopeRevision })).toMatchObject({
+            ok: false, error: { code: 'STALE_REVISION' },
+        });
+        expect(env.state()._projectsById.get(ID)?.status).toBe('active');
+        expect(env.saves()).toBe(0);
+        const current = value(env.host.getReviewProjectCompletionOptions({ projectId: ID }));
+        const prepared = value(env.host.prepareReviewProjectCompletion({ request, scopeRevision: current.scopeRevision }));
+        expect(Object.keys(prepared.prepared.request).sort()).toEqual(['action', 'projectId', 'projectRevision', 'requestId']);
+        expect(Object.keys(prepared.prepared).sort()).toEqual(['deviceIdBefore', 'deviceIdToInitialize', 'effect', 'request', 'result', 'scope', 'updateAt', 'version']);
+        const envelope = { request, prepared: prepared.prepared };
+        expect(value(await env.host.commitPreparedProjectLifecycle(envelope))).toEqual({ id: ID, status: 'archived' });
+        expect(value(await env.host.commitPreparedProjectLifecycle(envelope))).toEqual({ id: ID, status: 'archived' });
+        expect(env.state()._tasksById.get('new-child')?.status).toBe('done');
+        expect(env.saves()).toBe(1);
+    });
+
+    it('requires confirmation for section-owned children but excludes reference, finished, deleted and foreign tasks', async () => {
+        const source = initial();
+        source.tasks = source.tasks.filter((row) => ['reference', 'done', 'archived', 'deleted', 'foreign'].includes(row.id));
+        const env = await open(source);
+        expect(value(env.host.getReviewProjectCompletionOptions({ projectId: ID })).requiresConfirmation).toBe(false);
+        useTaskStore.setState({ _allTasks: [...env.state()._allTasks, task('owned', { projectId: undefined })] });
+        expect(value(env.host.getReviewProjectCompletionOptions({ projectId: ID })).requiresConfirmation).toBe(true);
+        const options = value(env.host.getReviewProjectCompletionOptions({ projectId: ID }));
+        const request = env.request('complete');
+        useTaskStore.setState({ _allTasks: env.state()._allTasks.map((row) => row.id === 'owned'
+            ? { ...row, status: 'reference', rev: (row.rev ?? 0) + 1 } : row) });
+        expect(env.host.prepareReviewProjectCompletion({ request, scopeRevision: options.scopeRevision })).toMatchObject({
+            ok: false, error: { code: 'STALE_REVISION' },
+        });
+        expect(env.host.prepareReviewProjectCompletion({ request: { ...request, action: 'cancel' }, scopeRevision: options.scopeRevision }))
+            .toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    });
+
+    it('agrees with the Weekly Review completion read on which projects need confirmation', async () => {
+        const source = initial();
+        source.tasks = source.tasks.filter((row) => ['reference', 'done', 'archived', 'deleted', 'foreign'].includes(row.id));
+        const env = await open(source);
+        const agree = () => expect(value(env.host.getWeeklyReviewProjectCompletion({ projectId: ID }))?.confirm != null)
+            .toBe(value(env.host.getReviewProjectCompletionOptions({ projectId: ID })).requiresConfirmation);
+        agree();
+        useTaskStore.setState({ _allTasks: [...env.state()._allTasks, task('owned', { projectId: undefined })] });
+        agree();
+        expect(value(env.host.getReviewProjectCompletionOptions({ projectId: ID })).requiresConfirmation).toBe(true);
+    });
+
+    it.each(['waiting', 'someday', 'archived'] as const)('does not admit %s projects from Weekly Review', async (status) => {
+        const source = initial();
+        source.projects[0] = project({ status });
+        const env = await open(source);
+        expect(env.host.getReviewProjectCompletionOptions({ projectId: ID })).toMatchObject({
+            ok: false, error: { code: 'STALE_REVISION' },
+        });
+    });
+
     it.each(['waiting', 'someday'] as const)('completes a live %s Project using the same archived lifecycle', async (status) => {
         const source = initial();
         source.projects[0] = project({ status });
@@ -268,10 +333,18 @@ describe('prepared Project Complete and Reactivate', () => {
         vi.setSystemTime(new Date('2026-10-02T12:00:00.000Z'));
         const source = initial();
         const snapshot = () => copy({ projects: useTaskStore.getState()._allProjects,
-            tasks: useTaskStore.getState()._allTasks, sections: useTaskStore.getState()._allSections });
+            tasks: useTaskStore.getState()._allTasks, sections: useTaskStore.getState()._allSections,
+            settings: { taxonomy: useTaskStore.getState().settings.taxonomy } });
         const native = await open(source);
+        const diagnostic = vi.spyOn(logger, 'logInfo');
         value(await native.host.commitPreparedProjectLifecycle(native.prepare('complete')));
+        expect(diagnostic).toHaveBeenCalledWith('Project archive taxonomy retained', { scope: 'store', category: 'storage',
+            context: { releaseCheck: 'v1.3.8/project-archive-taxonomy', operation: 'native-lifecycle' } });
+        diagnostic.mockRestore();
         const nativeCompleted = snapshot();
+
+        expect(getSavedTaxonomyTokens(nativeCompleted.settings, 'context')).toEqual(['@home']);
+        expect(getSavedTaxonomyTokens(nativeCompleted.settings, 'tag')).toEqual(['#kept']);
         value(await native.host.commitPreparedProjectLifecycle(native.prepare('reactivate')));
         const nativeReactivated = snapshot();
 
@@ -321,7 +394,8 @@ describe('prepared Project Cancel', () => {
         source.tasks.push(task('inbox', { status: 'inbox' }));
         source.tasks[5] = task('archived', { status: 'archived', cancelledAt: AT, archivedAt: AT });
         const snapshot = () => copy({ projects: useTaskStore.getState()._allProjects,
-            tasks: useTaskStore.getState()._allTasks, sections: useTaskStore.getState()._allSections });
+            tasks: useTaskStore.getState()._allTasks, sections: useTaskStore.getState()._allSections,
+            settings: { taxonomy: useTaskStore.getState().settings.taxonomy } });
 
         const native = await open(source);
         const cancelled = native.prepare('cancel');
@@ -335,6 +409,7 @@ describe('prepared Project Cancel', () => {
         expect(value(native.host.validatePreparedProjectLifecycle(cancelled))).toEqual({ id: ID, status: 'archived' });
         expect(value(await native.host.commitPreparedProjectLifecycle(cancelled))).toEqual({ id: ID, status: 'archived' });
         const nativeRows = snapshot();
+        expect(getSavedTaxonomyTokens(nativeRows.settings, 'tag')).toEqual(['#kept']);
         for (const id of ['next', 'waiting', 'someday', 'inbox', 'section-only']) {
             const saved = native.state()._tasksById.get(id);
             expect(saved).toMatchObject({ status: 'archived', cancelledAt: at, archivedAt: at,

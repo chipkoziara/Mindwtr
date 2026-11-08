@@ -1,6 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createLocalAttachmentFs, resolveFileBackendPath, writeFileSafelyAbsolute } from './sync-service-utils';
+import {
+    createLocalAttachmentFs,
+    createManagedAttachmentSourcePredicate,
+    resolveFileBackendPath,
+    writeFileSafelyAbsolute,
+    yieldToRenderer,
+} from './sync-service-utils';
+
+const sourceGuardMocks = vi.hoisted(() => ({
+    dataDir: vi.fn(async () => '/os-data'),
+    getManagedDataDir: vi.fn(async () => '/os-data/mindwtr'),
+    logWarn: vi.fn(async () => null),
+}));
+
+vi.mock('@tauri-apps/api/path', () => ({ dataDir: sourceGuardMocks.dataDir }));
+vi.mock('./managed-paths', () => ({ getManagedDataDir: sourceGuardMocks.getManagedDataDir }));
+vi.mock('./app-log', () => ({ logWarn: sourceGuardMocks.logWarn }));
 
 const BASE_DATA_DIR = '/os-data';
 const MANAGED_DIR = '/new-profile/attachments';
@@ -19,8 +35,8 @@ const createFs = (files: Record<string, Uint8Array>) => {
 
 describe('createLocalAttachmentFs managed-dir fallback', () => {
     it('recovers a stale portable path from the current managed dir', async () => {
-        // #1038: moving a portable profile leaves every stored URI pointing at
-        // the previous location while the file travelled inside attachments/.
+
+
         const bytes = new Uint8Array([1, 2, 3]);
         const { exists, readFile } = createFs({ [MANAGED_FILE]: bytes });
         const logSyncWarning = vi.fn();
@@ -132,11 +148,7 @@ describe('createLocalAttachmentFs managed-dir fallback', () => {
     });
 });
 
-// #1245 moved an installed Windows/macOS profile's managed folders from <root>/
-// down into <root>/data/. Unlike the relocated portable profile of #1038 the
-// stale path sits INSIDE the OS data dir, the one shape the old fallback skipped:
-// presence said "present" while stat and read still failed, which pins the
-// attachment as a pending upload and stops every remote write for the device.
+
 describe('createLocalAttachmentFs flat-root fallback after the profile folder move', () => {
     const OS_DATA_DIR = '/Roaming';
     const MOVED_ATTACHMENTS_DIR = '/Roaming/mindwtr/data/attachments';
@@ -214,6 +226,126 @@ describe('createLocalAttachmentFs flat-root fallback after the profile folder mo
     });
 });
 
+
+describe('createManagedAttachmentSourcePredicate', () => {
+    const guardFor = async (osDataDir: string, managedDataDir: string) => {
+        sourceGuardMocks.dataDir.mockResolvedValue(osDataDir);
+        sourceGuardMocks.getManagedDataDir.mockResolvedValue(managedDataDir);
+        sourceGuardMocks.logWarn.mockClear();
+        return await createManagedAttachmentSourcePredicate();
+    };
+
+    it('refuses secrets.toml and other files of the profile or of other apps (POSIX)', async () => {
+        const canUpload = await guardFor('/home/alice/.local/share', '/home/alice/.local/share/mindwtr');
+        for (const hostile of [
+            '/home/alice/.local/share/mindwtr/config/secrets.toml',
+            '/home/alice/.local/share/mindwtr/secrets.toml',
+            '/home/alice/.local/share/mindwtr/data/mindwtr.db',
+            '/home/alice/.local/share/mindwtr/mindwtr.db',
+            '/home/alice/.local/share/keyrings/login.keyring',
+            '/home/alice/.local/share/OtherApp/x',
+            'file:///home/alice/.local/share/OtherApp/x',
+            '/home/alice/.local/share/mindwtr/attachments/../config/secrets.toml',
+            '/home/alice/.local/share/mindwtr/attachments-old/x.png',
+            '/home/alice/.ssh/id_rsa',
+        ]) {
+            expect(canUpload(hostile), hostile).toBe(false);
+        }
+    });
+
+    it('refuses secrets.toml on a migrated Windows profile and other apps under %APPDATA%', async () => {
+        const canUpload = await guardFor(
+            'C:\\Users\\Alice\\AppData\\Roaming',
+            'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\data',
+        );
+        for (const hostile of [
+            'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\config\\secrets.toml',
+            'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\secrets.toml',
+            'file:///C:/Users/Alice/AppData/Roaming/mindwtr/config/secrets.toml',
+            'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\data\\mindwtr.db',
+            'C:\\Users\\Alice\\AppData\\Roaming\\OtherApp\\x',
+            'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\data\\attachments\\..\\..\\config\\secrets.toml',
+        ]) {
+            expect(canUpload(hostile), hostile).toBe(false);
+        }
+    });
+
+    it('allows every folder desktop has written attachment bytes into', async () => {
+
+
+        const migrated = await guardFor(
+            'C:\\Users\\Alice\\AppData\\Roaming',
+            'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\data',
+        );
+        for (const root of ['C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\data', 'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr']) {
+            for (const dir of ['attachments', 'audio-captures', 'quick-add-images']) {
+                const path = `${root}\\${dir}\\file.bin`;
+                expect(migrated(path), path).toBe(true);
+            }
+        }
+        expect(migrated('file:///C:/Users/Alice/AppData/Roaming/mindwtr/data/attachments/a1.pdf')).toBe(true);
+
+
+        const portable = await guardFor('/home/alice/.local/share', '/media/usb/Mindwtr/data');
+        for (const path of [
+            '/media/usb/Mindwtr/data/attachments/a1.pdf',
+            '/media/usb/Mindwtr/data/audio-captures/rec.wav',
+            '/media/usb/Mindwtr/data/quick-add-images/paste.png',
+            '/home/alice/.local/share/mindwtr/attachments/a1.pdf',
+        ]) {
+            expect(portable(path), path).toBe(true);
+        }
+        expect(portable('/media/usb/Mindwtr/config/secrets.toml')).toBe(false);
+    });
+
+    it('allows the old shared attachment folder in the OS data folder, and nothing else there', async () => {
+
+        const canUpload = await guardFor('C:\\Users\\Alice\\AppData\\Roaming', 'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\data');
+        const id = '3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b';
+        expect(canUpload(`C:\\Users\\Alice\\AppData\\Roaming\\attachments\\${id}.pdf`)).toBe(true);
+        expect(canUpload(`file:///C:/Users/Alice/AppData/Roaming/attachments/${id}.pdf`)).toBe(true);
+
+        expect(canUpload('C:\\Users\\Alice\\AppData\\Roaming\\attachments\\a1.pdf')).toBe(false);
+        expect(canUpload(`C:\\Users\\Alice\\AppData\\Roaming\\attachments\\other\\${id}.pdf`)).toBe(false);
+        const linux = await guardFor('/home/alice/.local/share', '/home/alice/.local/share/mindwtr');
+        expect(linux(`/home/alice/.local/share/attachments/${id}`)).toBe(true);
+        expect(linux('/home/alice/.local/share/attachments/notes.txt')).toBe(false);
+        expect(canUpload('C:\\Users\\Alice\\AppData\\Roaming\\audio-captures\\rec.wav')).toBe(false);
+        expect(canUpload('C:\\Users\\Alice\\AppData\\Roaming\\secrets.toml')).toBe(false);
+        expect(canUpload('C:\\Users\\Alice\\AppData\\Roaming\\attachments\\..\\mindwtr\\config\\secrets.toml')).toBe(false);
+    });
+
+    it('compares folders without case on Windows and macOS, with case on Linux', async () => {
+
+
+        const windows = await guardFor('C:\\Users\\Alice\\AppData\\Roaming', 'C:\\Users\\Alice\\AppData\\Roaming\\mindwtr\\data');
+        expect(windows('file:///c:/Users/alice/AppData/Roaming/mindwtr/data/attachments/a1.pdf')).toBe(true);
+        expect(windows('c:\\users\\alice\\appdata\\roaming\\Mindwtr\\Attachments\\a1.pdf')).toBe(true);
+        expect(windows('c:/users/alice/appdata/roaming/MINDWTR/config/secrets.toml')).toBe(false);
+
+        const mac = await guardFor('/Users/Alice/Library/Application Support', '/Users/Alice/Library/Application Support/mindwtr/data');
+        expect(mac('/Users/alice/Library/Application Support/Mindwtr/data/Attachments/a1.pdf')).toBe(true);
+        expect(mac('/users/alice/library/application support/mindwtr/config/secrets.toml')).toBe(false);
+
+        const linux = await guardFor('/home/alice/.local/share', '/home/alice/.local/share/mindwtr');
+        expect(linux('/home/alice/.local/share/mindwtr/attachments/a1.pdf')).toBe(true);
+        expect(linux('/home/alice/.local/share/Mindwtr/attachments/a1.pdf')).toBe(false);
+        expect(linux('/home/Alice/.local/share/mindwtr/attachments/a1.pdf')).toBe(false);
+    });
+
+    it('logs one refusal reason per pass and never the refused path', async () => {
+        const canUpload = await guardFor('/os-data', '/os-data/mindwtr');
+        canUpload('/os-data/mindwtr/config/secrets.toml');
+        canUpload('/os-data/OtherApp/private-name.txt');
+        expect(sourceGuardMocks.logWarn).toHaveBeenCalledTimes(1);
+        const logged = JSON.stringify(sourceGuardMocks.logWarn.mock.calls);
+        expect(logged).toContain('v1.3.5/attachment-source-guard');
+        expect(logged).not.toContain('secrets');
+        expect(logged).not.toContain('os-data');
+        expect(canUpload('/os-data/mindwtr/attachments/a1.pdf')).toBe(true);
+    });
+});
+
 describe('resolveFileBackendPath', () => {
     const join = vi.fn(async (...paths: string[]) => paths.join('/'));
 
@@ -222,9 +354,7 @@ describe('resolveFileBackendPath', () => {
             .resolves.toBe('/sync/attachments/a1.pdf');
     });
 
-    // SEC-08: a cloudKey arrives over sync, so it is attacker-controlled input to a
-    // filesystem write/delete. Escaping the sync folder must fail loudly — both callers
-    // treat a rejection as a failed transfer, never as a completed one.
+
     it('refuses a cloudKey that escapes the sync folder', async () => {
         for (const hostile of ['attachments/../../escape.txt', 'attachments\\..\\..\\escape.txt', '../escape.txt', 'attachments/a\0.pdf']) {
             await expect(resolveFileBackendPath(join, '/sync', hostile)).rejects.toThrow(/outside the sync folder|invalid/i);
@@ -232,9 +362,7 @@ describe('resolveFileBackendPath', () => {
     });
 });
 
-// #1057: attachment downloads must be write-temp-then-rename so a cut connection
-// can never leave a truncated file at the real target path that a later sync would
-// mistake for new content.
+
 describe('writeFileSafelyAbsolute', () => {
     it('never touches the target path until the temp write has fully succeeded', async () => {
         const target = '/managed/attachments/a1.pdf';
@@ -253,7 +381,7 @@ describe('writeFileSafelyAbsolute', () => {
         await writeFileSafelyAbsolute(target, new Uint8Array([1, 2, 3]), { writeFile, rename, remove });
 
         expect(files.get(target)).toEqual(new Uint8Array([1, 2, 3]));
-        // The first writeFile call landed on a temp path, not the target.
+
         expect(writeFile.mock.calls[0]?.[0]).toMatch(
             /^\/managed\/attachments\/\.mindwtr-attachment-write-[0-9a-z]+-[0-9a-f]{12}\.tmp$/,
         );
@@ -275,10 +403,35 @@ describe('writeFileSafelyAbsolute', () => {
             writeFileSafelyAbsolute(target, new Uint8Array([1, 2, 3]), { writeFile, rename, remove }),
         ).rejects.toThrow(tempWriteError);
 
-        // The interrupted download never reached the rename step, so the file that
-        // was there before this sync pass is exactly as it was — never truncated,
-        // never partially overwritten.
+
         expect(files.get(target)).toEqual(previousBytes);
         expect(rename).not.toHaveBeenCalled();
+    });
+});
+
+describe('yieldToRenderer', () => {
+    it('continues on a timer when a hidden window never delivers an animation frame (#1392)', async () => {
+        vi.useFakeTimers();
+        const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+        try {
+            const result = yieldToRenderer();
+            await vi.advanceTimersByTimeAsync(100);
+            await expect(result).resolves.toBe('timer');
+        } finally {
+            raf.mockRestore();
+            vi.useRealTimers();
+        }
+    });
+
+    it('continues at the next frame when one arrives first', async () => {
+        const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+            callback(0);
+            return 1;
+        });
+        try {
+            await expect(yieldToRenderer()).resolves.toBe('frame');
+        } finally {
+            raf.mockRestore();
+        }
     });
 });

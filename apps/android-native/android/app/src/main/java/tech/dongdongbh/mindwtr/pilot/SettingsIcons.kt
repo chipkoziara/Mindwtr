@@ -1,11 +1,6 @@
 package tech.dongdongbh.mindwtr.pilot
 
-/*
- * The icons Settings and the editor's View tab and checklist draw in RN, built as Icons.kt builds its own (see its license
- * notes): lucide-react-native 0.556.0's path data at RN's stroke, and the Ionicons glyph outlines of @expo/vector-icons 15.0.3.
- */
 
-/** RN's lucide icons for the Settings menu (settings.tsx MENU_ICONS), the editor's tabs, and the View tab's checklist. */
 object SettingsLucide {
     val Monitor = lucide("Monitor", "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M8 21h8", "M12 17v4")
     val Bell = lucide("Bell", "M10.268 21a2 2 0 0 0 3.464 0",
@@ -18,15 +13,15 @@ object SettingsLucide {
     val Pencil = lucide("Pencil", "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
         "m15 5 4 4")
     val Square = lucide("Square", "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z")
-    /** RN's CheckSquare (lucide's SquareCheckBig). */
+
     val CheckSquare = lucide("CheckSquare", "M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344", "m9 11 3 3L22 4")
 
-    /** Core's menu icon names (SettingsMenuIcon) to RN's icons. */
+
     val byName = mapOf("Monitor" to Monitor, "ListChecks" to Lucide.ListChecks, "Layers" to Lucide.Layers, "Bell" to Bell, "RefreshCw" to RefreshCw,
         "Database" to Database, "Settings2" to Settings2, "Info" to Info, "Sparkles" to Lucide.Sparkles, "CalendarDays" to Lucide.CalendarDays)
 }
 
-/** The Ionicons RN's settings screens, the Manage rows, the GTD layout sheet, and the Markdown code block draw. */
+
 object SettingsIonicons {
     val ChevronDown = ionicon("ChevronDown",
         "M102 162Q102 162 102 162Q113 157 123 163Q127 165 191 229Q191 229 256 294L321 229Q385 165 389 163" +
@@ -62,6 +57,23 @@ object SettingsIonicons {
         "Q244 165 248 163ZM320 162Q320 162 320 162Q323 160 329 161Q339 161 342 170Q342 170 344 174L340 288" +
         "Q336 401 335 404Q333 410 328 414Q321 418 313 414.5Q305 411 304 402Q304 398 308 285Q312 172 313 170" +
         "Q315 165 320 162Z")
+
+    val BanOutline = ionicon("BanOutline",
+        "M231 33Q239 33 255 33Q271 33 280 33Q289 34 300 36Q355 47 399 83.5Q443 120 464 172Q491 241 472.5 312.5Q454 384 " +
+        "397 430Q344 472 278 478.5Q212 485 152 454Q94 424 61.5 366.5Q29 309 32 243Q35 195 58 152Q79 111 115 82Q143 59 1" +
+        "77 47Q204 36 231 33ZM284 66Q261 63 242 65Q216 67 195 74Q163 85 138 105L132 109L267 245L402 380L406 376Q417 363" +
+        " 428 340Q448 301 448 256Q448 222 437 192Q430 171 417 152Q369 79 284 66ZM376 406Q376 406 376 406L380 402L245 26" +
+        "7L109 132L105 138Q80 169 70 210Q64 231 64 256Q64 281 70 302Q82 354 121 392Q142 413 170 428Q210 448 255 448Q300" +
+        " 448 340 428Q364 417 376 406Z")
+    val RefreshOutline = ionicon("RefreshOutline",
+        "M254 42Q254 42 254 42Q258 41 264 44Q266 45 308.5 87.5Q351 130 351.5 134Q352 138 352 139Q352 140 351.5 142.5Q35" +
+        "1 145 308 188Q265 231 262 233Q256 235 250 233Q240 229 240 218Q240 213 245 207Q250 201 271 180Q280 171 286 165Q" +
+        "292 159 295 155.5Q298 152 298 152Q297 151 273 150Q239 150 221 155Q185 164 157.5 190Q130 216 119 251Q105 296 11" +
+        "9 338Q134 383 171.5 410.5Q209 438 256 438Q303 438 341 410Q379 382 393 337Q398 321 399 302Q400 290 402 286Q404 " +
+        "282 410 279Q416 277 422 279Q432 284 432 298Q432 322 423 349Q410 388 380.5 417.5Q351 447 312 461Q256 479 200 46" +
+        "1Q152 445 120 406Q88 367 81 317Q79 295 81 274Q87 229 112.5 192.5Q138 156 179 136Q204 124 231 120Q240 118 263 1" +
+        "18Q286 118 290 119Q290 119 295 120L268 93Q247 72 243.5 67Q240 62 240 57Q240 53 243.5 48.5Q247 44 251 43Q253 43" +
+        " 254 42Z")
     val Add = ionicon("Add",
         "M248 99Q248 99 248 99Q253 95 259.5 96.5Q266 98 270 104Q270 104 272 107V173V240H338H404L408 242" +
         "Q416 247 416 256Q416 265 408 270Q408 270 405 272H339H272V339V405L270 408Q265 416 256 416Q247 416 242 408" +
@@ -258,7 +270,7 @@ object SettingsIonicons {
         "Q154 437 165 443Q168 445 174 446.5Q180 448 295.5 448Q411 448 416 447Q427 445 436 435.5Q445 426 447 415" +
         "Q448 410 448 295.5Q448 181 447 176Q445 166 436.5 157Q428 148 418 146Z")
 
-    /** Core's Ionicons names for the theme and capture choices (general-settings-model.ts, gtd-settings-model.ts). */
+
     val byName = mapOf(
         "phone-portrait-outline" to PhonePortraitOutline, "contrast-outline" to ContrastOutline, "sunny-outline" to SunnyOutline,
         "moon-outline" to MoonOutline, "color-palette-outline" to ColorPaletteOutline, "document-text-outline" to DocumentTextOutline,

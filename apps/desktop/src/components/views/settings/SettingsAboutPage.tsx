@@ -44,6 +44,10 @@ type Labels = {
     feedbackWhereOther: string;
     feedbackEmail: string;
     feedbackEmailPlaceholder: string;
+    feedbackNoEmailTitle: string;
+    feedbackNoEmailDesc: string;
+    feedbackAddEmail: string;
+    feedbackSendWithoutEmail: string;
     feedbackIncludeDiagnostics: string;
     feedbackIncludeDiagnosticsDesc: string;
     feedbackPrivacy: string;
@@ -64,7 +68,7 @@ type Labels = {
 export type SettingsAboutPageProps = {
     t: Labels;
     appVersion: string;
-    /** False in the web/PWA build, which updates via its Docker image. */
+
     updatesSupported?: boolean;
     installChannel?: string | null;
     onOpenLink: (url: string) => void;

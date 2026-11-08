@@ -1,10 +1,12 @@
 import { AlertCircle, CheckCircle2, ExternalLink, RefreshCw } from 'lucide-react';
+import { DEFAULT_WORKSPACE_ID, getActiveWorkspaceId } from '../../../../lib/workspaces';
 import { getDocsGuideUrl } from '@mindwtr/core';
 import { useDocumentationLanguage } from '../../../../contexts/language-context';
 import { cn } from '../../../../lib/utils';
 import { Switch } from '../../../ui/Switch';
 import { SettingField, SettingRow } from '../SettingRow';
 import type { SettingsSyncPageProps } from './types';
+import { getCleartextSyncDestination } from '../../../../lib/cleartext-sync-warning';
 
 const isDocumentPortalPath = (path: string): boolean => (
     /^\/run\/user\/\d+\/doc(?:\/|$)/.test(path.trim())
@@ -99,8 +101,7 @@ const BackendButton = ({
     </button>
 );
 
-// Connection options that belong to the backend form around them rather than
-// being settings of their own, so they carry no search key.
+
 const CONNECTION_OPTION_ROW_CLS = 'rounded-md border border-border bg-muted/30 p-3';
 
 const ConnectionBadge = ({
@@ -314,6 +315,9 @@ const renderSelfHostedCloudPanel = ({
                 )}
             />
             <p className="text-xs text-muted-foreground">{t.cloudHint}</p>
+            {getCleartextSyncDestination('cloud', cloudUrl) && (
+                <p className="text-xs text-warning">{t.cleartextSyncWarningCloud}</p>
+            )}
             {cloudUrlError && (
                 <p className="text-xs text-destructive">{t.invalidUrlHttp}</p>
             )}
@@ -441,6 +445,9 @@ const renderWebDavPanel = ({
                 )}
             />
             <p className="text-xs text-muted-foreground">{t.webdavHint}</p>
+            {getCleartextSyncDestination('webdav', webdavUrl) && (
+                <p className="text-xs text-warning">{t.cleartextSyncWarningWebdav}</p>
+            )}
             {webdavUrlError && (
                 <p className="text-xs text-destructive">{t.invalidUrlHttp}</p>
             )}
@@ -571,11 +578,14 @@ export function SyncConfigurationSection({
     const language = useDocumentationLanguage();
     const isSelfHostedSelected = syncBackend === 'cloud' && cloudProvider === 'selfhosted';
     const isDropboxSelected = syncBackend === 'cloud' && cloudProvider === 'dropbox';
+
+
+    const cloudKitOffered = isMacOS && getActiveWorkspaceId() === DEFAULT_WORKSPACE_ID;
     const backendGroups: BackendButtonGroup[] = [
         {
             title: t.syncBackendGroupCloud,
             description: t.syncBackendGroupCloudDesc,
-            options: ['dropbox', ...(isMacOS ? (['cloudkit'] as const) : [])],
+            options: ['dropbox', ...(cloudKitOffered ? (['cloudkit'] as const) : [])],
         },
         {
             title: t.syncBackendGroupFile,
@@ -782,6 +792,10 @@ export function SyncConfigurationSection({
 
                 {syncBackend === 'cloudkit' && (
                     <p className="text-sm text-muted-foreground">{t.cloudkitDesc}</p>
+                )}
+
+                {isMacOS && !cloudKitOffered && (
+                    <p className="text-xs text-muted-foreground">{t.workspacesICloudDefaultOnly}</p>
                 )}
 
                 {isDropboxSelected && renderDropboxPanel({

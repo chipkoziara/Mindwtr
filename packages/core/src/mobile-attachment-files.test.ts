@@ -159,6 +159,54 @@ describe('mobile attachment files: storage home and safe writes', () => {
     await expect(files.persistAttachmentLocallyDetailed(result.attachment)).resolves.toMatchObject({ status: 'already-local' });
   });
 
+
+  it('keeps the picked file name out of every copy-fallback log line', async () => {
+    const source = 'file:///storage/emulated/0/Download/Secret%20Plan%20Q3.pdf';
+    const decoded = '/storage/emulated/0/Download/Secret Plan Q3.pdf';
+    const run = async (arrange: (memory: ReturnType<typeof createMemoryFileSystem>) => void) => {
+      const { files, memory, lines } = setup();
+      memory.put(source, bytes(7, 8));
+      arrange(memory);
+      const result = await files.persistAttachmentLocallyDetailed(attachment({ uri: source, localStatus: undefined }));
+      expect(result.status).toBe('copied');
+      expect(memory.read(`${MANAGED}att-1.txt`)).toEqual(bytes(7, 8));
+      return lines;
+    };
+
+    const tempCopyFailed = await run((memory) => {
+      memory.fail('copy', new Error(`Unable to copy '${source}': java.io.FileNotFoundException: ${decoded} (Permission denied)`));
+    });
+    const directCopyFailed = await run((memory) => {
+      memory.fail('move', new Error(`Unable to move ${CACHE}x to ${MANAGED}att-1.txt`));
+      memory.fail('copy', new Error(`open failed: EACCES ${decoded} (Permission denied)`), `${source} -> ${MANAGED}att-1.txt`);
+    });
+
+    for (const lines of [tempCopyFailed, directCopyFailed]) {
+      expect(lines.some((line) => line.message.includes('falling back to byte write'))).toBe(true);
+      const logged = JSON.stringify(lines);
+      expect(logged).not.toContain('Secret');
+      expect(logged).not.toContain('Download');
+      expect(logged).not.toContain('emulated');
+    }
+    expect(tempCopyFailed.find((line) => line.message === 'Attachment byte fallback copied file')?.extra)
+      .toEqual({ sourceUri: 'file:external.pdf', targetUri: 'file:managed.txt' });
+  });
+
+
+  it('drops the whole unknown path from a provider copy error', async () => {
+    const source = 'content://com.android.providers.downloads.documents/document/42';
+    const { files, memory, lines } = setup();
+    memory.put(source, bytes(7, 8));
+    memory.fail('copy', new Error("Unable to copy '/storage/emulated/0/Download/Secret Plan Q3.pdf': open failed: EACCES (Permission denied)"));
+    const result = await files.persistAttachmentLocallyDetailed(attachment({ uri: source, localStatus: undefined }));
+    expect(result.status).toBe('copied');
+    const logged = JSON.stringify(lines);
+    expect(logged).toContain('falling back to byte write');
+    expect(logged).not.toContain('Plan');
+    expect(logged).not.toContain('Q3');
+    expect(logged).toContain("Unable to copy [path] (EACCES)");
+  });
+
   it('refuses to persist or delete anything in sandbox mode', async () => {
     const { files, memory } = setup({ sandbox: true });
     memory.put(`${MANAGED}att-1.txt`, bytes(1));
@@ -201,7 +249,7 @@ describe('mobile attachment files: an owned file is never deleted', () => {
     let restored = false;
     const { files, memory } = setup({ fs: (fs) => ({
       ...fs,
-      // An attachment is restored while the directory setup is awaited.
+
       makeDirectory: async (dir: string) => { await fs.makeDirectory(dir); restored = true; },
     }) });
     memory.put(`${MANAGED}att-1.txt`, bytes(1));
@@ -277,6 +325,19 @@ describe('mobile attachment files: upload refusals and download backoff', () => 
     expect(files.shouldAttemptAttachmentUpload(replacement)).toBe(true);
   });
 
+  it('keeps backed-off missing rows idle and configuration changes unblock every row', async () => {
+    const { files } = setup();
+    const remote = attachment({ uri: '', cloudKey: 'attachments/att-1.txt', localStatus: 'missing' });
+    files.setWebdavDownloadBackoff('att-1', { status: 404 });
+    files.setWebdavDownloadBackoff('att-2', { status: 404 });
+    expect(await files.hasPendingAttachmentSyncWork(documentWith([remote]))).toBe(false);
+    expect(await files.hasPendingAttachmentSyncWork(documentWith([{ ...remote, localStatus: 'downloading' }]))).toBe(true);
+    files.clearWebdavDownloadBackoffs();
+    expect(files.getWebdavDownloadBackoff('att-1')).toBeNull();
+    expect(files.getWebdavDownloadBackoff('att-2')).toBeNull();
+    expect(await files.hasPendingAttachmentSyncWork(documentWith([remote]))).toBe(true);
+  });
+
   it('backs a missing remote file off for 15 minutes', () => {
     const { files } = setup();
     const start = Date.now();
@@ -286,6 +347,17 @@ describe('mobile attachment files: upload refusals and download backoff', () => 
     expect(files.getWebdavDownloadBackoff('att-1')).toBeGreaterThanOrEqual(start + 15 * 60_000);
     files.clearWebdavDownloadBackoff('att-1');
     expect(files.getWebdavDownloadBackoff('att-1')).toBeNull();
+  });
+
+  it('drops every download backoff at once, for a switch to another sync location', () => {
+    const { files } = setup();
+    files.setWebdavDownloadBackoff('att-1', { status: 404 });
+    files.setWebdavDownloadBackoff('att-2', { status: 500 });
+
+    files.clearWebdavDownloadBackoffs();
+
+    expect(files.getWebdavDownloadBackoff('att-1')).toBeNull();
+    expect(files.getWebdavDownloadBackoff('att-2')).toBeNull();
   });
 });
 
@@ -356,6 +428,35 @@ describe('mobile attachment files: File Sync folders', () => {
     });
     expect(saf.makeDirectory).not.toHaveBeenCalled();
   });
+
+
+  it('finds a SAF attachments folder and its files by display name when document IDs are opaque', async () => {
+    const root = 'content://op/tree/root/document/root';
+    const saf = {
+      readDirectory: vi.fn(async (uri: string) => (uri === root || uri === 'content://op/tree/root'
+        ? ['content://op/tree/root/document/7', 'content://op/tree/root/document/9']
+        : ['content://op/tree/root/document/12'])),
+      listChildren: vi.fn(async (uri: string) => (uri === root || uri === 'content://op/tree/root'
+        ? [{ uri: 'content://op/tree/root/document/7', name: 'data.json' }, { uri: 'content://op/tree/root/document/9', name: 'attachments' }]
+        : [{ uri: 'content://op/tree/root/document/12', name: 'att-1.txt', size: 3 }])),
+      makeDirectory: vi.fn(async () => 'content://created'),
+    };
+    const { files } = setup({ saf });
+
+    await expect(files.resolveFileSyncDir('content://op/tree/root/document/7')).resolves.toMatchObject({
+      type: 'saf',
+      attachmentsDirUri: 'content://op/tree/root/document/9',
+    });
+    expect(saf.makeDirectory).not.toHaveBeenCalled();
+    const inventory = await files.inspectSafDirectoryEntriesByName('content://op/tree/root/document/9');
+    expect(inventory).toEqual({
+      status: 'available',
+      entries: new Map([['att-1.txt', 'content://op/tree/root/document/12']]),
+
+      sizes: new Map([['att-1.txt', 3]]),
+      directories: new Set(),
+    });
+  });
 });
 
 describe('mobile attachment files: pending work and the presence stamp (#1119)', () => {
@@ -369,6 +470,17 @@ describe('mobile attachment files: pending work and the presence stamp (#1119)',
       attachments: { pendingRemoteDeletes: [{ cloudKey: 'attachments/old.txt', attempts: 0 }] },
     }))).resolves.toBe(true);
     await expect(files.hasPendingAttachmentSyncWork(documentWith([attachment()]))).resolves.toBe(true);
+  });
+
+  it('leaves a file that answered not-found out of the pending work while its backoff holds', async () => {
+
+    const { files } = setup();
+    const missing = documentWith([attachment({ uri: '', cloudKey: 'attachments/att-1.txt', localStatus: 'missing' })]);
+    await expect(files.hasPendingAttachmentSyncWork(missing)).resolves.toBe(true);
+
+    files.setWebdavDownloadBackoff('att-1', { status: 404 });
+
+    await expect(files.hasPendingAttachmentSyncWork(missing)).resolves.toBe(false);
   });
 
   it('runs the presence proof once a day per sync location', async () => {

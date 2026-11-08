@@ -6,8 +6,7 @@ import {
     showPersistentCaptureNotification,
 } from '@/modules/notification-open-intents';
 
-// Device-local preference (P14): a notification pinned to this device's status
-// bar is per-device UX state and must not enter the synced settings document.
+
 const STORAGE_KEY = 'mindwtr:persistentCaptureNotification';
 
 export type PersistentCaptureStrings = {
@@ -38,7 +37,7 @@ export async function writePersistentCaptureEnabled(enabled: boolean): Promise<v
             await AsyncStorage.removeItem(STORAGE_KEY);
         }
     } catch {
-        // storage unavailable — the toggle simply won't persist across restarts
+
     }
 }
 
@@ -52,8 +51,16 @@ async function hasNotificationPermission(): Promise<boolean> {
     }
 }
 
-/** Post or remove the notification to match `enabled`. */
+
+let switchGeneration = 0;
+
+
 export function applyPersistentCaptureNotification(enabled: boolean, strings: PersistentCaptureStrings): void {
+    switchGeneration += 1;
+    showOrHide(enabled, strings);
+}
+
+function showOrHide(enabled: boolean, strings: PersistentCaptureStrings): void {
     if (!isPersistentCaptureSupported()) return;
     if (enabled) {
         showPersistentCaptureNotification(strings.title, strings.text, strings.channelName);
@@ -62,29 +69,30 @@ export function applyPersistentCaptureNotification(enabled: boolean, strings: Pe
     }
 }
 
-/**
- * Re-post the notification on app start when the preference is on — Android
- * drops notifications on reboot and there is deliberately no boot receiver in
- * v1, so the app re-arms it the next time it runs. Permission is only checked
- * here, never requested; prompting belongs to the settings toggle.
- */
+
 export async function restorePersistentCaptureNotificationOnStartup(strings: PersistentCaptureStrings): Promise<void> {
     if (!isPersistentCaptureSupported()) return;
-    const enabled = await readPersistentCaptureEnabled();
-    if (!enabled) return;
+    const generation = switchGeneration;
+    let stored: string | null;
+    try {
+        stored = await AsyncStorage.getItem(STORAGE_KEY);
+    } catch {
+        return;
+    }
+
+    if (generation !== switchGeneration) return;
+    if (stored !== 'true') {
+
+
+        showOrHide(false, strings);
+        return;
+    }
     if (!(await hasNotificationPermission())) return;
-    applyPersistentCaptureNotification(true, strings);
+    if (generation !== switchGeneration) return;
+    showOrHide(true, strings);
 }
 
-/**
- * Keep the pinned notification alive for the app's lifetime: restore it now
- * and again on every return to the foreground. OEMs remove an app's status-bar
- * notifications when they kill its process (swipe-away "close", battery
- * managers), and that removal does not fire the dismiss re-post intent — so the
- * next app open must re-assert the handle (#819). Posting with the same id is
- * an in-place update on a silent channel, so an already-pinned notification
- * does not flicker or re-alert. Returns an unsubscribe.
- */
+
 export function keepPersistentCaptureNotificationArmed(getStrings: () => PersistentCaptureStrings): () => void {
     if (!isPersistentCaptureSupported()) return () => {};
     void restorePersistentCaptureNotificationOnStartup(getStrings());

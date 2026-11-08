@@ -34,7 +34,7 @@ export const hashString = async (value: string): Promise<string> => {
             const crypto = await importNodeCrypto();
             return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
         } catch {
-            // Fall through to legacy fallback if node:crypto is unavailable.
+
         }
     }
 
@@ -42,7 +42,7 @@ export const hashString = async (value: string): Promise<string> => {
 };
 
 export const fallbackHashString = (value: string): string => {
-    // Legacy fallback for runtimes without Web Crypto or node:crypto.
+
     let hash = 0;
     for (let i = 0; i < value.length; i += 1) {
         hash = Math.imul(31, hash) + value.charCodeAt(i);
@@ -51,12 +51,25 @@ export const fallbackHashString = (value: string): string => {
     return (hash >>> 0).toString(16);
 };
 
-export const yieldToRenderer = async (): Promise<void> => {
+
+const RENDERER_YIELD_TIMEOUT_MS = 100;
+
+export const yieldToRenderer = async (): Promise<'frame' | 'timer'> => {
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-        return;
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (by: 'frame' | 'timer') => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(by);
+            };
+            const timer = setTimeout(() => finish('timer'), RENDERER_YIELD_TIMEOUT_MS);
+            window.requestAnimationFrame(() => finish('frame'));
+        });
     }
     await sleep(0);
+    return 'timer';
 };
 
 export const createCooperativeYield = (every = 8) => {
@@ -94,37 +107,66 @@ export const stripFileScheme = (uri: string): string => {
 
 const normalizeAttachmentFsPath = (path: string): string => normalizeAttachmentPathForUrl(path.trim());
 
-const isPathWithin = (dir: string, path: string): boolean => {
-    const root = normalizeAttachmentFsPath(dir).replace(/\/+$/, '');
+const isPathWithin = (dir: string, path: string, ignoreCase = false): boolean => {
+    let root = normalizeAttachmentFsPath(dir).replace(/\/+$/, '');
+    if (ignoreCase) {
+        root = root.toLowerCase();
+        path = path.toLowerCase();
+    }
     return Boolean(root) && (path === root || path.startsWith(`${root}/`));
 };
 
-/**
- * SEC-07: which local paths this device may read bytes from for sync. An attachment `uri`
- * travels inside the synced document and an absolute path there survives the merge
- * sanitizer, so without this a hostile sync document makes the next cycle upload an
- * arbitrary local file to the remote. Every file attachment desktop creates is written
- * under the managed data dir (imports, dropped files, pasted images, audio captures);
- * files the user merely points at are `kind: 'link'` and never reach the transfer loop.
- */
+
+const isCaseInsensitiveDataDir = (osDataDir: string): boolean =>
+    /^([A-Za-z]:\/|\/\/)/.test(osDataDir) || osDataDir.includes('/Library/Application Support');
+
+
+const ATTACHMENT_SOURCE_DIR_NAMES = [ATTACHMENTS_DIR_NAME, 'audio-captures', 'quick-add-images'];
+
+
+const LEGACY_SHARED_DOWNLOAD_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[A-Za-z0-9]{1,16})?$/i;
+
+
 export const createManagedAttachmentSourcePredicate = async (): Promise<(localPath: string) => boolean> => {
     const { dataDir } = await import('@tauri-apps/api/path');
     const { getManagedDataDir } = await import('./managed-paths');
-    const roots = await Promise.all([dataDir(), getManagedDataDir()]);
+    const { logWarn } = await import('./app-log');
+    const [osDataDir, managedDataDir] = await Promise.all([dataDir(), getManagedDataDir()]);
+    const trimRoot = (dir: string) => normalizeAttachmentFsPath(dir).replace(/\/+$/, '');
+    const osProfile = trimRoot(osDataDir) ? `${trimRoot(osDataDir)}/mindwtr` : '';
+    const profileRoots = [trimRoot(managedDataDir), osProfile, osProfile && `${osProfile}/data`]
+        .filter(Boolean);
+    const allowedDirs = profileRoots.flatMap((root) => ATTACHMENT_SOURCE_DIR_NAMES.map((name) => `${root}/${name}`));
+
+
+    const legacySharedDir = trimRoot(osDataDir) ? `${trimRoot(osDataDir)}/${ATTACHMENTS_DIR_NAME}` : '';
+    const ignoreCase = isCaseInsensitiveDataDir(trimRoot(osDataDir));
+    const isLegacySharedDownload = (path: string): boolean => {
+        if (!legacySharedDir || !isPathWithin(legacySharedDir, path, ignoreCase)) return false;
+        const rest = path.slice(legacySharedDir.length + 1);
+        return LEGACY_SHARED_DOWNLOAD_NAME.test(rest);
+    };
+    let refusalLogged = false;
     return (localPath: string): boolean => {
         const normalized = normalizeAttachmentFsPath(stripFileScheme(localPath));
-        return roots.some((root) => isPathWithin(root, normalized));
+        const reason = normalized.split('/').some((segment) => segment === '.' || segment === '..')
+            ? 'dot-segment'
+            : allowedDirs.some((dir) => isPathWithin(dir, normalized, ignoreCase)) || isLegacySharedDownload(normalized)
+                ? null
+                : 'outside-attachment-folders';
+        if (!reason) return true;
+        if (!refusalLogged) {
+            refusalLogged = true;
+            void logWarn('Attachment upload refused for a path outside the attachment folders', {
+                scope: 'sync',
+                extra: { releaseCheck: 'v1.3.5/attachment-source-guard', reason },
+            });
+        }
+        return false;
     };
 };
 
-/**
- * Every attachment sync backend needs the same two local-file primitives:
- * read a path that may be relative to Tauri's app-data dir (Windows paths
- * carried the raw drive letter before {@link stripFileScheme} normalized
- * them) or an absolute path elsewhere on disk. This factory is the single
- * home for that logic — previously duplicated verbatim across all five
- * backends in `sync-attachment-backends.ts`.
- */
+
 export const createLocalAttachmentFs = (
     logSyncWarning: (message: string, error?: unknown) => void,
     deps: {
@@ -132,11 +174,11 @@ export const createLocalAttachmentFs = (
         dataBaseDir: any;
         exists: (path: string, options?: { baseDir: any }) => Promise<boolean>;
         readFile: (path: string, options?: { baseDir: any }) => Promise<Uint8Array>;
-        /** Current managed attachments dir, used to recover from stale absolute
-         *  paths left behind by a relocated portable profile (#1038). */
+
+
         managedAttachmentsDir?: string;
-        /** Optional: enables `statLocalFile` for check-on-touch content-change
-         *  detection (#1057). Omitted by callers that don't need it. */
+
+
         stat?: (path: string, options?: { baseDir: any }) => Promise<{ mtime: Date | null; size: number }>;
     },
     warningMessage = 'Failed to check attachment file',
@@ -154,12 +196,7 @@ export const createLocalAttachmentFs = (
     );
     const toRelative = (path: string): string => path.slice(baseDataDir.length).replace(/^[\\/]/, '');
 
-    // Paths that no longer resolve where they were recorded, most specific first:
-    // #1245 re-homing (an installed profile's folders moved down into `data/`),
-    // then the #1038 rule (a portable profile travelled, the file moved along
-    // inside attachments/ under its id name). Only consulted after the recorded
-    // path fails — read, stat and presence must agree, because an attachment that
-    // presence calls "present" while stat cannot reach it blocks every remote write.
+
     const managedFallbackPaths = (path: string, attachment: Pick<Attachment, 'id'>): string[] => {
         if (!deps.managedAttachmentsDir) return [];
         const normalized = normalizeAttachmentFsPath(path);
@@ -190,7 +227,7 @@ export const createLocalAttachmentFs = (
                 try {
                     return await deps.readFile(fallback);
                 } catch {
-                    // Try the next candidate; the recorded-path error is the one to report.
+
                 }
             }
             throw error;
@@ -223,7 +260,7 @@ export const createLocalAttachmentFs = (
         return sawError ? 'unreadable' : 'confirmed-not-found';
     };
 
-    // Compatibility for callers that do not make sync decisions from absence.
+
     const localFileExists = async (
         path: string,
         attachment: Pick<Attachment, 'id'>,
@@ -249,7 +286,7 @@ export const createLocalAttachmentFs = (
                     try {
                         return toStat(await deps.stat(fallback));
                     } catch {
-                        // Try the next candidate; the recorded-path error is the one to report.
+
                     }
                 }
                 throw error;
@@ -294,7 +331,7 @@ export const writeAttachmentFileSafely = async (
         try {
             await options.remove(tempPath, { baseDir: options.baseDir });
         } catch {
-            // Ignore cleanup errors for temp file.
+
         }
     }
 };
@@ -317,14 +354,12 @@ export const writeFileSafelyAbsolute = async (
         try {
             await options.remove(tempPath);
         } catch {
-            // Ignore cleanup errors for temp file.
+
         }
     }
 };
 
-// A cloudKey arrives over sync, so it is attacker-controlled input to a filesystem
-// write/delete. Both callers treat a rejection as a failed transfer, never a completed
-// one, so throwing is safe here and silently clamping the path would not be.
+
 export const resolveFileBackendPath = async (
     join: (...paths: string[]) => Promise<string>,
     baseDir: string,

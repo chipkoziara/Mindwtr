@@ -34,7 +34,7 @@ describe('buildQuickAddPreviewEntries', () => {
         });
         const byKind = Object.fromEntries(entries.map((entry) => [entry.kind, entry.value]));
 
-        // The resolved date, formatted — not the words the user typed.
+
         expect(byKind.due).not.toContain('tomorrow');
         expect(byKind.due).toContain('2026');
         expect(byKind.context).toBe('@errands');
@@ -46,7 +46,7 @@ describe('buildQuickAddPreviewEntries', () => {
     it('shows the priority and energy levels as their own chips', () => {
         const input = 'call mom /priority:urgent /energy:low';
         const parsed = parseQuickAdd(input, [], now);
-        // The identity `t` above falls back, so translate here to prove the keys.
+
         const translations: Record<string, string> = {
             'priority.urgent': 'Urgent',
             'energyLevel.low': 'Low energy',
@@ -61,6 +61,16 @@ describe('buildQuickAddPreviewEntries', () => {
         expect(byKind.priority).toBe('Urgent');
         expect(byKind.energy).toBe('Low energy');
         expect(entries.find((entry) => entry.kind === 'priority')?.label).toBe('Priority');
+    });
+
+    it('formats custom estimates with the existing localized duration labels (#1358)', () => {
+        const parsed = parseQuickAdd('Write report /estimate:1h30m');
+        const translations: Record<string, string> = {
+            'taskEdit.timeEstimateLabel': 'Estimate',
+            'units.hoursMinutesShort': '{{hours}}h {{minutes}}m',
+        };
+        expect(buildQuickAddPreviewEntries(parsed, { t: (key) => translations[key] ?? key }))
+            .toContainEqual({ id: 'estimate', kind: 'estimate', label: 'Estimate', value: '1h 30m', tone: 'default' });
     });
 
     it('flags every invalid date command as a warning chip', () => {

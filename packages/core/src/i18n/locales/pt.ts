@@ -1,5 +1,33 @@
-// Split from i18n-translations.ts to make community translation contributions easier.
+
 export const ptOverrides: Record<string, string> = {
+    "taskEdit.startAdvanceReminderLabel": "Antes do início",
+    "settings.speechUseGemini": "Usar Gemini",
+    "settings.speechNativeUnsupported": "Este provedor de voz ainda não é compatível aqui. Selecione Gemini, OpenAI ou Whisper para usar a captura de voz.",
+    "settings.speechGeminiDisclosure": "As gravações são enviadas diretamente ao Gemini para transcrição. O Mindwtr não as coleta.",
+    "settings.speechGeminiCredentialShared": "Esta chave de API do Gemini também é usada pela IA de texto do Gemini neste dispositivo.",
+    "quickAdd.audioStopAndSave": "Parar e salvar",
+    "quickAdd.audioTooLarge": "A gravação é muito grande. Tente uma gravação mais curta.",
+    "quickAdd.audioNoSpeech": "Nenhuma fala foi detectada na gravação.",
+    "quickAdd.audioNotRetained": "A retenção de áudio está desativada. A transcrição não será retomada após reiniciar o aplicativo.",
+    "quickAdd.audioSingleTaskOnly": "Uma gravação pode ser salva em uma única tarefa. Remova as linhas de tarefas extras.",
+    "settings.aiConfigureTextAssistant": "Configurar assistente de texto",
+    "settings.aiCredentialPresent": "Chave de API disponível",
+    "settings.aiCredentialMissing": "Nenhuma chave de API salva",
+    "settings.aiConsentRecordFailed": "Seu consentimento foi aceito, mas não pôde ser salvo neste dispositivo. Ele poderá ser solicitado novamente.",
+    "settings.aiConfigurationSaved": "Configurações de IA salvas",
+    "settings.aiCredentialSaved": "Chave de API salva",
+    "settings.aiCredentialCleared": "Chave de API removida",
+    "attachments.webUploadRequiresCloud": "Os envios pelo navegador exigem sincronização com uma nuvem auto-hospedada.",
+    "attachments.webUploadEncrypted": "Os envios pelo navegador exigem que a criptografia de sincronização esteja desativada.",
+    "attachments.webUploadOffline": "Não é possível enviar arquivos offline.",
+    "attachments.webUploadChanged": "O rascunho ou a configuração de sincronização mudou. Selecione o arquivo novamente.",
+    "attachments.webUploadFailed": "O anexo não foi salvo.",
+    "attachments.webUploadRetry": "Tente salvar novamente ou remova o arquivo para continuar.",
+    "attachments.webProjectUploadUnsupported": "O envio para projetos não está disponível no navegador. Adicione o arquivo a uma tarefa.",
+    'contexts.new': 'Novo contexto',
+    'tags.new': 'Nova etiqueta',
+    'settings.cleartextSyncDismiss': 'Dispensar para este destino de sincronização',
+    "projects.convertBlocked.destination-section-sequence": "Escolha um projeto de destino definido como Sequencial → Dentro das seções. A nova seção mantém a sequência das tarefas; as outras seções continuam de forma independente.",
     'timeline.moveTaskDates': "Mover datas da tarefa",
     'timeline.moveProjectDates': "Mover datas do projeto",
     'timeline.resizeStart': "Ajustar data de início",
@@ -9,7 +37,17 @@ export const ptOverrides: Record<string, string> = {
     'timeline.dateEditFailed': "Não foi possível atualizar as datas. Verifique o intervalo e tente novamente.",
     'timeline.dateUndoConflict': "As datas mudaram desde esta edição. A alteração não foi desfeita.",
     'timeline.dateUndoFailed': "Não foi possível desfazer as alterações de datas. Tente novamente.",
+    "timeline.reorderTask": "Reordenar tarefa",
+    "timeline.reorderProject": "Reordenar projeto",
+    "timeline.reorderConflict": "A ordem mudou em outro lugar. Tente novamente.",
+    "timeline.reorderFailed": "Não foi possível salvar a nova ordem. Tente novamente.",
+    "timeline.reorderInstructions": "Pressione Espaço para selecionar uma linha, Cima ou Baixo para movê-la no grupo, Espaço para soltá-la ou Escape para cancelar.",
+    "task.addToChecklist": "Adicionar à lista de verificação…",
+    "task.addedToChecklist": "Adicionado à lista de verificação",
     'task.doneTagOutcomeUnknown': "Não foi possível confirmar a alteração das etiquetas. Reinicie o Mindwtr para recarregar os dados salvos.",
+    "task.copyTaskLink": "Copiar link do Mindwtr",
+    "task.copyTaskId": "Copiar ID da tarefa",
+    "task.linkNotFound": "Esta tarefa não está nesta biblioteca. Pode ter sido excluída ou ainda não ter sido sincronizada com este dispositivo.",
     'task.doneCompletedAtOutcomeUnknown': "Não foi possível confirmar a alteração da data de conclusão. Reinicie o Mindwtr para recarregar os dados salvos.",
     'task.destinationOutcomeUnknown': "Não foi possível confirmar a alteração do destino. Reinicie o Mindwtr para recarregar os dados salvos.",
     'task.projectNextActionOutcomeUnknown': "Não foi possível confirmar a próxima ação. Reinicie o Mindwtr para recarregar os dados salvos.",
@@ -54,6 +92,28 @@ export const ptOverrides: Record<string, string> = {
     'sandbox.confirmTitle': "Entrar no ambiente de teste?",
     'sandbox.confirmDescription': "Use tarefas e projetos fictícios para gravar um erro ou fazer uma demonstração. Seus dados pessoais permanecem separados. As alterações no ambiente de teste são descartadas ao sair.",
     'sandbox.enter': "Entrar no ambiente de teste",
+    'workspaces.title': "Espaços de trabalho",
+    'workspaces.description': "Mantenha tarefas, anexos, servidores de sincronização e configurações separados neste computador. Só um espaço de trabalho fica aberto por vez, e só ele sincroniza e envia lembretes.",
+    'workspaces.defaultName': "Padrão",
+    'workspaces.open': "Aberto",
+    'workspaces.add': "Adicionar espaço de trabalho",
+    'workspaces.namePlaceholder': "Nome do espaço de trabalho",
+    'workspaces.switch': "Trocar",
+    'workspaces.switchTitle': "Trocar de espaço de trabalho?",
+    'workspaces.switchDesc': "O Mindwtr reinicia para abrir {{name}}.",
+    'workspaces.switchNow': "Trocar agora",
+    'workspaces.createdTitle': "Espaço de trabalho adicionado",
+    'workspaces.later': "Mais tarde",
+    'workspaces.saveFailed': "Não foi possível salvar suas alterações, então o espaço de trabalho não foi trocado. Tente novamente.",
+    'workspaces.failed': "Não foi possível alterar o espaço de trabalho.",
+    'workspaces.deleteTitle': "Excluir {{name}}?",
+    'workspaces.deleteDesc': "Isto remove deste computador as tarefas locais, os anexos e as configurações deste espaço de trabalho. Nada muda no servidor de sincronização dele.",
+    'workspaces.dataFolder': "Pasta de dados",
+    'workspaces.cliHint': "O servidor MCP e a linha de comando abrem o espaço de trabalho padrão. Para outro espaço de trabalho, informe o arquivo mindwtr.db dele com --db.",
+    'workspaces.unavailable': "Os espaços de trabalho ficam indisponíveis até o Mindwtr terminar de mover a pasta do perfil. Reinicie o Mindwtr e tente novamente.",
+    'workspaces.unreadable': "Não foi possível ler a lista de espaços de trabalho, então o espaço de trabalho padrão foi aberto. Verifique o arquivo workspaces.toml na pasta de configuração do Mindwtr.",
+    'workspaces.iCloudDefaultOnly': "A sincronização com o iCloud só está disponível no espaço de trabalho padrão.",
+    'workspaces.switcherLabel': "Espaço de trabalho",
     'sandbox.title': "Ambiente de teste · Dados de exemplo",
     'sandbox.exit': "Sair do ambiente de teste",
     'sandbox.reset': "Redefinir dados de exemplo",
@@ -63,6 +123,10 @@ export const ptOverrides: Record<string, string> = {
     'sandbox.switching': "Trocando de espaço de trabalho…",
     'sandbox.switchFailed': "Não foi possível trocar de espaço de trabalho. O espaço atual não foi alterado.",
         'settings.feedbackGitHubDesc': "Se tiver uma conta no GitHub, para facilitar o acompanhamento recomendamos: {channel}.",
+        "settings.feedbackNoEmailTitle": "Enviar sem acompanhamento?",
+        "settings.feedbackNoEmailDesc": "O Mindwtr prioriza o armazenamento local e não tem um e-mail de conta para entrar em contato com você. Sem um e-mail de resposta, não podemos responder nem acompanhar seu feedback. Deseja adicionar um e-mail ou enviar sem acompanhamento?",
+        "settings.feedbackAddEmail": "Adicionar e-mail",
+        "settings.feedbackSendWithoutEmail": "Enviar sem acompanhamento",
         'settings.feedbackOpenGitHubDiscussion': "Abrir discussão no GitHub",
         'settings.aiAdvanced': "Avançado",
         'settings.aiRequestTimeout': "Tempo limite da solicitação",
@@ -77,7 +141,7 @@ export const ptOverrides: Record<string, string> = {
         'settings.automationCaptureLoadFailed': 'Não foi possível carregar as configurações de captura automatizada.',
         'settings.automationCaptureUpdateFailed': 'Não foi possível atualizar as configurações de captura automatizada.',
         'taskEdit.quickAddTokenHint': 'Adição rápida: {{token}}',
-        // App
+
         'app.name': 'Mindwtr',
         'donationPrompt.title': "Mantenha o Mindwtr gratuito e independente",
         'donationPrompt.body': "O Mindwtr não tem anúncios, rastreamento nem paywalls. Ele é criado por uma pessoa e apoiado por quem o considera útil. Se ele ajuda você a manter a clareza, uma pequena doação ajuda a continuar melhorando.",
@@ -90,7 +154,7 @@ export const ptOverrides: Record<string, string> = {
         'markdown.openLinkFailed': "Não foi possível abrir este link. Verifique se o aplicativo correspondente está instalado. Você pode copiar o link e abri-lo nele.",
         'markdown.copyLinkFailed': "Não foi possível copiar este link.",
 
-        // Navigation
+
         'nav.main': 'Principal',
         'nav.inbox': 'Caixa de entrada',
         'nav.board': 'Visualização do quadro',
@@ -113,11 +177,12 @@ export const ptOverrides: Record<string, string> = {
         'nav.sectionOrganize': 'Organizar',
         'nav.sectionArchive': 'Arquivo',
 
-        // Quick Add
-        'quickAdd.help': 'A adição rápida suporta /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> ou !Area, @context, #tag, +Project, %Person (ou %"Full Name").',
+
+        'quickAdd.help': 'A adição rápida suporta /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> ou !Area, @context, #tag, +Project, %Person (ou %"Full Name").',
         'quickAdd.example': 'Exemplo: Ligue para a mãe /due:tomorrow @phone',
         'quickAdd.inlineHint': 'Tente: Ligue para a mãe /due:tomorrow 5pm @phone #family',
         'quickAdd.syntaxHelp': 'Ajuda da sintaxe de adição rápida',
+        'quickAdd.pasteImagesHint': 'Cole imagens ou capturas de tela com {{shortcut}} para anexá-las.',
         'quickAdd.placeholder': 'Adicione uma tarefa… use @context +Project #tag',
         'quickAdd.inputLabel': 'Adição rápida',
         'quickAdd.inputHint': 'Digite uma tarefa e pressione Enter para salvar.',
@@ -128,6 +193,7 @@ export const ptOverrides: Record<string, string> = {
         'quickAdd.audioRecording': 'Gravação...',
         'quickAdd.audioReady': 'Gravação pronta para salvar.',
         'quickAdd.audioQueued': 'Salvo. O áudio será transcrito quando você abrir o Mindwtr.',
+        'quickAdd.textQueued': "Guardado. A tarefa será adicionada quando abrir o Mindwtr.",
         'quickAdd.audioProcessing': 'Processando captura de áudio...',
         'quickAdd.audioSavingSpeechToText': 'Salvando a gravação e aplicando fala para texto.',
         'quickAdd.audioNoteTitle': 'Nota de áudio',
@@ -145,10 +211,10 @@ export const ptOverrides: Record<string, string> = {
         'quickDate.nextMonth': 'Próximo mês',
         'quickDate.noDate': 'Sem data',
 
-        // Checklist
+
         'checklist.progress': 'Progresso da lista de verificação',
 
-        // Keybindings (Desktop)
+
         'keybindings.helpTitle': 'Atalhos de teclado',
         'keybindings.helpSubtitle': 'Pressione Esc para fechar',
         'keybindings.styleLabel': 'Estilo de atalho de teclado',
@@ -192,14 +258,14 @@ export const ptOverrides: Record<string, string> = {
         'keybindings.list.toggleDetails': 'Alternar detalhes da lista',
         'keybindings.list.toggleDensity': 'Alternar densidade',
 
-        // Tabs (Mobile)
+
         'tab.inbox': 'Caixa de entrada',
         'tab.next': 'Foco',
         'tab.board': 'Quadro',
         'tab.calendar': 'Calendário',
         'tab.review': 'Revisão',
 
-        // List Views
+
         'list.inbox': 'Caixa de entrada',
         'list.todo': 'Pendência',
         'list.inProgress': 'Em andamento',
@@ -233,7 +299,7 @@ export const ptOverrides: Record<string, string> = {
         'reference.empty': 'Ainda não há itens de referência.',
         'reference.emptyHint': 'Guarde notas, links e materiais de apoio aqui.',
 
-        // Status Labels
+
         'status.inbox': 'Caixa de entrada',
         'status.todo': 'Pendência',
         'status.next': 'Próximo',
@@ -245,15 +311,22 @@ export const ptOverrides: Record<string, string> = {
         'status.archived': 'Arquivado',
         'status.active': 'Ativo',
 
-        // Priority Labels
+
         'priority.low': 'Baixo',
         'priority.medium': 'Médio',
         'priority.high': 'Alto',
         'priority.urgent': 'Urgente',
 
-        // Task Edit
+
         'taskEdit.editTask': 'Editar tarefa',
         'taskEdit.checklist': 'Lista de verificação',
+        'savedFilters.saveTitle': "Salvar filtro",
+        'savedFilters.namePlaceholder': "Nome do filtro",
+        'taskEdit.dragChecklistItem': "Arrastar para reordenar",
+        'taskEdit.checklistItemActions': "Ações do item da lista",
+        'taskEdit.moveChecklistTop': "Mover para o início",
+        'taskEdit.moveChecklistBottom': "Mover para o fim",
+        'taskEdit.addChecklistBelow': "Adicionar item abaixo",
         'taskEdit.tab.task': 'Tarefa',
         'taskEdit.tab.list': 'Lista',
         'taskEdit.tab.view': 'Visualizar',
@@ -262,6 +335,8 @@ export const ptOverrides: Record<string, string> = {
         'taskEdit.shoppingListPrompt': 'Lista de compras?',
         'taskEdit.openChecklistMode': 'Abrir modo de lista de verificação',
         'taskEdit.addItem': 'Adicionar item',
+        'taskEdit.resetChecklistOnRepeat': "Redefinir a lista na próxima repetição",
+        'taskEdit.resetChecklistOnRepeatHint': "Desative para manter os itens marcados quando a tarefa se repetir.",
         'taskEdit.resetChecklist': 'Redefinir lista de verificação',
         'task.convertToReference': 'Converter em referência',
         'task.createProjectFromTask': 'Criar projeto a partir da tarefa',
@@ -319,6 +394,9 @@ export const ptOverrides: Record<string, string> = {
         'markdown.toolbar.italic': 'Itálico',
         'markdown.toolbar.strikethrough': 'Tachado',
         'markdown.toolbar.bulletList': 'Lista com marcadores',
+        'markdown.toolbar.quote': 'Citação',
+        'markdown.toolbar.orderedList': 'Lista numerada',
+        'markdown.toolbar.taskList': 'Lista de tarefas',
         'markdown.toolbar.horizontalRule': 'Linha horizontal',
         'markdown.toolbar.link': 'Inserir link',
         'markdown.toolbar.code': 'Código em linha',
@@ -417,7 +495,7 @@ export const ptOverrides: Record<string, string> = {
         'task.aria.dueTime': 'Prazo devido',
         'task.aria.location': 'Localização',
 
-        // Recurrence Labels
+
         'recurrence.weekUnit': 'Semanas',
         'recurrence.ordinalSelectLabel': 'Ordem',
         'recurrence.weekdaySelectLabel': 'Dia da semana',
@@ -459,7 +537,7 @@ export const ptOverrides: Record<string, string> = {
         'recurrence.showFutureInCalendar': 'Mostrar próximas ocorrências no Calendário',
         'recurrence.showFutureInCalendarHint': 'Pré-visualização apenas para planejamento; a próxima tarefa será criada somente após a conclusão desta.',
 
-        // Inbox (Mobile)
+
         'inbox.title': 'Caixa de entrada',
         'inbox.processButton': 'Processar Caixa de entrada',
         'inbox.projectHint': 'Algo que exige mais de uma ação? Ao processar, escolha «Sim, faça disso um projeto» para nomear o resultado e a sua primeira próxima ação.',
@@ -504,7 +582,7 @@ export const ptOverrides: Record<string, string> = {
         'inbox.noProject': 'Nenhum projeto',
         'inbox.skip': 'Pular',
 
-        // Next Actions (Mobile)
+
         'next.title': 'Próximas ações',
         'next.ready': 'tarefas prontas para serem executadas',
         'next.current': 'Ações Atuais',
@@ -515,7 +593,7 @@ export const ptOverrides: Record<string, string> = {
         'next.warningCount': 'itens em Próximas Ações',
         'next.warningHint': 'Considere focar em menos projetos. GTD recomenda manter as Próximas Ações em 10 a 15 itens para maior clareza.',
 
-        // Contact / Contexts (Mobile updates)
+
         'contexts.title': 'Contextos',
         'contexts.filter': 'Filtrar tarefas por contexto',
         'filters.label': 'Filtros',
@@ -537,6 +615,13 @@ export const ptOverrides: Record<string, string> = {
         'filters.starred': 'Com estrela',
         'filters.notStarred': 'Sem estrela',
         'filters.datePreset.today': 'Hoje',
+        "filters.taskDates": "Datas das tarefas",
+        "filters.anyTime": "Qualquer data",
+        "filters.datePreset.next_7_days": "Próximos 7 dias",
+        "filters.datePreset.overdue_next_7_days": "Atrasadas + próximos 7 dias",
+        "filters.datePreset.next_14_days": "Próximos 14 dias",
+        "filters.datePreset.next_30_days": "Próximos 30 dias",
+        "filters.datePreset.upcoming": "Todas as próximas",
         'filters.datePreset.this_week': 'Esta semana',
         'filters.datePreset.this_month': 'Este mês',
         'filters.datePreset.overdue': 'Em atraso',
@@ -548,7 +633,7 @@ export const ptOverrides: Record<string, string> = {
         'contexts.noContexts': 'Nenhum contexto encontrado. Adicione contextos como @home, @work, @computer às suas tarefas',
         'contexts.noTasks': 'Nenhuma tarefa ativa para este contexto',
 
-        // Board
+
         'board.title': 'Visualização do quadro',
         'board.next': 'Próximas ações',
         'board.todo': 'Pendência',
@@ -559,7 +644,7 @@ export const ptOverrides: Record<string, string> = {
         'board.dragTask': 'Arrastar tarefa',
         'board.delete': 'Excluir',
 
-        // Calendar
+
         'calendar.title': 'Calendário',
         'calendar.tasksAndEvents': 'Tarefas e eventos',
         'calendar.today': 'Hoje',
@@ -617,8 +702,13 @@ export const ptOverrides: Record<string, string> = {
         'shortcuts.captureUnavailable': 'Atalho de captura indisponível',
         'shortcuts.missingTitle': 'O Mindwtr não conseguiu ler um título de tarefa desse link de atalho.',
 
-        // Projects
+
         'projects.title': 'Projetos',
+        'projects.useAreaColor': "Usar a cor da área",
+        'projects.colorSaveFailed': "Não foi possível salvar a cor.",
+        'projects.sequenceMode': "Modo de fluxo",
+        'projects.perSection': "Por seção",
+        'projects.perSectionTooltip': "Por seção: cada seção é paralela ou sequencial, escolhida no menu da seção.",
         'projects.activeSection': 'Projetos Ativos',
         'projects.noProjects': 'Nenhum projeto ainda.',
         'projects.noProjectsInArea': 'Não há projetos nesta área.',
@@ -660,6 +750,7 @@ export const ptOverrides: Record<string, string> = {
         'projects.moveUp': 'Subir',
         'projects.moveDown': 'Mover para baixo',
         'focus.reorderPosition': '{{title}}. Posição {{position}} de {{count}}',
+        'focus.hiddenByArea': "{{count}} selecionadas em outras áreas",
         'focus.reorderHint': 'Mantenha premido e arraste para reordenar',
         'projects.tagFilter': 'Filtro de tags',
         'projects.allTags': 'Todas as tags',
@@ -747,6 +838,7 @@ export const ptOverrides: Record<string, string> = {
         'review.projectsStepDesc': 'Certifique-se de que cada projeto ativo tenha uma próxima ação.',
         'review.projectsHint': 'Revise cada projeto. Tem pelo menos uma Próxima Ação concreta? Se não, adicione um agora. Marcar projetos concluídos como concluídos.',
         'review.hasNextAction': 'Tem próxima ação',
+    'review.projectDeferred': 'Agendado',
         'review.needsAction': 'Precisa de ação',
         'review.noActiveTasks': 'Nenhuma tarefa ativa',
         'review.somedayStep': 'Algum dia/Talvez',
@@ -776,6 +868,12 @@ export const ptOverrides: Record<string, string> = {
         'review.contexts': 'Contextos',
         'review.markDone': 'Marcar como concluído',
         'review.noTasks': 'Nenhuma tarefa para revisar',
+        'review.scopeDue': 'Revisão pendente',
+        'review.scopeAll': 'Todas as tarefas abertas',
+        'review.dueHelp': 'Lembretes de revisão vencidos. Tarefas sem data de revisão continuam na visão geral.',
+        'review.overviewHelp': 'Navegue pelas tarefas abertas de todo o seu sistema.',
+        'review.dueEmpty': 'Nenhum lembrete de revisão vencido.',
+        'review.overviewEmpty': 'Nenhuma tarefa aberta para revisar.',
         'process.title': 'Item de processo',
         'process.refineTitle': 'Refinar a tarefa',
         'process.refineDesc': 'Esclareça o que é isso antes de decidir o que fazer com isso.',
@@ -838,7 +936,7 @@ export const ptOverrides: Record<string, string> = {
         'process.addAnotherAction': 'Adicionar outra ação',
         'process.removeAction': 'Remover ação',
 
-        // Settings
+
         'settings.title': 'Configurações',
         'settings.subtitle': 'Personalize sua experiência Mindwtr',
         'settings.appearance': 'Aparência',
@@ -852,6 +950,8 @@ export const ptOverrides: Record<string, string> = {
         'settings.theme': 'Tema',
         'settings.eink': 'Tinta eletrônica',
         'settings.nord': 'Norte',
+        'settings.gruvboxLight': 'Gruvbox Light',
+        'settings.gruvboxDark': 'Gruvbox Dark',
         'settings.sepia': 'Sépia',
         'settings.oled': 'OLED/meia-noite',
         'settings.material3Light': 'Material 3 (leve)',
@@ -899,7 +999,7 @@ export const ptOverrides: Record<string, string> = {
         'settings.logClearFailed': 'Não foi possível limpar o arquivo de log.',
         'settings.shareUnavailable': 'O compartilhamento não está disponível neste dispositivo.',
 
-        // Mobile Settings
+
         'settings.useSystem': 'Usar tema do sistema',
         'settings.followDevice': 'Siga as configurações de aparência do dispositivo',
         'settings.darkMode': 'Modo escuro',
@@ -912,6 +1012,11 @@ export const ptOverrides: Record<string, string> = {
         'settings.terms': 'Termos de uso',
         'settings.mobile.appLock': 'Bloqueio do app',
         'settings.mobile.appLockDesc': 'Exija o bloqueio do dispositivo ao abrir o Mindwtr ou voltar ao app. Isso protege a visualização do app, não o banco de dados no dispositivo.',
+        'settings.mobile.appLockRelock': 'Exigir desbloqueio',
+        'settings.mobile.appLockRelockImmediately': 'Imediatamente',
+        'settings.mobile.appLockRelockAfter1': 'Após 1 minuto',
+        'settings.mobile.appLockRelockAfter5': 'Após 5 minutos',
+        'settings.mobile.appLockRelockAfter15': 'Após 15 minutos',
         'appLock.title': 'Mindwtr está bloqueado',
         'appLock.description': 'Use o bloqueio do dispositivo para abrir o Mindwtr. Isso protege a visualização do app, não o banco de dados no dispositivo.',
         'appLock.prompt': 'Desbloquear Mindwtr',
@@ -922,6 +1027,14 @@ export const ptOverrides: Record<string, string> = {
         'appLock.unavailable': 'Configure um código do dispositivo ou biometria para usar o bloqueio do app.',
         'appLock.cancelled': 'Mindwtr continua bloqueado.',
         'appLock.failed': 'Falha na autenticação. Tente novamente.',
+        "settings.desktopAppLockDesc": "Pedir Windows Hello ou Touch ID (ou a senha do Mac) ao abrir o Mindwtr e depois que você se afastar. Isso oculta apenas a janela do app; o widget do macOS, a API local e o servidor MCP ainda podem ler seus dados.",
+        "settings.desktopAppLockUnavailable": "Configure o Windows Hello ou uma senha de login do Mac para usar o bloqueio do app.",
+        "appLock.lockNow": "Bloquear Mindwtr",
+        "appLock.lockedReminder": "Lembrete do Mindwtr",
+        "appLock.turnOff": "Desativar o bloqueio do app",
+        "appLock.osCheckUnavailable": "O Windows Hello ou o Touch ID não está disponível neste dispositivo agora.",
+        "appLock.macUnlockReason": "desbloquear e mostrar suas tarefas",
+        "appLock.macEnableReason": "ativar o bloqueio do app",
         'settings.data': 'Dados',
         'settings.menuDesc.general': 'Aparência, idioma, exibição',
         'settings.menuDesc.gtd': 'Captura, revisão, editor de tarefas',
@@ -990,12 +1103,20 @@ export const ptOverrides: Record<string, string> = {
         'settings.syncMobile.importMindwtrCsvFileIntoMindwtrAreasProjectsAndTasks': 'Importe um arquivo Mindwtr CSV genérico para áreas, projetos, seções e tarefas do Mindwtr.',
         'settings.backupMobile.importMindwtrCsvData': 'Importar dados do Mindwtr CSV?',
         'settings.backupMobile.importedTaskProjectSectionAreaCounts': 'Importados {{taskCount}} tarefa(s), {{projectCount}} projeto(s), {{sectionCount}} seção(ões) e {{areaCount}} área(s).',
+        'settings.backupMobile.undoUnavailableTitle': 'Pode não ser possível desfazer',
+        'settings.backupMobile.undoUnavailableConfirm': 'Esta biblioteca pode ser grande demais para desfazer esta alteração. Ainda assim, um instantâneo de recuperação é salvo antes. Continuar?',
+        'settings.backupMobile.undoUnavailableContinue': 'Continuar',
+        'settings.backupMobile.undoUnavailableResult': 'Não é possível desfazer esta alteração: a biblioteca é grande demais.',
         'settings.backupMobile.theSelectedFileIsNotASupportedMindwtrCsvFile': 'O arquivo selecionado não é um arquivo Mindwtr CSV compatível.',
         'settings.backupMobile.mindwtrCsvAreasWillBeCreated': '{{areaCount}} área(s) serão criadas a partir da coluna Area.',
         'settings.backupMobile.mindwtrCsvSectionsWillBeCreated': '{{sectionCount}} seção(ões) serão criadas a partir da coluna Section.',
         'settings.exportSuccess': 'Dados exportados com sucesso!',
         'settings.notifications': 'Notificações',
         'settings.notificationsDesc': 'Ative lembretes para tarefas com datas de início ou de vencimento.',
+        'settings.appIconBadge': 'Selo no ícone do app',
+        'settings.appIconBadgeHint': 'Conta as tarefas deste dispositivo com vencimento hoje ou em atraso. Atualiza enquanto o Mindwtr está em execução; a contagem pode ficar desatualizada com o app fechado.',
+        'settings.appIconBadgeDenied': 'Permita selos para o Mindwtr nos Ajustes do iOS para ativar esta contagem.',
+        'settings.appIconBadgeError': 'Não foi possível atualizar a configuração do selo no ícone do app. Tente novamente.',
         'settings.notificationsEnable': 'Lembretes de tarefas',
         'settings.notificationsDisabled': 'Notificações desativadas',
         'settings.notificationsDisabledMessage': 'O Mindwtr não poderá agendar lembretes até que o acesso às notificações seja restaurado.',
@@ -1058,6 +1179,7 @@ export const ptOverrides: Record<string, string> = {
         'settings.aiProviderOpenAI': 'OpenAI',
         'settings.aiProviderGemini': 'Gêmeos',
         'settings.aiProviderAnthropic': 'Antrópico (Claude)',
+        'settings.aiEffortMinimalSaved': 'Salvo: Mínimo',
         'settings.aiEffortLow': 'Baixo',
         'settings.aiEffortMedium': 'Médio',
         'settings.aiEffortHigh': 'Alto',
@@ -1080,6 +1202,7 @@ export const ptOverrides: Record<string, string> = {
         'ai.applySuggestion': 'Usar sugestão',
         'ai.addSteps': 'Adicionar etapas',
         'ai.breakdownTitle': 'Etapas sugeridas',
+        'copilot.suggest': 'Sugerir',
         'copilot.suggested': 'Sugerido',
         'copilot.applyHint': 'Toque para aplicar',
         'copilot.applied': 'Aplicado',
@@ -1175,7 +1298,7 @@ export const ptOverrides: Record<string, string> = {
         'digest.reviewDue': 'Revisão vencida',
         'digest.noItems': 'Não há itens urgentes hoje.',
 
-        // Common
+
         'common.tasks': 'tarefas',
         'common.day': 'dia',
         'common.days': 'dias',
@@ -1268,6 +1391,13 @@ export const ptOverrides: Record<string, string> = {
         'agenda.reviewDue': 'Revisão vencida',
         'agenda.reviewDueProjects': 'Projetos para revisar',
         'agenda.upcoming': 'Por vir',
+        'widget.upcomingStarts': 'Começa',
+        'widget.upcomingReturns': 'Retorna',
+        'widget.background': 'Fundo',
+        'widget.backgroundLightText': 'Transparente, texto claro',
+        'widget.backgroundDarkText': 'Transparente, texto escuro',
+        'widget.availableActions': 'Ações disponíveis',
+        'widget.includeAvailableActions': 'Adicionar próximas ações cuja data de início já chegou',
         'agenda.allClear': 'Tudo limpo!',
         'agenda.noTasks': 'Nada em que focar agora. Marque uma tarefa com estrela ou defina um prazo e ela aparecerá aqui.',
         'agenda.emptyStart': 'Ainda não há tarefas. Adicione o que estiver na sua cabeça à Caixa de entrada e organize depois.',
@@ -1300,7 +1430,7 @@ export const ptOverrides: Record<string, string> = {
         'someday.empty': 'Nenhum item algum dia/talvez',
         'someday.emptyHint': 'Use o status "Algum dia" para ideias, metas e projetos que você possa querer realizar no futuro',
 
-        // Search
+
         'search.title': 'Pesquisar',
         'search.placeholder': 'Pesquisar tarefas e projetos...',
         'search.scopeHint': 'Tarefas, projetos, pessoas',
@@ -1496,7 +1626,7 @@ export const ptOverrides: Record<string, string> = {
         'settings.externalCalendarUrlPlaceholder': 'https://example.com/calendar.ics',
         'settings.webdavUrlPlaceholder': 'https://example.com/remote.php/dav/files/<username>/mindwtr',
 
-        // Mind sweep (guided capture)
+
         'mindSweep.launchButton': 'Varredura mental',
         'mindSweep.title': 'Varredura mental',
         'mindSweep.intro': 'Percorra algumas listas de gatilhos e anote tudo o que vier à cabeça. Não filtre nem organize: cada item vai para a caixa de entrada para ser tratado depois.',
@@ -1600,17 +1730,17 @@ export const ptOverrides: Record<string, string> = {
         'starter.projectTitle': 'Primeiros passos',
         'starter.projectNotes': 'Estas tarefas iniciais são opcionais. Exclua este projeto quando o Mindwtr já estiver do seu jeito.',
         'starter.processInbox.title': 'Comece aqui: processe seu primeiro item da caixa de entrada',
-        'starter.processInbox.desc': 'Transforme um pensamento capturado em um passo pequeno e realizável.',
+        "starter.processInbox.desc": "Experimente um projeto chamado Reparos em casa: capture «Verificar a torneira que pinga» e «Comparar cores de tinta» como tarefas da Caixa de entrada atribuídas a ele. Processe apenas o item que você está pronto para fazer e transforme-o em uma próxima ação. As outras ideias ficam na Caixa de entrada ou nas notas do projeto até a sua revisão; não precisam estar em Algum dia/Talvez.",
         'starter.processInbox.check1': 'Abrir a Caixa de entrada',
         'starter.processInbox.check2': 'Tocar em «Processar caixa de entrada»',
         'starter.processInbox.check3': 'Decida o próximo passo de um item de exemplo, ou guarde-o para depois',
         'starter.quickCapture.title': 'Capture uma tarefa em uma linha',
-        'starter.quickCapture.desc': 'Digite um pensamento e adicione os detalhes no próprio texto - sem formulários.',
+        "starter.quickCapture.desc": "Capture «Limpar a cozinha» na Caixa de entrada. No editor, defina a Data de início para o próximo dia em que você quer fazer isso e escolha uma repetição semanal nesse dia da semana. A Data de início mantém a tarefa fora das listas de ações disponíveis do Foco até esse dia, e concluí-la avança para a próxima ocorrência; Por vir ainda pode mostrá-la como prévia. Use a Data de vencimento para um prazo real.",
         'starter.quickCapture.check1': 'Tocar no botão de captura',
         'starter.quickCapture.check2': 'Experimente: Ligar para Alex @phone /due:tomorrow',
         'starter.quickCapture.check3': 'Só dê datas ao que tem prazo de verdade',
         'starter.focus.title': 'Marque com estrela até 3 tarefas para o foco de hoje',
-        'starter.focus.desc': 'Escolha as poucas coisas que você realmente fará hoje.',
+        "starter.focus.desc": "As Próximas ações são opções que você pode executar, não uma promessa de terminar tudo hoje. Marque algumas com uma estrela para Foco de hoje e use Apenas foco para recolher as outras seções; Por vir é uma prévia. Para etapas de um projeto que precisam seguir uma ordem, um projeto sequencial normalmente mostra uma próxima ação por vez. As estrelas e as datas de vencimento ou revisão ainda podem fazer outros itens aparecerem no Foco.",
         'starter.focus.check1': 'Abrir Foco',
         'starter.focus.check2': 'Use a estrela para escolher suas principais tarefas',
         'starter.focus.check3': 'Adie uma tarefa para escondê-la até precisar dela',
@@ -1630,7 +1760,7 @@ export const ptOverrides: Record<string, string> = {
         'starter.import.check2': 'Importar Todoist, DGT GTD, OmniFocus ou um arquivo de backup',
         'starter.import.check3': 'Revisar os itens importados na Caixa de entrada',
         'starter.weeklyReview.title': 'Faça sua primeira revisão semanal',
-        'starter.weeklyReview.desc': 'Uma arrumação semanal curta mantém suas listas confiáveis.',
+        "starter.weeklyReview.desc": "Revise o projeto Reparos em casa e escolha o próximo item que está pronto para fazer. Incubar serve para uma ideia que você quer reconsiderar: ela permanece em Algum dia/Talvez com uma data de revisão e volta a Processar Caixa de entrada nessa data como De volta para esclarecer. Não se torna automaticamente uma próxima ação. Confira Algum dia/Talvez ou faça uma busca antes de capturar a mesma ideia novamente.",
         'starter.weeklyReview.check1': 'Abrir Revisão',
         'starter.weeklyReview.check2': 'Esvaziar a Caixa de entrada',
         'starter.weeklyReview.check3': 'Escolha as próximas tarefas e deixe o resto esperar',
@@ -1687,6 +1817,11 @@ export const ptOverrides: Record<string, string> = {
         'settings.importDiagnostics.missingParent': "{{count}} registros não tinham um item superior correspondente e foram importados no nível seguro mais próximo.",
         'settings.importDiagnostics.skippedArchiveEntries': "{{count}} itens não compatíveis do pacote foram ignorados.",
         'settings.importDiagnostics.skippedExistingRecords': "{{count}} registros já importados ou excluídos foram ignorados.",
+        'settings.importDiagnostics.unknownColumns': "{{count}} colunas desconhecidas foram ignoradas.",
+        'settings.importDiagnostics.csvLocation': "linha {{row}}, coluna {{column}}",
+        'settings.importDiagnostics.csvArchiveLocation': "entrada CSV {{entry}}, linha {{row}}, coluna {{column}}",
+        'settings.importDiagnostics.csvLocations': "Localizações (registos CSV; cabeçalho = linha 1): {{locations}}.",
+        'settings.importDiagnostics.csvLocationsMore': "Mais {{count}} localizações não apresentadas.",
         'settings.importDiagnostics.unmappedDate': "Não foi possível mapear {{count}} valores de data; eles foram omitidos.",
         'settings.importDiagnostics.unmappedStatus': "Não foi possível mapear {{count}} valores de estado; foi usado um padrão seguro.",
         'settings.importDiagnostics.unsupportedRecurrence': "{{count}} regras de repetição não compatíveis foram mantidas como notas.",
@@ -1730,4 +1865,16 @@ export const ptOverrides: Record<string, string> = {
     'shareCard.reviewTitle': "Revisão semanal",
     'shareCard.reviewBody': "Nesta semana, abri espaço para pensar.",
     'shareCard.qrLabel': "Obter Mindwtr",
+        "process.incubate": "Incubar",
+        "process.returningItem": "De volta para esclarecer",
+        "taskEdit.reminders": "Lembretes de início e vencimento",
+        "taskEdit.reminderPolicyInherit": "Usar padrão ({value})",
+        "taskEdit.reminderPolicySend": "Enviar",
+        "taskEdit.reminderPolicySkip": "Ignorar",
+        "taskEdit.reminderPolicyHint": "Os lembretes de início e vencimento precisam de uma hora explícita. Os lembretes de Foco e revisão não mudam.",
+        "taskEdit.remindersDisabledHint": "Os lembretes de tarefas estão desativados nas configurações de Notificações deste dispositivo.",
+        "settings.taskReminderDefault": "Lembretes padrão de tarefas",
+        "settings.taskReminderDefaultDesc": "Aplica-se a novas tarefas e às que usam o padrão. O envio exige lembretes ativados e uma hora de início ou vencimento.",
+        "settings.taskReminderDefaultSend": "Enviar",
+        "settings.taskReminderDefaultSkip": "Ignorar",
 };

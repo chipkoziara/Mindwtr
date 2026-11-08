@@ -156,6 +156,15 @@ describe('TaskBulkOrganizeModal', () => {
         expect(queryByRole('option', { name: '#admin' })).not.toBeInTheDocument();
     });
 
+    it('splits space-separated prefixed tokens on Apply, as mobile does', () => {
+        const { getByLabelText, getByRole, onApply } = renderModal();
+        fireEvent.change(getByLabelText('Contexts'), { target: { value: '@home @work' } });
+        fireEvent.change(getByLabelText('Tags'), { target: { value: '#a #b, #c #a' } });
+        fireEvent.click(getByRole('button', { name: 'Apply to selected' }));
+
+        expect(onApply).toHaveBeenCalledWith({ contexts: ['@home', '@work'], tags: ['#a', '#b', '#c'] });
+    });
+
     it('preserves multiword suggested and manually entered context and tag labels on Apply', () => {
         act(() => useTaskStore.setState({ _allTasks: [tokenTask('multiword', {
             contexts: ['@Seasonal Planning'], tags: ['#Project Admin'],
@@ -175,8 +184,8 @@ describe('TaskBulkOrganizeModal', () => {
 
     it('treats newlines as token separators without splitting spaces inside labels', () => {
         const { getByLabelText, getByRole, onApply } = renderModal();
-        // Single-line DOM inputs strip newlines; supply a synthetic multiline
-        // change to exercise the Apply boundary independently of that behavior.
+
+
         for (const [label, value] of [
             ['Contexts', 'Home Office\nTravel Plans'],
             ['Tags', 'Fresh Ideas\nProject Admin'],

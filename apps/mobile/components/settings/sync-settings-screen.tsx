@@ -3,9 +3,10 @@ import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import { Alert, Platform, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Beaker } from 'lucide-react-native';
+import { Beaker, Check } from 'lucide-react-native';
 
 import {
+    updateSettingsFromLatest,
     getDocsGuideUrl,
     useTaskStore,
 } from '@mindwtr/core';
@@ -34,6 +35,7 @@ import { useToast } from '@/contexts/toast-context';
 import { CompactText } from '@/components/compact-text';
 import { isCloudKitAvailable } from '@/lib/cloudkit-sync';
 import {
+    cleanupInterruptedBackupExport,
     listLocalDataSnapshots,
 } from '@/lib/data-transfer';
 import { getDropboxRedirectUri } from '@/lib/dropbox-oauth';
@@ -197,7 +199,9 @@ function SyncSettingsView({
     }, [updateSettings]);
 
     const updateSyncPreferences = (partial: Partial<Record<SyncPreferenceKey, boolean>>) => {
-        updateSettings(buildSyncPreferencesUpdate(settings.syncPreferences, partial)).catch(logSettingsError);
+
+        updateSettingsFromLatest((latest) => buildSyncPreferencesUpdate(latest.syncPreferences, partial), { write: updateSettings, read: () => useTaskStore.getState().settings })
+            .catch(logSettingsError);
     };
 
     const handleClearPendingRemoteDeletes = useCallback(() => {
@@ -211,17 +215,17 @@ function SyncSettingsView({
                     text: tr('filters.clear'),
                     style: 'destructive',
                     onPress: () => {
-                        updateSettings({
+                        updateSettingsFromLatest((latest) => ({
                             attachments: {
-                                ...(settings.attachments ?? {}),
+                                ...(latest.attachments ?? {}),
                                 pendingRemoteDeletes: undefined,
                             },
-                        }).catch(logSettingsError);
+                        }), { write: updateSettings, read: () => useTaskStore.getState().settings }).catch(logSettingsError);
                     },
                 },
             ],
         );
-    }, [tr, pendingRemoteDeleteCount, settings.attachments, t, updateSettings]);
+    }, [tr, pendingRemoteDeleteCount, t, updateSettings]);
 
     const toggleAnalyticsHeartbeatOptOut = useCallback((optedOut: boolean) => {
         if (!analyticsHeartbeatAvailable) return;
@@ -291,6 +295,11 @@ function SyncSettingsView({
     useEffect(() => {
         void refreshRecoverySnapshots();
     }, [refreshRecoverySnapshots]);
+
+
+    useEffect(() => {
+        if (mode === 'data') void cleanupInterruptedBackupExport();
+    }, [mode]);
 
     const renderSyncHistory = () => {
         if (syncHistoryEntries.length === 0) return null;
@@ -383,7 +392,7 @@ function SyncSettingsView({
         supportsNativeICloudSync,
         t,
     });
-    // The history and the last error drop URL credentials and the configured secrets.
+
     const syncHistoryEntries = buildSyncHistoryLines(settings.lastSyncHistory, t, (at) => new Date(at).toLocaleString(), redactText);
     const isGettingStartedActionBusy = gettingStartedBusy || isBackupBusy || isSyncing;
     const sandboxEntryBlocked = sandboxBusy
@@ -401,8 +410,8 @@ function SyncSettingsView({
         isEncryptionCapableBackend,
     } = resolveSyncBackendSelection({ syncBackend, cloudProvider, isFossBuild, supportsCloudKit: supportsNativeICloudSync });
     const backendSelection = { isCloudSyncSelected, isSelfHostedSyncSelected, isDropboxSyncSelected, isCloudKitSyncSelected, isEncryptionCapableBackend };
-    // The attachment worklist a transition converts is derived from this document —
-    // without it, phase 2 leaves every attachment in plaintext.
+
+
     const encryptionAppData = useMemo(
         () => ({ tasks, projects, sections, areas, settings }),
         [areas, projects, sections, settings, tasks],
@@ -571,7 +580,11 @@ function SyncSettingsView({
                                                 style={[
                                                     styles.backendOption,
                                                     {
+                                                        flexDirection: 'row',
+                                                        alignItems: 'center',
+                                                        gap: 4,
                                                         borderColor: selected ? tc.tint : tc.border,
+                                                        borderWidth: selected ? 2 : 1,
                                                         backgroundColor: selected ? tc.filterBg : 'transparent',
                                                     },
                                                 ]}
@@ -588,6 +601,7 @@ function SyncSettingsView({
                                                 >
                                                     {getBackendOptionLabel(backend)}
                                                 </CompactText>
+                                                {selected && <Check size={14} color={tc.tint} strokeWidth={2.5} />}
                                             </TouchableOpacity>
                                         );
                                     })}

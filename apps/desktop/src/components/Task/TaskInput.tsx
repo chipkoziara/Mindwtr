@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 're
 import type { ClipboardEventHandler, KeyboardEventHandler, RefObject } from 'react';
 import { getTaskContextMatches, resolveFeatureFlags, useTaskStore, type Area, type Project, type TaskPriority } from '@mindwtr/core';
 import { cn } from '../../lib/utils';
+import { isImeComposing } from '../../lib/ime';
 import {
     compareAutocompleteLabels,
     matchesAutocompleteQuery,
@@ -12,7 +13,7 @@ import { Sparkles } from 'lucide-react';
 
 type TriggerType = 'project' | 'context' | 'tag' | 'area' | 'person' | 'command';
 type SlashCommand =
-    | 'due' | 'start' | 'review' | 'note' | 'link' | 'energy' | 'priority' | 'area'
+    | 'due' | 'start' | 'review' | 'note' | 'link' | 'energy' | 'priority' | 'area' | 'estimate' | 'duration'
     | 'inbox' | 'next' | 'waiting' | 'someday' | 'reference' | 'done' | 'archived' | '*';
 
 interface TriggerState {
@@ -47,8 +48,7 @@ type Option =
     | { kind: 'person'; label: string; value: string }
     | { kind: 'command'; label: string; value: string; command: SlashCommand; requiresArgument: boolean; priority?: TaskPriority };
 
-// WebKit does not scroll an input to a caret set via setSelectionRange, so we
-// measure the caret's pixel offset and adjust scrollLeft ourselves (LTR only).
+
 let caretMeasureContext: CanvasRenderingContext2D | null | undefined;
 
 const ensureCaretVisible = (input: HTMLInputElement, caret: number) => {
@@ -116,6 +116,8 @@ const SLASH_COMMANDS: Array<{
     { command: 'link', hint: '<url>', requiresArgument: true },
     { command: 'energy', hint: '<level>', requiresArgument: true },
     { command: 'priority', hint: '<level>', requiresArgument: true },
+    { command: 'estimate', hint: '<duration>', requiresArgument: true },
+    { command: 'duration', hint: '<duration>', requiresArgument: true },
     { command: 'area', hint: '<name>', requiresArgument: true },
     { command: 'next', requiresArgument: false },
     { command: 'waiting', requiresArgument: false },
@@ -127,12 +129,11 @@ const SLASH_COMMANDS: Array<{
     { command: '*', requiresArgument: false },
 ];
 
-// The parser only accepts these exact tokens for /energy: — suggest them so
-// a partial token like "l" never ends up in the task title.
+
 const ENERGY_LEVEL_VALUES = ['low', 'medium', 'high'];
 const PRIORITY_VALUES: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 
-function getSlashCommandOptions(query: string, prioritiesEnabled: boolean): Option[] {
+function getSlashCommandOptions(query: string, prioritiesEnabled: boolean, timeEstimatesEnabled: boolean): Option[] {
     const separatorIndex = query.indexOf(':');
     const rawCommandQuery = (separatorIndex >= 0 ? query.slice(0, separatorIndex) : query).trim().toLowerCase();
     const rawValue = separatorIndex >= 0 ? query.slice(separatorIndex + 1).trim() : '';
@@ -163,9 +164,10 @@ function getSlashCommandOptions(query: string, prioritiesEnabled: boolean): Opti
     }
 
     return SLASH_COMMANDS
-        // The parser ignores /priority: while the feature is off, so suggesting
-        // it would hand the user a token that stays in their title (#1107).
+
+
         .filter(({ command }) => command !== 'priority' || prioritiesEnabled)
+        .filter(({ command }) => (command !== 'estimate' && command !== 'duration') || timeEstimatesEnabled)
         .filter(({ command }) => (
             rawCommandQuery.length === 0
             || command.startsWith(rawCommandQuery)
@@ -188,9 +190,9 @@ function getSlashCommandOptions(query: string, prioritiesEnabled: boolean): Opti
 function getTrigger(text: string, caret: number): TriggerState | null {
     if (caret < 0) return null;
     const before = text.slice(0, caret);
-    // A value may hold spaces ("/start:next friday"), but it ends where the next
-    // command starts, or "/start:now /no" would still be the /start trigger (#1259).
-    const commandMatch = /(?:^|\s)\/(\*|[a-z-]*)(?::((?:(?!\s\/(?:\*|[a-z-]*)(?::|$))[\s\S])*))?$/i.exec(before);
+
+
+    const commandMatch = /(?:^|\s)\/(\*|[a-z-]*)(?::((?:(?!\s(?:\/(?:\*|[a-z-]*)(?::|$)|[+@#!%]))[\s\S])*))?$/i.exec(before);
     if (commandMatch) {
         const rawMatch = commandMatch[0] ?? '';
         const slashOffset = rawMatch.indexOf('/');
@@ -289,12 +291,13 @@ export function TaskInput({
     const pendingSelectionRef = useRef<PendingSelectionRestore | null>(null);
     const undoRef = useRef<Array<{ value: string; selection: InputSelection }>>([]);
     const prioritiesEnabled = useTaskStore((state) => resolveFeatureFlags(state.settings).priorities);
+    const timeEstimatesEnabled = useTaskStore((state) => resolveFeatureFlags(state.settings).timeEstimates);
 
     const options = useMemo<Option[]>(() => {
         if (!trigger) return [];
         const query = trigger.query.trim().toLowerCase();
         if (trigger.type === 'command') {
-            return getSlashCommandOptions(trigger.query, prioritiesEnabled);
+            return getSlashCommandOptions(trigger.query, prioritiesEnabled, timeEstimatesEnabled);
         }
         if (trigger.type === 'project') {
             const activeProjects = projects.filter((project) => project.status !== 'archived');
@@ -356,7 +359,7 @@ export function TaskInput({
             label: token,
             value: token,
         }));
-    }, [trigger, projects, contexts, contextHistory, areas, people, prioritiesEnabled]);
+    }, [trigger, projects, contexts, contextHistory, areas, people, prioritiesEnabled, timeEstimatesEnabled]);
 
     const closeTrigger = () => {
         setTrigger(null);
@@ -529,8 +532,8 @@ export function TaskInput({
         } else if (activeTrigger.type === 'area') {
             tokenValue = `!${tokenValue}`;
         } else if (activeTrigger.type === 'person') {
-            // Quote multi-word names so the parser never swallows title words
-            // at call sites that do not pass knownPeople.
+
+
             tokenValue = /\s/.test(tokenValue) ? `%"${tokenValue}"` : `%${tokenValue}`;
         } else if (activeTrigger.type === 'tag') {
             tokenValue = tokenValue.startsWith('#') ? tokenValue : `#${tokenValue}`;
@@ -553,6 +556,8 @@ export function TaskInput({
     };
 
     const handleKeyDown: KeyboardEventHandler<HTMLInputElement> = async (event) => {
+
+        if (isImeComposing(event)) return;
         const lowerKey = event.key.toLowerCase();
         if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && lowerKey === 'z') {
             const previousEntry = undoRef.current[undoRef.current.length - 1];
@@ -565,10 +570,6 @@ export function TaskInput({
                 scheduleSelectionRestore(previousEntry.selection);
                 return;
             }
-        }
-        if (event.nativeEvent.isComposing || event.key === 'Process') {
-            onKeyDown?.(event);
-            return;
         }
         if (trigger && options.length > 0) {
             if (event.key === 'ArrowDown') {
@@ -583,8 +584,8 @@ export function TaskInput({
                 setSelectedIndex((prev) => (prev - 1 + options.length) % options.length);
                 return;
             }
-            // Only plain Enter picks a suggestion; modified Enter falls through
-            // so consumer shortcuts (Ctrl+Enter save & edit) win over the popup.
+
+
             if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
                 event.preventDefault();
                 event.stopPropagation();

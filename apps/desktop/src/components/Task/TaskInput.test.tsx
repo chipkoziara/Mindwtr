@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { act, createEvent, fireEvent, render, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { Project } from '@mindwtr/core';
+import { useTaskStore, type Project } from '@mindwtr/core';
 
 import { TaskInput } from './TaskInput';
 
@@ -39,6 +39,26 @@ function TaskInputHarness({
 }
 
 describe('TaskInput autocomplete', () => {
+    it.each([
+        { key: 'Enter', isComposing: true },
+        { key: 'Enter', keyCode: 229 },
+        { key: 'Process' },
+    ])('keeps IME keys out of consumer submit handlers: %j', (keyEvent) => {
+        const onKeyDown = vi.fn();
+        const onChange = vi.fn();
+        const { getByRole } = render(
+            <TaskInput value="中文" projects={[]} contexts={[]} onChange={onChange} onKeyDown={onKeyDown} />
+        );
+        const input = getByRole('combobox');
+
+        fireEvent.keyDown(input, keyEvent);
+        expect(onKeyDown).not.toHaveBeenCalled();
+        expect(onChange).not.toHaveBeenCalled();
+
+        fireEvent.keyDown(input, { key: 'Enter' });
+        expect(onKeyDown).toHaveBeenCalledOnce();
+    });
+
     it('suggests custom contexts for @ trigger', () => {
         const onChange = vi.fn();
         const { getByRole } = render(
@@ -187,8 +207,8 @@ describe('TaskInput autocomplete', () => {
         });
     });
 
-    it('completes an accepted slash command prefix when no argument is present', async () => {
-        const { getByRole } = render(<TaskInputHarness initialValue="/du" />);
+    it.each([['/du', '/due:'], ['/est', '/estimate:'], ['/dur', '/duration:']])('completes %s without inserting a placeholder', async (prefix, completed) => {
+        const { getByRole } = render(<TaskInputHarness initialValue={prefix} />);
         const input = getByRole('combobox') as HTMLInputElement;
         input.focus();
         input.setSelectionRange(input.value.length, input.value.length);
@@ -197,10 +217,26 @@ describe('TaskInput autocomplete', () => {
         fireEvent.keyDown(input, { key: 'Enter' });
 
         await waitFor(() => {
-            expect(input.value).toBe('/due:');
-            expect(input.selectionStart).toBe('/due:'.length);
-            expect(input.selectionEnd).toBe('/due:'.length);
+            expect(input.value).toBe(completed);
+            expect(input.selectionStart).toBe(completed.length);
+            expect(input.selectionEnd).toBe(completed.length);
         });
+    });
+
+    it('hides estimate commands while Time estimates is disabled', () => {
+        const settings = useTaskStore.getState().settings;
+        useTaskStore.setState({ settings: { ...settings, features: { ...settings.features, timeEstimates: false } } });
+        try {
+            const { getByRole, queryByRole } = render(<TaskInputHarness initialValue="/" />);
+            const input = getByRole('combobox') as HTMLInputElement;
+            input.setSelectionRange(input.value.length, input.value.length);
+            fireEvent.click(input);
+            expect(queryByRole('option', { name: '/estimate:<duration>' })).toBeNull();
+            expect(queryByRole('option', { name: '/duration:<duration>' })).toBeNull();
+            expect(getByRole('option', { name: '/due:<when>' })).toBeInTheDocument();
+        } finally {
+            act(() => useTaskStore.setState({ settings }));
+        }
     });
 
     it('lists every parser-supported slash command in the popup', () => {
@@ -213,7 +249,7 @@ describe('TaskInput autocomplete', () => {
         for (const name of ['/link:<url>', '/energy:<level>', '/priority:<level>', '/area:<name>', '/reference', '/archived', '/*']) {
             expect(getByRole('option', { name })).toBeInTheDocument();
         }
-        // Only /priority:<level> suggestions carry the decorative flag.
+
         expect(document.querySelectorAll('[data-priority-flag]')).toHaveLength(0);
     });
 
@@ -231,6 +267,23 @@ describe('TaskInput autocomplete', () => {
         await waitFor(() => {
             expect(input.value).toBe('Sample task /start:now /note:');
         });
+    });
+
+    it('suggests projects and contexts typed after a slash command value (#1259)', () => {
+        const { getByRole, getAllByRole, rerender } = render(
+            <TaskInput value="Sample task /start:next friday +La" onChange={vi.fn()} projects={[buildProject('Launch')]} contexts={['@phone']} />
+        );
+        const input = getByRole('combobox') as HTMLInputElement;
+        const open = () => {
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+            fireEvent.click(input);
+            return getAllByRole('option').map((option) => option.textContent);
+        };
+        expect(open()).toEqual(['Launch', 'Create Project "La"']);
+
+        rerender(<TaskInput value="Sample task /due:tomorrow @ph" onChange={vi.fn()} projects={[]} contexts={['@phone']} />);
+        expect(open()).toContain('@phone');
     });
 
     it('keeps a value with spaces and slashes inside one slash command', () => {
@@ -278,8 +331,7 @@ describe('TaskInput autocomplete', () => {
             '/priority:urgent',
         ]);
 
-        // Each level suggestion carries the canonical decorative flag; other
-        // command suggestions keep their plain label markup.
+
         const priorityFlagColors = {
             low: '#3b82f6',
             medium: '#ca8a04',

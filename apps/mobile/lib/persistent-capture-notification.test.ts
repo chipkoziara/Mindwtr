@@ -97,6 +97,35 @@ describe('persistent-capture-notification', () => {
         expect(mockShow).not.toHaveBeenCalled();
     });
 
+    it('removes a notification left pinned by an off the app stopped in the middle of', async () => {
+
+
+        mockGetItem.mockResolvedValue(null);
+        await restorePersistentCaptureNotificationOnStartup(strings);
+        expect(mockHide).toHaveBeenCalledTimes(1);
+        expect(mockShow).not.toHaveBeenCalled();
+
+
+        mockHide.mockClear();
+        mockGetItem.mockRejectedValue(new Error('storage unavailable'));
+        await restorePersistentCaptureNotificationOnStartup(strings);
+        expect(mockHide).not.toHaveBeenCalled();
+        expect(mockShow).not.toHaveBeenCalled();
+    });
+
+    it('never acts on a read the switch overtook while it was pending', async () => {
+
+
+        let resolveRead: (value: string | null) => void = () => undefined;
+        mockGetItem.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+        const pending = restorePersistentCaptureNotificationOnStartup(strings);
+        applyPersistentCaptureNotification(true, strings);
+        resolveRead(null);
+        await pending;
+        expect(mockShow).toHaveBeenCalledTimes(1);
+        expect(mockHide).not.toHaveBeenCalled();
+    });
+
     it('re-arms on every return to the foreground while enabled (#819)', async () => {
         mockGetItem.mockResolvedValue('true');
         const unsubscribe = keepPersistentCaptureNotificationArmed(() => strings);
@@ -111,7 +140,7 @@ describe('persistent-capture-notification', () => {
         await flushAsync();
         expect(mockShow).toHaveBeenCalledTimes(2);
 
-        // Turning the preference off makes foreground re-arms no-ops.
+
         mockGetItem.mockResolvedValue(null);
         appStateListeners.forEach((listener) => listener('active'));
         await flushAsync();

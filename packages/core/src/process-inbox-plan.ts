@@ -1,6 +1,10 @@
 import { resolveFeatureFlags } from './resolve-feature-flags';
 import { resolveProcessInboxContainerFields } from './process-inbox-workflow';
-import type { ProcessInboxWorkflowEvent, ProcessInboxWorkflowFields } from './process-inbox-workflow';
+import type {
+    ParsedProcessInboxTitleFields,
+    ProcessInboxWorkflowEvent,
+    ProcessInboxWorkflowFields,
+} from './process-inbox-workflow';
 import type { AppData, Task, TaskEditorFieldId } from './types';
 
 export type ProcessInboxPlanField = Extract<
@@ -46,10 +50,7 @@ const DEFAULT_VISIBLE_FIELDS = new Set<TaskEditorFieldId>([
     'reviewAt',
 ]);
 
-/**
- * Resolve the complete policy plan for Process Inbox from persisted settings.
- * Platforms consume the plan; they do not independently reinterpret settings.
- */
+
 export function resolveProcessInboxPlan(settings?: AppData['settings']): ProcessInboxPlan {
     const inboxProcessing = settings?.gtd?.inboxProcessing ?? {};
     const { priorities: prioritiesEnabled, timeEstimates: timeEstimatesEnabled } = resolveFeatureFlags(settings);
@@ -111,14 +112,17 @@ export type ProcessInboxDecision =
 
 export type ProcessInboxDecisionDraft = {
     fields: ProcessInboxWorkflowFields;
-    /** Date commands parsed directly from the title. Unlike hydrated editor
-     * state, these are explicit user input and must survive hidden fields. */
+
+
     explicitDateFields?: Partial<Pick<ProcessInboxWorkflowFields, 'startTime' | 'dueDate' | 'reviewAt'>>;
-    /** Visible date controls touched during this decision. Property presence
-     * matters: `undefined` means the user explicitly cleared that control. */
+
+
     dateControlFields?: Partial<Pick<ProcessInboxWorkflowFields, 'startTime' | 'dueDate' | 'reviewAt'>>;
-    /** Explicit task edits that do not belong to destination policy (for
-     * example a cleaned title, appended link, or Today focus token). */
+
+
+    parsedFields?: ParsedProcessInboxTitleFields;
+
+
     taskUpdates?: Partial<Task>;
 };
 
@@ -150,10 +154,15 @@ function resolveSelectionFields(
     const includeContainers = plan.visibleFields.project || plan.visibleFields.area;
     return {
         ...(includeContainers ? resolveProcessInboxContainerFields(projectId, areaId) : {}),
+
+
+        ...(plan.visibleFields.project && Object.prototype.hasOwnProperty.call(fields, 'sectionId')
+            ? { sectionId: projectId ? fields.sectionId || undefined : undefined }
+            : {}),
         ...(plan.visibleFields.contexts ? { contexts: fields.contexts ?? [] } : {}),
         ...(plan.visibleFields.tags ? { tags: fields.tags ?? [] } : {}),
-        // Someday sections are destination metadata, not a generic editor
-        // field. An explicit selection must survive the shared policy gate.
+
+
         ...(Object.prototype.hasOwnProperty.call(fields, 'viewSectionIds')
             ? { viewSectionIds: fields.viewSectionIds }
             : {}),
@@ -179,6 +188,15 @@ function resolveActionFields(
     };
 }
 
+const TITLE_SINGLE_VALUE_FIELDS = ['priority', 'energyLevel', 'assignedTo', 'timeEstimate'] as const;
+
+
+function resolveTypedTaskUpdates(draft: ProcessInboxDecisionDraft): Partial<Task> | undefined {
+    const typed = TITLE_SINGLE_VALUE_FIELDS.filter((field) => draft.parsedFields?.[field]);
+    if (typed.length === 0) return draft.taskUpdates;
+    return Object.assign({ ...draft.taskUpdates }, ...typed.map((field) => ({ [field]: draft.fields[field] })));
+}
+
 function resolveExplicitDateFields(draft: ProcessInboxDecisionDraft): ProcessInboxWorkflowFields {
     return {
         ...draft.explicitDateFields,
@@ -186,11 +204,7 @@ function resolveExplicitDateFields(draft: ProcessInboxDecisionDraft): ProcessInb
     };
 }
 
-/**
- * Validate and prepare a Process Inbox decision from a normalized platform
- * draft. This is the only place that decides which draft fields belong to a
- * destination; platform adapters retain input parsing and presentation.
- */
+
 export function prepareProcessInboxDecision({
     task,
     draft,
@@ -237,8 +251,8 @@ export function prepareProcessInboxDecision({
         case 'waiting':
             event = {
                 type: 'waiting',
-                // The delegate answer is part of this decision even when the
-                // generic Assigned To editor field is hidden.
+
+
                 fields: {
                     ...resolveActionFields(task, draft.fields, plan, draft.explicitDateFields),
                     ...draft.dateControlFields,
@@ -263,7 +277,7 @@ export function prepareProcessInboxDecision({
     return {
         ok: true,
         event,
-        taskUpdates: event.type === 'discard' ? undefined : draft.taskUpdates,
+        taskUpdates: event.type === 'discard' ? undefined : resolveTypedTaskUpdates(draft),
         resetFields,
     };
 }

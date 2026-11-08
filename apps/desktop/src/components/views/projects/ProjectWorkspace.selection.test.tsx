@@ -1,14 +1,16 @@
-import { act, fireEvent, render, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { archiveSectionForProjectArchive, type Project, type Section, type Task } from '@mindwtr/core';
+import { archiveSectionForProjectArchive, useTaskStore, type Project, type Section, type Task } from '@mindwtr/core';
 
 import { useUiStore } from '../../../store/ui-store';
 import { DndContext } from '@dnd-kit/core';
 import { LanguageProvider } from '../../../contexts/language-context';
 import { KeybindingProvider } from '../../../contexts/keybinding-context';
-import { selectToolbarOption } from '../../../test/toolbar-select';
+import { openToolbarSelect, selectToolbarOption } from '../../../test/toolbar-select';
 import { expectScrolledEndGap } from '../../../test/list-end-gap';
+import { holdSyncSave } from '../../../test/hold-sync-save';
 import { ProjectWorkspace } from './ProjectWorkspace';
 
 vi.mock('../../TaskItem', () => ({
@@ -63,6 +65,7 @@ vi.mock('../../TokenPickerModal', () => ({
 
 vi.mock('./ProjectDetailsHeader', () => ({
     ProjectDetailsHeader: ({
+        primaryAction,
         detailsExpanded,
         editTitle,
         onCommitTitle,
@@ -71,6 +74,7 @@ vi.mock('./ProjectDetailsHeader', () => ({
         onToggleDetails,
         readOnly,
     }: {
+        primaryAction?: ReactNode;
         detailsExpanded: boolean;
         editTitle: string;
         onCommitTitle: () => void;
@@ -79,7 +83,8 @@ vi.mock('./ProjectDetailsHeader', () => ({
         onToggleDetails: () => void;
         readOnly?: boolean;
     }) => (
-        <div>
+        <header>
+            {primaryAction}
             <button type="button" onClick={onToggleDetails}>Details</button>
             <input
                 aria-label="Project title"
@@ -91,22 +96,30 @@ vi.mock('./ProjectDetailsHeader', () => ({
             />
             <button type="button" disabled={readOnly} onClick={onDelete}>Delete project</button>
             <span data-testid="details-expanded">{String(detailsExpanded)}</span>
-        </div>
+        </header>
     ),
 }));
 
 vi.mock('./ProjectDetailsFields', () => ({
-    ProjectDetailsFields: ({ onToggleSequential, onStartDateChange, readOnly }: {
-        onToggleSequential: () => void;
+    ProjectDetailsFields: ({ onFlowModeChange, onStartDateChange, onTagDraftChange, onCommitTags, readOnly }: {
+        onFlowModeChange: (mode: string) => void;
         onStartDateChange: (value: string) => void;
+        onTagDraftChange: (value: string) => void;
+        onCommitTags: () => void;
         readOnly?: boolean;
     }) => (
         <>
+            <button type="button" data-testid="project-tags-type" onClick={() => onTagDraftChange('#a, #mine')}>
+                Type tags
+            </button>
+            <button type="button" data-testid="project-tags-commit" onClick={onCommitTags}>
+                Commit tags
+            </button>
             <button
                 type="button"
                 data-testid="project-type-toggle"
                 disabled={readOnly}
-                onClick={onToggleSequential}
+                onClick={() => onFlowModeChange('sequential')}
             >
                 Project type
             </button>
@@ -141,8 +154,7 @@ vi.mock('./ProjectNotesSection', () => ({
     ),
 }));
 
-// The workspace now reads store data/actions through useProjectWorkspaceStore.
-// Tests seed that hook instead of passing store slices as props.
+
 const storeHolder = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock('./useProjectWorkspaceStore', () => ({
     useProjectWorkspaceStore: () => storeHolder.current,
@@ -179,6 +191,9 @@ const translations: Record<string, string> = {
     'projects.noActiveTasks': 'No active tasks',
     'projects.reactivate': 'Reactivate',
     'projects.sectionNotes': 'Section notes',
+    'projects.parallel': 'Parallel',
+    'projects.sequential': 'Sequential',
+    'projects.sequenceMode': 'Flow Mode',
     'projects.sectionsLabel': 'Tasks',
     'project.notes': 'Project notes',
     'taskEdit.moreOptions': 'More options',
@@ -251,8 +266,7 @@ const defaultProps: ProjectWorkspaceProps = {
     taskDragEndRef: { current: null },
 };
 
-// Store keys the workspace now reads through useProjectWorkspaceStore; render
-// helpers route these overrides to the seeded store instead of to props.
+
 const STORE_OVERRIDE_KEYS = new Set([
     'projects', 'sections', 'allSections', 'areas', 'allTasks', 'undoNotificationsEnabled',
     'addSection', 'updateSection', 'deleteSection', 'reorderSections', 'reorderProjectTasks',
@@ -284,7 +298,7 @@ const makeStore = (overrides: Record<string, unknown> = {}) => {
         batchUpdateTasks: vi.fn(),
         setHighlightTask: vi.fn(),
         allTokens: [] as string[],
-        // Mirrors getDerivedState().tasksByProjectId in prod: the project's tasks.
+
         selectedProjectTasks: allTasks,
         sortedAreas: [],
         areaById: new Map(),
@@ -302,7 +316,7 @@ const splitOverrides = (overrides: Record<string, unknown>) => {
     const props: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(overrides)) {
         if (key === 'selectedProject') {
-            // The workspace derives selectedProject from projects + selectedProjectId.
+
             store.projects = [value];
             continue;
         }
@@ -398,9 +412,31 @@ describe('ProjectWorkspace Select mode', () => {
         fireEvent.click(getByTestId('project-start-date-set'));
         expect(updateProject).toHaveBeenCalledWith('project-1', { startDate: '2026-10-05' });
 
-        // Clearing the field has to erase the stored date, not write an empty string.
+
         fireEvent.click(getByTestId('project-start-date-clear'));
         expect(updateProject).toHaveBeenLastCalledWith('project-1', { startDate: undefined });
+    });
+
+    it('merges the tag draft onto the tags a sync save published since the editor filled it', async () => {
+        const initialTaskState = useTaskStore.getState();
+        const tagged: Project = { ...project, tagIds: ['#a'], rev: 1 };
+        useTaskStore.setState({ _allProjects: [tagged] });
+        try {
+            const { getByRole, getByTestId } = renderWorkspace({
+                projects: [tagged],
+                updateProject: (id: string, updates: Partial<Project>) => useTaskStore.getState().updateProject(id, updates),
+            });
+            fireEvent.click(getByRole('button', { name: 'Details' }));
+            fireEvent.click(getByTestId('project-tags-type'));
+
+            const finish = holdSyncSave(() => useTaskStore.setState({ _allProjects: [{ ...tagged, rev: 3, tagIds: ['#a', '#remote'] }] }));
+            fireEvent.click(getByTestId('project-tags-commit'));
+            await act(finish);
+
+            await waitFor(() => expect(useTaskStore.getState()._projectsById.get(project.id)?.tagIds).toEqual(['#a', '#remote', '#mine']));
+        } finally {
+            useTaskStore.setState(initialTaskState, true);
+        }
     });
 
     it('keeps project notes behind an independent disclosure without writing on open or close', () => {
@@ -460,6 +496,32 @@ describe('ProjectWorkspace Select mode', () => {
         expect(updateProject).not.toHaveBeenCalled();
         expect(updateSection).not.toHaveBeenCalled();
         expect(deleteProject).not.toHaveBeenCalled();
+    });
+
+    it('labels each section with its flow and offers the choice only in Per section mode (#1429)', () => {
+        const book = { ...projectSection, id: 'book', title: 'Book campsite', isSequential: true };
+        const prep = { ...projectSection, id: 'prep', title: 'Prep', order: 1 };
+        const updateSection = vi.fn();
+        const perSection = renderWorkspace({
+            selectedProject: { ...project, perSectionFlow: true },
+            sections: [book, prep], allSections: [book, prep], updateSection,
+        });
+        const labels = () => Array.from(perSection.container.querySelectorAll('[data-section-flow-label]'))
+            .map((node) => node.textContent);
+        expect(labels()).toEqual(['Sequential', 'Parallel']);
+        fireEvent.click(perSection.getByRole('button', { name: 'More options: Prep' }));
+        fireEvent.click(perSection.getByRole('menuitemradio', { name: 'Sequential' }));
+        expect(updateSection).toHaveBeenCalledWith('prep', { isSequential: true });
+        perSection.unmount();
+
+
+        const sequential = renderWorkspace({
+            selectedProject: { ...project, isSequential: true, perSectionFlow: true },
+            sections: [book, prep], allSections: [book, prep],
+        });
+        expect(sequential.container.querySelector('[data-section-flow-label]')).toBeNull();
+        fireEvent.click(sequential.getByRole('button', { name: 'More options: Prep' }));
+        expect(sequential.queryByRole('menuitemradio')).toBeNull();
     });
 
     it('groups archived history under the section tombstones created by project archive', () => {
@@ -611,6 +673,23 @@ describe('ProjectWorkspace Select mode', () => {
             'done-middle',
             'done-old',
         ]);
+    });
+
+    it.each([
+        ['title', ['alpha-old', 'alpha-new', 'zulu']],
+        ['due', ['alpha-new', 'alpha-old', 'zulu']],
+    ] as const)('keeps the selected %s sort in the expanded Done group', (taskSortBy, expected) => {
+        const { container, getByRole } = renderWorkspace({
+            selectedProject: { ...project, taskSortBy },
+            showCompletedTasks: true,
+            allTasks: [
+                task('zulu', 'Zulu', { status: 'done', completedAt: '2026-05-15', dueDate: '2026-05-20' }),
+                task('alpha-new', 'Alpha', { status: 'archived', completedAt: '2026-05-14', dueDate: '2026-05-19', createdAt: '2026-05-13' }),
+                task('alpha-old', 'Alpha', { status: 'done', completedAt: '2026-05-13', dueDate: '2026-05-20', createdAt: '2026-05-11' }),
+            ],
+        });
+        fireEvent.click(getByRole('button', { name: /Done/ }));
+        expect(Array.from(container.querySelectorAll('[data-task-id]')).map((row) => row.getAttribute('data-task-id'))).toEqual(expected);
     });
 
     it('keeps completed tasks in sequence for sequential projects', () => {
@@ -772,9 +851,8 @@ describe('ProjectWorkspace Select mode', () => {
         vi.useFakeTimers();
         const highlightedTask = task('task-1', 'Highlighted task');
         const scrollIntoView = vi.fn();
-        // The row is "not mounted yet" until the flag flips: both the scroll
-        // retry and the focus retry (#1014) query for it, so the mock is
-        // state-based rather than call-count-based.
+
+
         let rowMounted = false;
         const fakeRow = {
             scrollIntoView,
@@ -921,20 +999,15 @@ describe('ProjectWorkspace Select mode', () => {
         expect(toolbar).toContainElement(selectButton);
     });
 
-    it('keeps the primary add-task action in the same task toolbar row as section controls', () => {
+    it('keeps one primary add-task action in the project header and search in the task toolbar', () => {
         const { container, getAllByRole } = renderWorkspace();
+        const addTasks = getAllByRole('button', { name: 'Add task' });
+        expect(addTasks).toHaveLength(1);
+        expect(container.querySelector('header')).toContainElement(addTasks[0]);
         const toolbar = container.querySelector('[data-project-task-toolbar]');
-        const toolbarRow = container.querySelector('[data-project-task-toolbar-row]');
-        const primaryControls = container.querySelector('[data-project-task-primary-controls]');
-        const secondaryControls = container.querySelector('[data-project-task-secondary-controls]');
-        const addTask = getAllByRole('button', { name: 'Add task' })[0];
-
-        expect(toolbar).toContainElement(addTask);
-        expect(toolbarRow).toHaveClass('flex-wrap');
-        expect(primaryControls).toContainElement(addTask);
-        expect(primaryControls).toHaveClass('shrink-0', 'whitespace-nowrap');
-        expect(addTask).toHaveClass('shrink-0', 'whitespace-nowrap');
-        expect(secondaryControls).toHaveClass('min-w-0', 'max-w-full', 'flex-wrap');
+        expect(toolbar).not.toContainElement(addTasks[0]);
+        expect(toolbar).toContainElement(container.querySelector('[data-project-search-row]'));
+        expect(container.querySelector('[data-project-task-secondary-controls]')).toHaveClass('min-w-0', 'max-w-full', 'flex-wrap');
     });
 
     it('keeps structural section creation in the task toolbar overflow', () => {
@@ -980,6 +1053,14 @@ describe('ProjectWorkspace Select mode', () => {
         selectToolbarOption('Sort', 'Due date');
 
         expect(updateProject).toHaveBeenCalledWith('project-1', { taskSortBy: 'due' });
+    });
+
+
+    it('never offers the shared-list-only Priority sort for a project', () => {
+        renderWorkspace({ allTasks: sortSampleTasks() });
+        openToolbarSelect('Sort');
+        expect(screen.getByRole('option', { name: 'Due date' })).toBeInTheDocument();
+        expect(screen.queryByRole('option', { name: /priority/i })).not.toBeInTheDocument();
     });
 
     it('shows the direct sort control and falls back to manual order without a persisted sort', () => {

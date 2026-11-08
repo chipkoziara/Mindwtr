@@ -1,36 +1,12 @@
+import { getProjectAccentColor } from '@mindwtr/core';
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { ChevronDown, ChevronRight, Folder } from 'lucide-react-native';
 import { Swipeable } from 'react-native-gesture-handler';
-import { projectMatchesAreaFilterSelection, tFallback } from '@mindwtr/core';
-import type { Area, AreaFilterSelection, Project } from '@mindwtr/core';
+import { tFallback } from '@mindwtr/core';
+import type { Area, Project } from '@mindwtr/core';
 
 import type { ThemeColors } from '@/hooks/use-theme-colors';
-
-/**
- * Projects parked in the same bucket as the screen's tasks. Someday and Waiting
- * are the two GTD buckets a whole project can sit in, and both screens listed
- * them with the same swipe-to-reactivate row — down to the stylesheet.
- */
-export function selectDeferredProjects(
-  projects: Project[],
-  status: 'someday' | 'waiting',
-  resolvedAreaFilter: AreaFilterSelection,
-  areaById: Map<string, Area>,
-): Project[] {
-  return [...projects]
-    .filter((project) => (
-      !project.deletedAt
-      && project.status === status
-      && projectMatchesAreaFilterSelection(project, resolvedAreaFilter, areaById)
-    ))
-    .sort((a, b) => {
-      const aOrder = Number.isFinite(a.order) ? (a.order as number) : Number.POSITIVE_INFINITY;
-      const bOrder = Number.isFinite(b.order) ? (b.order as number) : Number.POSITIVE_INFINITY;
-      if (aOrder !== bOrder) return aOrder - bOrder;
-      return a.title.localeCompare(b.title);
-    });
-}
 
 export interface DeferredProjectsSectionProps {
   projects: Project[];
@@ -41,7 +17,7 @@ export interface DeferredProjectsSectionProps {
   onOpenProject: (projectId: string) => void;
 }
 
-/** Renders nothing when there is nothing deferred, so callers can pass it straight to a list header. */
+
 export function DeferredProjectsSection({
   projects,
   areaById,
@@ -89,11 +65,11 @@ export interface DeferredProjectRowProps {
   t: (key: string) => string;
   onActivateProject: (projectId: string) => void;
   onOpenProject: (projectId: string) => void;
-  /** Long press (and the accessibility action) offers "Move to section…" when given. */
+
   onMoveToSection?: (project: Project) => void;
 }
 
-/** One parked project: tap opens it, swipe right reactivates it. */
+
 export function DeferredProjectRow({
   project,
   areaById,
@@ -123,7 +99,7 @@ export function DeferredProjectRow({
           ? (event) => { if (event.nativeEvent.actionName === 'moveToSection') onMoveToSection(project); }
           : undefined}
       >
-        <Folder size={18} color={project.color || tc.secondaryText} />
+        <Folder size={18} color={getProjectAccentColor(project, areaById) || tc.secondaryText} />
         <View style={styles.projectText}>
           <Text style={[styles.projectTitle, { color: tc.text }]} numberOfLines={1}>
             {project.title}

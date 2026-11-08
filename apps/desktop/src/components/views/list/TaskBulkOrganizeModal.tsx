@@ -6,8 +6,10 @@ import {
     createBulkOrganizeProject,
     ensureBulkOrganizeDestinationSaved,
     getRetainedTaskContexts,
+    getSavedTaxonomyTokens,
     getUsedTaskTokens,
     isSelectableProjectForTaskAssignment,
+    parseBulkOrganizeTokenInput,
     safeParseDate,
     serializeTaskDraftTokens,
     tFallback,
@@ -32,11 +34,8 @@ type TaskBulkOrganizeModalProps = {
     selectedCount: number;
     projects: Project[];
     areas: Area[];
-    /**
-     * Only set where every selected task lives in one project (the project
-     * workspace). Sections belong to a project, so views without a project
-     * scope get no section picker.
-     */
+
+
     sectionScope?: { projectId: string; sections: Section[] };
     isApplying: boolean;
     t: (key: string) => string;
@@ -44,6 +43,16 @@ type TaskBulkOrganizeModalProps = {
     titleFallback?: string;
     onApply: (input: BulkOrganizeTaskUpdateInput) => Promise<void> | void;
     onCancel: () => void;
+};
+
+
+const parseTokenInput = (value: string, field: 'contexts' | 'tags'): string[] => {
+    const prefix = field === 'contexts' ? '@' : '#';
+    return Array.from(new Set(value.split(/[,\n]/).flatMap((segment) => (
+        segment.trim().split(/\s+/).every((word) => word.startsWith(prefix))
+            ? parseBulkOrganizeTokenInput(segment, prefix)
+            : serializeTaskDraftTokens(segment, field)
+    ))));
 };
 
 const STATUS_OPTIONS: BulkOrganizeStatus[] = ['next', 'waiting', 'someday', 'reference', 'done'];
@@ -82,9 +91,10 @@ export function TaskBulkOrganizeModal({
     const { nativeDateInputLocale, dateFormatSetting } = useNativeDateInputLocale();
     const tokenInputId = useId();
     const retainedTasks = useTaskStore((state) => isOpen ? state._allTasks : null);
-    const allContexts = useMemo(() => retainedTasks ? getRetainedTaskContexts(retainedTasks) : [], [retainedTasks]);
+    const settings = useTaskStore((state) => state.settings);
+    const allContexts = useMemo(() => retainedTasks ? Array.from(new Set([...getRetainedTaskContexts(retainedTasks), ...getSavedTaxonomyTokens(settings, 'context')])) : [], [retainedTasks, settings]);
     const tasks = useTaskStore((state) => isOpen ? state.tasks : null);
-    const allTags = useMemo(() => tasks ? getUsedTaskTokens(tasks, (task) => task.tags) : [], [tasks]);
+    const allTags = useMemo(() => tasks ? Array.from(new Set([...getUsedTaskTokens(tasks, (task) => task.tags), ...getSavedTaxonomyTokens(settings, 'tag')])) : [], [tasks, settings]);
 
     useEffect(() => {
         createSessionRef.current += 1;
@@ -128,8 +138,8 @@ export function TaskBulkOrganizeModal({
     const canApply = selectedCount > 0 && (!isWaiting || delegateWho.trim().length > 0);
     const isBusy = isApplying || createPending;
     const selectedProjectId = projectChoice !== KEEP_VALUE && projectChoice !== NONE_VALUE ? projectChoice : undefined;
-    // A section lives inside its project, so the picker goes quiet as soon as
-    // the modal is about to move the tasks to a different project.
+
+
     const canChooseSection = sectionScope !== undefined
         && (projectChoice === KEEP_VALUE || projectChoice === sectionScope.projectId);
     const title = tFallback(t, titleKey, titleFallback);
@@ -256,8 +266,8 @@ export function TaskBulkOrganizeModal({
         }
 
         const input: BulkOrganizeTaskUpdateInput = {
-            contexts: serializeTaskDraftTokens(contextsInput.replace(/\n/g, ','), 'contexts'),
-            tags: serializeTaskDraftTokens(tagsInput.replace(/\n/g, ','), 'tags'),
+            contexts: parseTokenInput(contextsInput, 'contexts'),
+            tags: parseTokenInput(tagsInput, 'tags'),
         };
 
         if (status !== KEEP_VALUE) input.status = status;
@@ -280,8 +290,7 @@ export function TaskBulkOrganizeModal({
         void onApply(input);
     };
 
-    // Cancel is already disabled while applying; route every other dismissal
-    // (X, backdrop, Escape) through the same guard.
+
     const cancel = () => {
         if (isBusy || createPendingRef.current) return;
         onCancel();
@@ -353,6 +362,7 @@ export function TaskBulkOrganizeModal({
                             placeholder={tFallback(t, 'bulk.keepProject', 'Keep project')}
                             searchPlaceholder={tFallback(t, 'projects.search', 'Search projects')}
                             noMatchesLabel={tFallback(t, 'common.noMatches', 'No matches')}
+                            deferredLabel={tFallback(t, 'projects.deferredSection', 'Someday / Waiting')}
                             createProjectLabel={tFallback(t, 'projects.create', 'Create project')}
                             ariaLabel={tFallback(t, 'taskEdit.projectLabel', 'Project')}
                             disabled={isBusy}
@@ -418,8 +428,8 @@ export function TaskBulkOrganizeModal({
                     )}
                 </div>
 
-                {/* The labels sit outside DateField: a <label> wrapper would swallow
-                    clicks meant for the calendar button. */}
+                {
+                                                            }
                 <div className="grid gap-3 sm:grid-cols-3">
                     <div className="space-y-1 text-xs font-medium text-muted-foreground">
                         <span>{startDateLabel}</span>

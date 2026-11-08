@@ -88,6 +88,82 @@
   <url type="bugtracker">https://github.com/dongdongbh/Mindwtr/issues</url>
   <url type="vcs-browser">https://github.com/dongdongbh/Mindwtr</url>
   <releases>
+    <release version="1.3.8" date="2026-11-04">
+      <url type="details">https://github.com/dongdongbh/Mindwtr/releases/tag/v1.3.8</url>
+      <description>
+        <p>Separate workspaces, smoother task editing and safer automation.</p>
+        <p xml:lang="de">Getrennte Arbeitsbereiche, flüssigere Aufgabenbearbeitung und sicherere Automatisierung.</p>
+        <ul>
+          <li>Keep independent tasks, attachments and sync settings in each workspace.</li>
+          <li xml:lang="de">Aufgaben, Anhänge und Sync-Einstellungen je Arbeitsbereich getrennt halten.</li>
+          <li>Add Inbox items to checklists with Undo, and choose project sections during processing.</li>
+          <li xml:lang="de">Eingangseinträge mit Rückgängig in Checklisten übernehmen und beim Verarbeiten Projektabschnitte wählen.</li>
+          <li>Improve notes editing, regional formats, saved-search sorting and advance reminders.</li>
+          <li xml:lang="de">Notizen, regionale Formate, Suchsortierung und frühere Erinnerungen verbessern.</li>
+          <li>Preserve missing attachments during sync and protect Local API and MCP task writes.</li>
+          <li xml:lang="de">Fehlende Anhänge beim Sync erhalten und Aufgabenschreibzugriffe über Local API und MCP absichern.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.7" date="2026-10-22">
+      <url type="details">https://github.com/dongdongbh/Mindwtr/releases/tag/v1.3.7</url>
+      <description>
+        <p>Mindwtr 1.3.7 adds per-section project flow, reminder defaults, Priority sorting and Gruvbox themes.</p>
+        <p xml:lang="de">Mindwtr 1.3.7 ergänzt Ablauf pro Abschnitt, Standard-Erinnerungen, Sortierung nach Priorität und Gruvbox-Designs.</p>
+        <ul>
+          <li>Make each project section Parallel or Sequential with the Per section flow mode.</li>
+          <li xml:lang="de">Lege mit dem Ablauf „Pro Abschnitt“ jeden Projektabschnitt als parallel oder sequenziell fest.</li>
+          <li>Set default task reminders, tick Reference checklists, sort by Priority and give projects their own color.</li>
+          <li xml:lang="de">Lege Standard-Erinnerungen fest, hake Referenz-Checklisten ab, sortiere nach Priorität und gib Projekten eine eigene Farbe.</li>
+          <li>Tap a context to switch to it, Ctrl-click to combine, and see nested contexts as groups.</li>
+          <li xml:lang="de">Tippe auf einen Kontext, um zu ihm zu wechseln, kombiniere mit Strg-Klick und sieh verschachtelte Kontexte als Gruppen.</li>
+          <li>Use a roomier pop-up editor, hover task submenus, Timeline reordering and Task dates filters.</li>
+          <li xml:lang="de">Nutze einen größeren Pop-up-Editor, Untermenüs per Hover, Sortieren in Timeline und Filter nach Aufgabendaten.</li>
+          <li>Set separate MCP permissions for edits, archiving and deletion, choose its port and copy Codex settings.</li>
+          <li xml:lang="de">Lege getrennte MCP-Rechte für Bearbeiten, Archivieren und Löschen fest, wähle den Port und kopiere Codex-Einstellungen.</li>
+          <li>Fix Copy Title and task links on Linux, and keep other devices' changes when editing during a sync.</li>
+          <li xml:lang="de">Behebt Titel kopieren und Aufgabenlinks unter Linux und behält Änderungen anderer Geräte beim Bearbeiten während einer Synchronisierung.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.6" date="2026-10-12">
+      <url type="details">https://github.com/dongdongbh/Mindwtr/releases/tag/v1.3.6</url>
+      <description>
+        <p>Mindwtr 1.3.6 adds Timeline editing, task links and better desktop organization.</p>
+        <p xml:lang="de">Mindwtr 1.3.6 ergänzt Timeline-Bearbeitung, Aufgabenlinks und bessere Organisation am Desktop.</p>
+        <ul>
+          <li>Filter Timeline by status, show completed work and move or resize dates with Undo.</li>
+          <li xml:lang="de">Filtere Timeline nach Status, zeige erledigte Aufgaben und verschiebe Termine mit Rückgängig.</li>
+          <li>Autocomplete contexts and tags in bulk organize, and drag tasks onto contexts.</li>
+          <li xml:lang="de">Vervollständige Kontexte und Tags bei der Mehrfachbearbeitung und ziehe Aufgaben auf Kontexte.</li>
+          <li>Copy task links, enter quick-add estimates and turn checklists into project tasks.</li>
+          <li xml:lang="de">Kopiere Aufgabenlinks, erfasse Zeitschätzungen und wandle Checklisten in Projektaufgaben um.</li>
+          <li>Run built-in MCP inside the app and filter Obsidian imports by a required inline tag.</li>
+          <li xml:lang="de">Nutze MCP direkt in der App und filtere Obsidian-Importe nach einem erforderlichen Inline-Tag.</li>
+          <li>Improve global Quick Add activation, File Sync attachment copies and MCP connection copying in AppImages; protect archive retention and encryption changes.</li>
+          <li xml:lang="de">Verbessere die globale Schnellerfassung, File-Sync-Anhänge und das Kopieren der MCP-Verbindung in AppImages; schütze Archivaufbewahrung und Verschlüsselungsänderungen.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.3.5" date="2026-10-12">
+      <url type="details">https://github.com/dongdongbh/Mindwtr/releases/tag/v1.3.5</url>
+      <description>
+        <p>Mindwtr 1.3.5 adds Timeline editing, task links and better desktop organization.</p>
+        <p xml:lang="de">Mindwtr 1.3.5 ergänzt Timeline-Bearbeitung, Aufgabenlinks und bessere Organisation am Desktop.</p>
+        <ul>
+          <li>Filter Timeline by status, show completed work and move or resize dates with Undo.</li>
+          <li xml:lang="de">Filtere Timeline nach Status, zeige erledigte Aufgaben und verschiebe Termine mit Rückgängig.</li>
+          <li>Autocomplete contexts and tags in bulk organize, and drag tasks onto contexts.</li>
+          <li xml:lang="de">Vervollständige Kontexte und Tags bei der Mehrfachbearbeitung und ziehe Aufgaben auf Kontexte.</li>
+          <li>Copy task links, enter quick-add estimates and turn checklists into project tasks.</li>
+          <li xml:lang="de">Kopiere Aufgabenlinks, erfasse Zeitschätzungen und wandle Checklisten in Projektaufgaben um.</li>
+          <li>Run built-in MCP inside the app and filter Obsidian imports by a required inline tag.</li>
+          <li xml:lang="de">Nutze MCP direkt in der App und filtere Obsidian-Importe nach einem erforderlichen Inline-Tag.</li>
+          <li>Improve global Quick Add activation, File Sync attachment copies and MCP connection copying in AppImages; protect archive retention and encryption changes.</li>
+          <li xml:lang="de">Verbessere die globale Schnellerfassung, File-Sync-Anhänge und das Kopieren der MCP-Verbindung in AppImages; schütze Archivaufbewahrung und Verschlüsselungsänderungen.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.4" date="2026-10-05">
       <url type="details">https://github.com/dongdongbh/Mindwtr/releases/tag/v1.3.4</url>
       <description>

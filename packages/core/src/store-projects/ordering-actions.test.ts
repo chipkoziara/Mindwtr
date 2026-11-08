@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPendingSave, resetForTests, setStorageAdapter, useTaskStore } from '../store';
-import { sortTasksByBoardOrder } from '../task-utils';
+import { compareProjectsByOrder, sortTasksByBoardOrder } from '../task-utils';
 import type { StorageAdapter } from '../storage';
 import type { AppData, Project, Section, Task } from '../types';
 
@@ -191,7 +191,7 @@ describe('reorderProjectTasks', () => {
             _tasksById: new Map(tasks.map((task) => [task.id, task])),
         });
 
-        // task-2 dropped between orders 0 and 5: midpoint 2.5 must round to an integer.
+
         await useTaskStore.getState().reorderProjectTasks(project.id, ['task-0', 'task-2', 'task-1'], undefined, 'task-2');
 
         const moved = useTaskStore.getState()._allTasks.find((task) => task.id === 'task-2');
@@ -211,8 +211,7 @@ describe('reorderProjectTasks', () => {
             _tasksById: new Map(tasks.map((task) => [task.id, task])),
         });
 
-        // task-2 dropped between orders 3 and 4: no integer fits, so every task
-        // is renumbered instead of writing a fractional midpoint.
+
         await useTaskStore.getState().reorderProjectTasks(project.id, ['task-0', 'task-2', 'task-1'], undefined, 'task-2');
 
         const state = useTaskStore.getState()._allTasks;
@@ -320,6 +319,24 @@ describe('reorderProjects', () => {
         await flushPendingSave();
         const saved = saveData.mock.calls.at(-1)?.[0] as AppData | undefined;
         expect(saved?.projects.filter((project) => project.rev === 2).map((project) => project.id)).toEqual([movedId]);
+    });
+
+    it('reorders a project without stored order using the same comparator as the displayed list', async () => {
+        seedProjects(0);
+        const first = { ...makeProject(0), order: 100 };
+        const missingOrder = makeProject(1);
+        delete (missingOrder as Partial<Project>).order;
+        useTaskStore.setState({ _allProjects: [first, missingOrder] });
+        expect([...useTaskStore.getState()._allProjects].sort(compareProjectsByOrder).map((row) => row.id))
+            .toEqual([first.id, missingOrder.id]);
+
+        await useTaskStore.getState().reorderProjects([missingOrder.id, first.id]);
+        await flushPendingSave();
+
+        expect([...useTaskStore.getState()._allProjects].sort(compareProjectsByOrder).map((row) => row.id))
+            .toEqual([missingOrder.id, first.id]);
+        const saved = saveData.mock.calls.at(-1)?.[0] as AppData | undefined;
+        expect(saved?.projects.find((row) => row.id === missingOrder.id)?.order).toBeLessThan(first.order);
     });
 });
 

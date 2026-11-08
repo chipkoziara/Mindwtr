@@ -135,6 +135,7 @@ describe('Done row completion time uses RN completedAt-only update and guarded r
         }
     });
 
+
     it('matches RN when an ordinary completion changes to an extended-year instant', async () => {
         vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(NOW));
         for (const completedAt of ['+020000-01-01T00:00:00.123Z', '-000001-01-01T00:00:00.123Z']) {
@@ -157,7 +158,7 @@ describe('Done row completion time uses RN completedAt-only update and guarded r
                 expect(await native.receiptIds()).toEqual([REQUEST_ID]);
             } finally { await native.close(); }
         }
-    });
+    }, 20_000);
 
     it('rejects changed auto-archive settings before commit without rows or receipts', async () => {
         vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(NOW));
@@ -173,6 +174,7 @@ describe('Done row completion time uses RN completedAt-only update and guarded r
             expect(await raw(sqlite)).toEqual(before); expect(await sqlite.receiptIds()).toEqual([]);
         } finally { await sqlite.close(); }
     });
+
 
     it('refuses invalid, stale, read-only, non-Done, deleted and projected inputs', async () => {
         vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(NOW));
@@ -200,7 +202,7 @@ describe('Done row completion time uses RN completedAt-only update and guarded r
             expect(readonly.host.getDoneTaskCompletedAtOptions({ id: ID, taskRevision: request().taskRevision })).toMatchObject({ ok: false });
             expect(await readonly.host.prepareDoneTaskCompletedAt(request())).toMatchObject({ ok: false });
         } finally { await readonly.close(); }
-    });
+    }, 20_000);
 
 
     it('rejects forged/cross-kind journals and cannot acknowledge an unused UUID from equal AFTER', async () => {

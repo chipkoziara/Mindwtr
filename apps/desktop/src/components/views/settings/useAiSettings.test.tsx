@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getModelOptions } from '@mindwtr/core';
+import { getModelOptions, useTaskStore } from '@mindwtr/core';
 import type { AppData } from '@mindwtr/core';
 
 import { useAiSettings } from './useAiSettings';
@@ -84,12 +84,18 @@ const settingsWithSpeech = (speechToText: NonNullable<NonNullable<AppData['setti
     },
 });
 
+const initialTaskState = useTaskStore.getState();
+
 describe('useAiSettings speech provider changes', () => {
+    afterEach(() => {
+        useTaskStore.setState(initialTaskState, true);
+    });
+
     beforeEach(() => {
         vi.clearAllMocks();
         languageMocks.t.mockImplementation((key: string) => key);
-        // The model downloads go through the shared native-invoke adapter, which
-        // refuses outside the desktop shell.
+
+
         (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
         fsMocks.exists.mockResolvedValue(false);
         fsMocks.mkdir.mockResolvedValue(undefined);
@@ -351,6 +357,8 @@ describe('useAiSettings speech provider changes', () => {
             model: 'whisper-tiny',
         });
 
+        useTaskStore.setState({ settings });
+
         function Probe() {
             result = useAiSettings({
                 isTauri: true,
@@ -395,6 +403,7 @@ describe('useAiSettings speech provider changes', () => {
             provider: 'parakeet',
             model: 'parakeet-tdt-0.6b-v3-int8',
         });
+        useTaskStore.setState({ settings });
 
         function Probe() {
             result = useAiSettings({
@@ -433,12 +442,13 @@ describe('useAiSettings speech provider changes', () => {
 });
 
 describe('useAiSettings live model lists', () => {
-    // A base URL is the credential-free trigger (self-hosted servers, #930), so
-    // these render without waiting for the async key load.
+
+
     const localOpenAiSettings = (
         extra: Partial<NonNullable<AppData['settings']['ai']>> = {}
     ): AppData['settings'] => ({
         ai: {
+            enabled: true,
             provider: 'openai',
             baseUrl: 'http://localhost:1234/v1',
             model: 'my-local-model',
@@ -466,9 +476,7 @@ describe('useAiSettings live model lists', () => {
 
     const read = () => JSON.parse(screen.getByTestId('options').textContent ?? '{}');
 
-    // The fetch effects debounce, so nothing is in flight until the timer runs —
-    // and a key that arrives asynchronously only schedules its timer on the
-    // render after it lands, hence two passes.
+
     const settle = async () => {
         for (let pass = 0; pass < 2; pass += 1) {
             await act(async () => {
@@ -550,6 +558,7 @@ describe('useAiSettings live model lists', () => {
 
         await renderOptions({
             ai: {
+                enabled: true,
                 provider: 'gemini',
                 speechToText: { provider: 'gemini' },
             },
@@ -577,8 +586,28 @@ describe('useAiSettings live model lists', () => {
         );
     });
 
+    it('asks no provider for models before AI is turned on with it (consent)', async () => {
+        aiConfigMocks.loadAIKey.mockResolvedValue('sk-entered');
+        const aiOff: AppData['settings'] = {
+            ai: {
+                provider: 'openai',
+                baseUrl: 'http://localhost:1234/v1',
+                speechToText: { provider: 'gemini' },
+            },
+        };
+
+        const { rerender } = await renderOptions(aiOff);
+        expect(coreMocks.fetchProviderModelsCached).not.toHaveBeenCalled();
+
+
+        rerender(<Probe settings={{ ai: { ...aiOff.ai, enabled: true } }} />);
+        await settle();
+        expect(coreMocks.fetchProviderModelsCached).toHaveBeenCalledWith('openai', expect.objectContaining({ kind: 'chat' }));
+        expect(coreMocks.fetchProviderModelsCached).not.toHaveBeenCalledWith('gemini', expect.anything());
+    });
+
     it('does not call any provider without a key or base URL', async () => {
-        await renderOptions({ ai: { provider: 'gemini' } });
+        await renderOptions({ ai: { enabled: true, provider: 'gemini' } });
 
         expect(coreMocks.fetchProviderModelsCached).not.toHaveBeenCalled();
         expect(read().model).toEqual(getModelOptions('gemini'));
@@ -586,20 +615,20 @@ describe('useAiSettings live model lists', () => {
 
     it('waits for the new provider key instead of reusing the previous one', async () => {
         aiConfigMocks.loadAIKey.mockImplementation(async (provider: string) => {
-            // Gemini's key never arrives, so a stale OpenAI key is the only one
-            // the fetch could possibly reach for.
+
+
             if (provider !== 'openai') return await new Promise<string>(() => {});
             return 'sk-openai';
         });
 
-        const { rerender } = await renderOptions({ ai: { provider: 'openai' } });
+        const { rerender } = await renderOptions({ ai: { enabled: true, provider: 'openai' } });
         expect(coreMocks.fetchProviderModelsCached).toHaveBeenCalledWith(
             'openai',
             expect.objectContaining({ apiKey: 'sk-openai' })
         );
 
         coreMocks.fetchProviderModelsCached.mockClear();
-        rerender(<Probe settings={{ ai: { provider: 'gemini' } }} />);
+        rerender(<Probe settings={{ ai: { enabled: true, provider: 'gemini' } }} />);
         await settle();
 
         expect(coreMocks.fetchProviderModelsCached).not.toHaveBeenCalledWith(

@@ -174,10 +174,8 @@ export async function saveAIKey(provider: AIProviderId, value: string): Promise<
     await saveLocalKey(provider, value);
 }
 
-export function isAIKeyRequired(settings: AppData['settings'] | undefined): boolean {
-    const config = buildCoreAIConfig(settings ?? {}, '');
-    return !(config.provider === 'openai' && Boolean(config.endpoint));
-}
+
+export { isAIKeyRequired } from '@mindwtr/core';
 
 export async function buildAIConfig(settings: AppData['settings'] | undefined, apiKey: string, language: Language = 'en'): Promise<AIProviderConfig> {
     if (isSandboxMode()) throw new Error('Unavailable in sandbox.');

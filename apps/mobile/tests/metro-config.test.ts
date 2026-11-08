@@ -14,6 +14,30 @@ function isMetroBlocked(filePath: string): boolean {
 }
 
 describe('metro config', () => {
+  it('uses the filesystem crawler in CI without changing local Watchman defaults', () => {
+    const previous = process.env.CI;
+    const filename = require.resolve('../metro.config.js');
+    const load = (value?: string) => {
+      if (value === undefined) delete process.env.CI;
+      else process.env.CI = value;
+      delete require.cache[filename];
+      return require(filename).resolver.useWatchman;
+    };
+    try {
+      const local = load();
+      expect(local).toBe(require('expo/metro-config').getDefaultConfig(path.dirname(filename)).resolver.useWatchman);
+      expect(load('1')).toBe(false);
+      expect(load('true')).toBe(false);
+      expect(load('0')).toBe(local);
+      expect(load('false')).toBe(local);
+      expect(load()).toBe(local);
+    } finally {
+      if (previous === undefined) delete process.env.CI;
+      else process.env.CI = previous;
+      delete require.cache[filename];
+    }
+  });
+
   it('isolates optional profiling transforms from ordinary release transforms', () => {
     const flags = ['EXPO_PUBLIC_CAPTURE_PROFILING', 'EXPO_PUBLIC_STARTUP_PROFILING'];
     const previous = flags.map((flag) => process.env[flag]);
@@ -34,7 +58,7 @@ describe('metro config', () => {
       expect(new Set([normal, capture, startup, both]).size).toBe(4);
       expect(load()).toBe(normal);
       expect(load('0', 'false')).toBe(normal);
-      expect(load('true')).toBe(normal); // Capture requires the exact native opt-in.
+      expect(load('true')).toBe(normal);
       expect(load(undefined, ' TRUE ')).toBe(startup);
     } finally {
       previous.forEach((value, index) => {

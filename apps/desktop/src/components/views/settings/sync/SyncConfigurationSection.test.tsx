@@ -2,6 +2,7 @@ import { fireEvent, render } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SyncConfigurationSection } from './SyncConfigurationSection';
+import { dismissCleartextSyncWarning, getCleartextSyncDestination } from '../../../../lib/cleartext-sync-warning';
 
 const baseProps: Parameters<typeof SyncConfigurationSection>[0] = {
     t: {
@@ -39,6 +40,8 @@ const baseProps: Parameters<typeof SyncConfigurationSection>[0] = {
         webdavTestAccessibility: 'Test WebDAV connection',
         allowInsecureHttp: 'Allow insecure connections',
         allowInsecureHttpHint: 'Only use this on trusted networks.',
+        cleartextSyncWarningWebdav: 'WebDAV sync is using HTTP. Data is unencrypted; use it only on a trusted network.',
+        cleartextSyncWarningCloud: 'Self-hosted sync is using HTTP. Data is unencrypted; use it only on a trusted network.',
         cloudUrl: 'Cloud URL',
         cloudHint: 'Cloud hint',
         cloudToken: 'Cloud token',
@@ -128,6 +131,20 @@ const baseProps: Parameters<typeof SyncConfigurationSection>[0] = {
 } as any;
 
 describe('SyncConfigurationSection', () => {
+    it('keeps the HTTP indication in settings after the banner is acknowledged', () => {
+        dismissCleartextSyncWarning(getCleartextSyncDestination('webdav', 'http://sync.example.com/dav')!);
+        const webdav = render(<SyncConfigurationSection {...baseProps} syncBackend="webdav" webdavUrl="http://sync.example.com/dav" />);
+        expect(webdav.getByText(/WebDAV sync is using HTTP/)).toBeInTheDocument();
+        webdav.rerender(<SyncConfigurationSection {...baseProps} syncBackend="webdav" webdavUrl="https://sync.example.com/dav" webdavAllowInsecureHttp />);
+        expect(webdav.queryByText(/WebDAV sync is using HTTP/)).not.toBeInTheDocument();
+        webdav.unmount();
+
+        const cloud = render(<SyncConfigurationSection {...baseProps} syncBackend="cloud" cloudProvider="selfhosted" cloudUrl="http://sync.example.com" />);
+        expect(cloud.getByText(/Self-hosted sync is using HTTP/)).toBeInTheDocument();
+        cloud.rerender(<SyncConfigurationSection {...baseProps} syncBackend="cloud" cloudProvider="selfhosted" cloudUrl="http://localhost:3000" />);
+        expect(cloud.queryByText(/Self-hosted sync is using HTTP/)).not.toBeInTheDocument();
+    });
+
     it('offers a folder test and explains document-portal paths', () => {
         const onTestSyncPath = vi.fn();
         const { getByRole, getByText, queryByText, rerender } = render(
@@ -294,7 +311,7 @@ describe('SyncConfigurationSection', () => {
         expect(queryByText('Calendar subscription')).toBeInTheDocument();
         expect(queryByText('Anyone with this URL can read the feed.')).toBeInTheDocument();
         expect(queryByText('No feed published yet.')).toBeInTheDocument();
-        // Nothing to copy or revoke until a feed exists.
+
         expect(queryByRole('button', { name: 'Copy URL' })).not.toBeInTheDocument();
         expect(queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument();
 
@@ -343,8 +360,8 @@ describe('SyncConfigurationSection', () => {
         expect(getByText(/Redirect URI:/i)).toBeInTheDocument();
         expect(getByText(baseProps.dropboxRedirectUri)).toBeInTheDocument();
     });
-    // Both URL errors were hardcoded English even though mobile already shows
-    // the translated `settings.invalidUrlHttp` for the same validation.
+
+
     it('shows the translated URL error for the self-hosted and WebDAV fields', () => {
         const selfHosted = render(
             <SyncConfigurationSection {...baseProps} syncBackend="cloud" cloudProvider="selfhosted" cloudUrlError />
@@ -357,9 +374,8 @@ describe('SyncConfigurationSection', () => {
         );
         expect(webdav.getByText('Invalid URL. Use http/https.')).toBeInTheDocument();
     });
-    // Dropbox, WebDAV and the sync folder all have a Test handler; the
-    // self-hosted panel had Save only, so a wrong token surfaced only after the
-    // full verification sync.
+
+
     it('offers a self-hosted connection test', () => {
         const onTestCloudConnection = vi.fn();
         const { getByRole } = render(

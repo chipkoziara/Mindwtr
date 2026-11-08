@@ -174,6 +174,13 @@ describe('resolveProcessInboxWorkflowEvent', () => {
 });
 
 describe('mergeParsedProcessInboxFields token parsing', () => {
+    it('carries the parsed estimate while keeping the selected estimate in charge (#1358)', () => {
+        const parsed = parseProcessInboxTitleInput('Write report /estimate:45m');
+        expect(parsed.title).toBe('Write report');
+        expect(mergeParsedProcessInboxFields({}, parsed.props).timeEstimate).toBe('custom:45');
+        expect(mergeParsedProcessInboxFields({ timeEstimate: '2hr' }, parsed.props).timeEstimate).toBe('2hr');
+    });
+
     it('unions parsed contexts and tags with the chips the user already toggled', () => {
         const merged = mergeParsedProcessInboxFields(
             { contexts: ['@office'], tags: ['#home'] },
@@ -187,8 +194,7 @@ describe('mergeParsedProcessInboxFields token parsing', () => {
         expect(mergeParsedProcessInboxFields({}, { assignedTo: 'Bob' }).assignedTo).toBe('Bob');
     });
 
-    // The parsed-token path is the only route a typed /priority: has into the
-    // clarify decision; the picker writes `priority` directly (#1105).
+
     it('lands a /priority: typed in the clarify title on the merged fields', () => {
         const parsedTitle = parseProcessInboxTitleInput('Call plumber /priority:high /energy:low');
         expect(parsedTitle.title).toBe('Call plumber');

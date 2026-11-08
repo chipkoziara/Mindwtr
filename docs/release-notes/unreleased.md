@@ -2,6 +2,4 @@
 
 Changes collected since the latest stable release.
 
-## Full Change List
-
-No changes yet.
+- Android: returning within App Lock's Require unlock delay shows the open task without briefly displaying the unlock panel. An opaque privacy cover still hides the app while it is away. (#1423)

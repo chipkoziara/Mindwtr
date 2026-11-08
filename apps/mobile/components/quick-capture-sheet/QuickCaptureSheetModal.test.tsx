@@ -11,8 +11,7 @@ vi.mock('@react-native-community/datetimepicker', () => ({
   default: (props: Record<string, unknown>) => React.createElement('DateTimePicker', props),
 }));
 
-// Stubbed only to keep react-native-safe-area-context out of this render test; the
-// assertions below still match on the real component identity.
+
 vi.mock('@/contexts/toast-context', () => ({
   ToastViewport: () => null,
   useToast: () => ({ showToast: () => {}, dismissToast: () => {} }),
@@ -40,6 +39,9 @@ const flattenStyle = (style: unknown): Record<string, any> => {
 describe('Quick capture modal composition', () => {
   it('announces saving and disables save and dismissal controls while a submission is active', () => {
     const handleClose = vi.fn();
+    const onModalShow = vi.fn();
+    const onInputFocus = vi.fn();
+    const onInputBlur = vi.fn();
     let tree!: ReturnType<typeof create>;
     const t = (key: string) => ({
       'common.close': 'Close',
@@ -70,6 +72,9 @@ describe('Quick capture modal composition', () => {
           handleSave={vi.fn()}
           insetsBottom={0}
           inputRef={{ current: null }}
+          onModalShow={onModalShow}
+          onInputFocus={onInputFocus}
+          onInputBlur={onInputBlur}
           noteValue=""
           onNoteChange={vi.fn()}
           onOpenAreaPicker={vi.fn()}
@@ -91,6 +96,7 @@ describe('Quick capture modal composition', () => {
           onValueChange={vi.fn()}
           optionsExpanded={false}
           prioritiesEnabled
+          timeEstimatesEnabled
           priorityLabel="Priority"
           projectLabel="Project"
           recording={false}
@@ -108,12 +114,24 @@ describe('Quick capture modal composition', () => {
     });
 
     const controls = tree.root.findAllByType(TouchableOpacity);
+    act(() => {
+      tree.root.findByType(Modal).props.onShow();
+      const titleInput = tree.root.findAllByType(TextInput).find((node) => node.props.accessibilityLabel === 'Task title');
+      titleInput!.props.onFocus({ nativeEvent: { text: 'private task' } });
+      titleInput!.props.onBlur({ nativeEvent: { text: 'private task' } });
+    });
+    expect(onModalShow).toHaveBeenCalledExactlyOnceWith();
+    expect(onInputFocus).toHaveBeenCalledOnce();
+    expect(onInputBlur).toHaveBeenCalledOnce();
     const closeControls = controls.filter((node) => node.props.accessibilityLabel === 'Close');
     const save = controls.find((node) => node.props.accessibilityLabel === 'Save');
     expect(closeControls.length).toBeGreaterThan(0);
     expect(closeControls.every((node) => node.props.disabled === true)).toBe(true);
     expect(save?.props.disabled).toBe(true);
     expect(save?.props.accessibilityState).toEqual({ busy: true, disabled: true });
+    const description = tree.root.findAllByType(TextInput).find((node) => node.props.accessibilityLabel === 'taskEdit.descriptionLabel');
+    expect(description?.props.editable).toBe(false);
+    expect(description?.props.accessibilityState).toEqual({ busy: true, disabled: true });
     expect(tree.root.findByType(Modal).props.onRequestClose).not.toBe(handleClose);
     expect(tree.root.findAllByType(Text).some((node) => node.props.children === 'Processing audio capture...')).toBe(true);
   });
@@ -277,6 +295,7 @@ describe('Quick capture modal composition', () => {
             onValueChange={vi.fn()}
             optionsExpanded={false}
             prioritiesEnabled
+            timeEstimatesEnabled
             priorityLabel="Priority"
             projectLabel="Project"
             recording={false}
@@ -361,6 +380,7 @@ describe('Quick capture modal composition', () => {
             onValueChange={vi.fn()}
             optionsExpanded={false}
             prioritiesEnabled
+            timeEstimatesEnabled
             priorityLabel="Priority"
             projectLabel="Project"
             recording={false}
@@ -571,6 +591,7 @@ describe('Quick capture modal composition', () => {
           onValueChange={vi.fn()}
           optionsExpanded={false}
           prioritiesEnabled
+          timeEstimatesEnabled
           priorityLabel="High"
           projectLabel="Project"
           recording={false}
@@ -642,6 +663,7 @@ describe('Quick capture modal composition', () => {
           onValueChange={vi.fn()}
           optionsExpanded
           prioritiesEnabled
+          timeEstimatesEnabled
           priorityLabel="High"
           projectLabel="Project"
           recording={false}
@@ -720,6 +742,7 @@ describe('Quick capture modal composition', () => {
           onValueChange={vi.fn()}
           optionsExpanded={false}
           prioritiesEnabled
+          timeEstimatesEnabled
           priorityLabel="Priority"
           projectLabel={longProjectName}
           projectSelected
@@ -783,6 +806,7 @@ describe('Quick capture modal composition', () => {
           onValueChange={vi.fn()}
           optionsExpanded={false}
           prioritiesEnabled
+          timeEstimatesEnabled
           priorityLabel="Priority"
           projectLabel="Very Long Project Label"
           recording={false}
@@ -798,8 +822,9 @@ describe('Quick capture modal composition', () => {
       );
     });
 
-    expect(tree.root.findByType(TextInput).props.maxFontSizeMultiplier).toBe(1.2);
-    expect(tree.root.findByType(TextInput).props.textAlignVertical).toBe('center');
+    const inputs = tree.root.findAllByType(TextInput);
+    expect(inputs.every((node) => node.props.maxFontSizeMultiplier === 1.2)).toBe(true);
+    expect(inputs.find((node) => node.props.accessibilityLabel === 'quickAdd.inputLabel')!.props.textAlignVertical).toBe('center');
     const compactTexts = tree.root
       .findAllByType(Text)
       .filter((node) => typeof node.props.children === 'string');
@@ -859,6 +884,7 @@ describe('Quick capture modal composition', () => {
             onValueChange={vi.fn()}
             optionsExpanded={false}
             prioritiesEnabled
+            timeEstimatesEnabled
             priorityLabel="Priority"
             projectLabel="Project"
             recording={false}
@@ -874,8 +900,8 @@ describe('Quick capture modal composition', () => {
         );
       });
 
-      const input = tree.root.findByType(TextInput);
-      // Return blurs and submits (no newline inserted) when not adding another.
+      const input = tree.root.findAllByType(TextInput).find((node) => node.props.accessibilityLabel === 'quickAdd.inputLabel')!;
+
       expect(input.props.multiline).toBe(true);
       expect(input.props.submitBehavior).toBe('blurAndSubmit');
 
@@ -933,6 +959,7 @@ describe('Quick capture modal composition', () => {
           onValueChange={vi.fn()}
           optionsExpanded={false}
           prioritiesEnabled
+          timeEstimatesEnabled
           priorityLabel="Priority"
           projectLabel="Project"
           recording={false}
@@ -948,9 +975,9 @@ describe('Quick capture modal composition', () => {
       );
     });
 
-    const input = tree.root.findByType(TextInput);
-    // Multiline title accepts pasted newlines, but return still submits and,
-    // in add-another mode, keeps focus instead of inserting a newline.
+    const input = tree.root.findAllByType(TextInput).find((node) => node.props.accessibilityLabel === 'quickAdd.inputLabel')!;
+
+
     expect(input.props.multiline).toBe(true);
     expect(input.props.submitBehavior).toBe('submit');
 
@@ -1004,6 +1031,7 @@ describe('Quick capture modal composition', () => {
           onValueChange={vi.fn()}
           optionsExpanded
           prioritiesEnabled
+          timeEstimatesEnabled
           priorityLabel="Priority"
           projectLabel="Inbox"
           recording={false}
@@ -1071,6 +1099,7 @@ describe('Quick capture modal composition', () => {
             onValueChange={vi.fn()}
             optionsExpanded
             prioritiesEnabled
+            timeEstimatesEnabled
             priorityLabel="Priority"
             projectLabel="Project"
             recording={false}
@@ -1089,9 +1118,8 @@ describe('Quick capture modal composition', () => {
       const scroll = tree.root.findByType(ScrollView);
       expect(scroll.props.testID).toBe('quick-capture-scroll');
       expect(scroll.props.keyboardShouldPersistTaps).toBe('handled');
-      // The More panel scrolls, but the title input must stay OUTSIDE it: a focused
-      // TextInput inside an iOS ScrollView gets auto-scrolled above the keyboard and
-      // flies off the top of the sheet on every refocus (#887).
+
+
       expect(scroll.findAllByType(TextInput).map((node) => node.props.accessibilityLabel))
         .toEqual(['taskEdit.descriptionLabel']);
       expect(tree.root.findAllByType(TextInput)[0].props.accessibilityLabel).toBe('quickAdd.inputLabel');
@@ -1142,6 +1170,7 @@ describe('Quick capture modal composition', () => {
             onValueChange={vi.fn()}
             optionsExpanded
             prioritiesEnabled
+            timeEstimatesEnabled
             priorityLabel="Priority"
             projectLabel="Project"
             recording={false}
@@ -1157,10 +1186,7 @@ describe('Quick capture modal composition', () => {
         );
       });
 
-      // Tapping More hides the Android keyboard, but it comes back the moment the user
-      // taps the title to keep typing. The measured lift then shrinks the space left for
-      // a sheet whose expanded content is taller than the screen, so the More panel has
-      // to scroll inside the sheet instead of pushing the title off the top (#1120).
+
       const scroll = tree.root.findByType(ScrollView);
       expect(scroll.props.testID).toBe('quick-capture-scroll');
       expect(scroll.findAllByType(TextInput).map((node) => node.props.accessibilityLabel))
@@ -1168,90 +1194,107 @@ describe('Quick capture modal composition', () => {
       const sheet = tree.root
         .findAllByType(View)
         .find((node) => flattenStyle(node.props.style).maxHeight === 500);
-      // Without this the bottom-anchored sheet keeps its full height and overflows the
-      // top of the keyboard-padded container.
+
+
       expect(flattenStyle(sheet?.props.style).flexShrink).toBe(1);
-      // The title input stays outside the scroll area, in the pinned part of the sheet.
+
       expect(tree.root.findAllByType(TextInput)[0].props.accessibilityLabel).toBe('quickAdd.inputLabel');
-      // Without a viewport inside the native modal, toasts fired from the sheet (the
-      // speech-not-configured notice) only appear after the sheet closes (#886). It has
-      // to live inside the keyboard-avoiding view or the keyboard covers it.
+
+
       expect(tree.root.findByType(KeyboardAvoidingView).findAllByType(ToastViewport)).toHaveLength(1);
     } finally {
       Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatformOs });
     }
   });
-  it('keeps the note field behind More instead of crowding collapsed capture', () => {
-    const renderBody = (optionsExpanded: boolean) => {
-      let tree!: ReturnType<typeof create>;
-      act(() => {
-        tree = create(
-          <QuickCaptureSheetBody
-            addAnother={false}
-            selectedPriority={null}
-            areaLabel="No Area"
-            contextLabel="Contexts"
-            dueDate={null}
-            dueLabel="Due Date"
-            dueTimeLabel="Change time"
-            handleClose={vi.fn()}
-            handleSave={vi.fn()}
-            insetsBottom={0}
-            inputRef={{ current: null }}
-            noteValue="Bring the signed form"
-            onNoteChange={vi.fn()}
-            onOpenAreaPicker={vi.fn()}
-            onOpenContextPicker={vi.fn()}
-            onOpenDueDatePicker={vi.fn()}
-            onOpenDueTimePicker={vi.fn()}
-            onOpenPriorityPicker={vi.fn()}
-            onOpenProjectPicker={vi.fn()}
-            onQuickDueDateSelect={vi.fn()}
-            onResetArea={vi.fn()}
-            onResetContexts={vi.fn()}
-            onResetDueDate={vi.fn()}
-            onResetDueTime={vi.fn()}
-            onResetPriority={vi.fn()}
-            onResetProject={vi.fn()}
-            onToggleOptions={vi.fn()}
-            onToggleAddAnother={vi.fn()}
-            onToggleRecording={vi.fn()}
-            onValueChange={vi.fn()}
-            optionsExpanded={optionsExpanded}
-            prioritiesEnabled
-            priorityLabel="Priority"
-            projectLabel="Project"
-            recording={false}
-            recordingBusy={false}
-            recordingReady={false}
-            sheetMaxHeight={500}
-            showDueTime={false}
-            t={(key) => key}
-            tc={tc}
-            value="Capture me"
-            visible
-          />
-        );
-      });
-      return tree;
-    };
+  it('keeps a compact multiline description first in the scrolling body outside More', () => {
+    const onNoteChange = vi.fn();
+    const onValueChange = vi.fn();
+    const renderBody = (optionsExpanded: boolean) => (
+      <QuickCaptureSheetBody
+        addAnother={false}
+        selectedPriority={null}
+        areaLabel="No Area"
+        contextLabel="Contexts"
+        dueDate={null}
+        dueLabel="Due Date"
+        dueTimeLabel="Change time"
+        handleClose={vi.fn()}
+        handleSave={vi.fn()}
+        insetsBottom={0}
+        inputRef={{ current: null }}
+        noteValue="Bring the signed form"
+        onNoteChange={onNoteChange}
+        onOpenAreaPicker={vi.fn()}
+        onOpenContextPicker={vi.fn()}
+        onOpenDueDatePicker={vi.fn()}
+        onOpenDueTimePicker={vi.fn()}
+        onOpenPriorityPicker={vi.fn()}
+        onOpenProjectPicker={vi.fn()}
+        onQuickDueDateSelect={vi.fn()}
+        onResetArea={vi.fn()}
+        onResetContexts={vi.fn()}
+        onResetDueDate={vi.fn()}
+        onResetDueTime={vi.fn()}
+        onResetPriority={vi.fn()}
+        onResetProject={vi.fn()}
+        onToggleOptions={vi.fn()}
+        onToggleAddAnother={vi.fn()}
+        onToggleRecording={vi.fn()}
+        onValueChange={onValueChange}
+        optionsExpanded={optionsExpanded}
+        prioritiesEnabled
+        timeEstimatesEnabled
+        priorityLabel="Priority"
+        projectLabel="Project"
+        recording={false}
+        recordingBusy={false}
+        recordingReady={false}
+        sheetMaxHeight={500}
+        showDueTime={false}
+        t={(key) => key}
+        tc={tc}
+        value="Capture me"
+        visible
+      />
+    );
 
     const findNote = (tree: ReturnType<typeof create>) => tree.root
       .findAllByType(TextInput)
       .filter((node) => node.props.accessibilityLabel === 'taskEdit.descriptionLabel');
 
-    // Collapsed capture stays a one-field sheet: the note is progressive
-    // disclosure behind More (#1118).
-    expect(findNote(renderBody(false))).toHaveLength(0);
+    let collapsed!: ReturnType<typeof create>;
+    act(() => {
+      collapsed = create(renderBody(false));
+    });
+    const inputs = collapsed.root.findAllByType(TextInput);
+    expect(inputs.map((node) => node.props.accessibilityLabel))
+      .toEqual(['quickAdd.inputLabel', 'taskEdit.descriptionLabel']);
+    const note = findNote(collapsed)[0];
+    expect(note.props.value).toBe('Bring the signed form');
+    expect(note.props.multiline).toBe(true);
+    expect(note.props.submitBehavior).toBe('newline');
+    expect(note.props.onSubmitEditing).toBeUndefined();
+    expect(note.props.autoFocus).not.toBe(true);
+    expect(flattenStyle(note.props.style).minHeight).toBe(44);
+    expect(flattenStyle(note.props.style).maxHeight).toBe(96);
+    const scroll = collapsed.root.findByType(ScrollView);
+    expect(scroll.findAllByType(TextInput)).toEqual([note]);
+    expect(scroll.findAllByType(TouchableOpacity).some((node) => node.props.accessibilityLabel === 'common.save')).toBe(false);
+    expect(collapsed.root.findAllByType(ScrollView)).toHaveLength(1);
+    act(() => note.props.onChangeText('Line one\n@home /due:tomorrow #literal'));
+    expect(onNoteChange).toHaveBeenCalledExactlyOnceWith('Line one\n@home /due:tomorrow #literal');
+    expect(onValueChange).not.toHaveBeenCalled();
 
-    const expanded = findNote(renderBody(true));
-    expect(expanded).toHaveLength(1);
-    expect(expanded[0].props.value).toBe('Bring the signed form');
-    expect(expanded[0].props.multiline).toBe(true);
+    act(() => collapsed.update(renderBody(true)));
+    expect(findNote(collapsed)).toHaveLength(1);
+
+    expect(findNote(collapsed)[0]).toBe(note);
+    expect(collapsed.root.findByType(ScrollView).findAllByType(TextInput)).toEqual([note]);
+    expect(collapsed.root.findAllByType(ScrollView)).toHaveLength(1);
   });
 
   it('carries the canonical priority flag on overlay rows and tints the trigger flag when set', () => {
-    // Overlay rows: the four non-empty rows carry ramp-tinted flags; Clear's flag is uncolored.
+
     let pickerTree!: ReactTestRenderer;
     act(() => {
       pickerTree = create(
@@ -1307,10 +1350,10 @@ describe('Quick capture modal composition', () => {
     expect(flagColor('high')).toBe('#f97316');
     expect(flagColor('urgent')).toBe('#dc2626');
     const clearFlag = pickerTree.root.findByProps({ testID: 'priority-flag-clear' });
-    // Clear's flag is uncolored: it rides the row's theme color, not the ramp.
+
     expect(clearFlag.props.color).toBe(tc.text);
 
-    // Trigger: the expanded priority chip tints its flag only once a priority is set.
+
     const renderTrigger = (selectedPriority: 'medium' | null) => {
       let tree!: ReactTestRenderer;
       act(() => {
@@ -1348,6 +1391,7 @@ describe('Quick capture modal composition', () => {
             onValueChange={vi.fn()}
             optionsExpanded
             prioritiesEnabled
+            timeEstimatesEnabled
             priorityLabel="Medium"
             projectLabel="Project"
             recording={false}

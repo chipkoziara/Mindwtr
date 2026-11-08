@@ -1,13 +1,6 @@
-/**
- * React Native's Process Inbox, replayed against the frozen parity fixture that
- * core's process-inbox-model and the native host contract are tested against.
- *
- * The fixture's `provenance` names the commit each scenario was captured at.
- * MINDWTR_CAPTURE_PROCESS_INBOX=1 rewrites it; MINDWTR_CAPTURE_PROCESS_INBOX_SCENARIOS
- * ('|'-separated names) limits the rewrite to those scenarios. Each scenario
- * drives the real modal through its buttons and inputs, with the real core
- * store, and records what a user sees and what the store is asked to write.
- */
+
+
+
 import React, { useState } from 'react';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
@@ -17,6 +10,7 @@ import {
   formatTimeEstimateLabel,
   loadTranslations,
   resetForTests,
+  runSyncStoreSave,
   setStorageAdapter,
   useTaskStore,
   type AppSettings,
@@ -34,7 +28,7 @@ const CAPTURE = process.env.MINDWTR_CAPTURE_PROCESS_INBOX === '1';
 const CAPTURE_ONLY = process.env.MINDWTR_CAPTURE_PROCESS_INBOX_SCENARIOS?.split('|').filter(Boolean) ?? [];
 
 const english = vi.hoisted(() => ({ strings: {} as Record<string, string> }));
-const toastLog = vi.hoisted(() => ({ entries: [] as unknown[] }));
+const toastLog = vi.hoisted(() => ({ entries: [] as unknown[], lastAction: null as null | (() => void) }));
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: { getItem: vi.fn().mockResolvedValue(null), setItem: vi.fn().mockResolvedValue(undefined), removeItem: vi.fn() },
@@ -52,12 +46,14 @@ vi.mock('../../lib/apple-foundation-models', async (importOriginal) => ({
 vi.mock('../../contexts/language-context', () => ({
   useLanguage: () => ({ t: (key: string) => english.strings[key] ?? key, language: 'en' }),
 }));
-vi.mock('../../contexts/theme-context', () => ({ useTheme: () => ({ isDark: false }) }));
+vi.mock('../../contexts/theme-context', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../contexts/theme-context')>(), useTheme: () => ({ isDark: false }) }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock('../../contexts/toast-context', () => ({
   useToast: () => ({
-    showToast: (toast: { title?: string; message?: string; tone?: string; actionLabel?: string }) => {
+    showToast: (toast: { title?: string; message?: string; tone?: string; actionLabel?: string; onAction?: () => void }) => {
       toastLog.entries.push([toast.tone ?? null, toast.title ?? null, toast.message ?? null, toast.actionLabel ?? null]);
+      if (toast.onAction) toastLog.lastAction = toast.onAction;
     },
     dismissToast: vi.fn(),
   }),
@@ -86,6 +82,8 @@ vi.mock('@react-native-community/datetimepicker', () => ({
   __esModule: true,
   default: (props: any) => React.createElement('DateTimePicker', props, props.children),
 }));
+
+vi.mock('../task-edit-modal', () => ({ TaskEditModal: () => null }));
 
 type Action =
   | ['press', string]
@@ -302,9 +300,8 @@ export const scenarios: Scenario[] = [
       ['press', 'delegate'], ['press', 'back'],
       ['press', 'someday'], ['press', 'back'],
       ['press', 'incubate'], ['press', 'back'],
-      ['press', 'project'], ['press', 'oneActionNo'], ['press', 'back'],
-      ['press', 'project'], ['press', 'oneActionYes'], ['press', 'back'],
-      ['press', 'illDoIt'],
+      ['press', 'project'], ['press', 'back'],
+      ['press', 'illDoIt'], ['press', 'fileIt'],
       ['press', 'done'],
       ['press', 'mode'],
       ['press', 'yes'],
@@ -477,8 +474,6 @@ export const scenarios: Scenario[] = [
   },
 ];
 
-// ---------------------------------------------------------------------------
-// Harness
 
 const pad = (value: number) => String(value).padStart(2, '0');
 const dateKey = (date: Date | null | undefined) => (date
@@ -497,16 +492,16 @@ const normalize = (value: unknown): unknown => JSON.parse(JSON.stringify(value, 
 )).replace(/"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/g, (match, id) => (
   createdIds.has(id) ? `"${createdIds.get(id)}"` : match
 )));
-// Keeps key presence: an update that clears a field sends it as undefined.
+
 const encodeArgs = (args: unknown[]) => normalize(args.map((arg) => (
   arg && typeof arg === 'object' && !Array.isArray(arg)
     ? Object.fromEntries(Object.entries(arg).map(([key, value]) => [key, value === undefined ? '<undefined>' : value]))
     : arg
 )));
 
-/** Context tasks (suggestions, similar tasks) that every scenario keeps. */
+
 export const CONTEXT_TASK_IDS = ['next-e', 'done-f'];
-/** The scenario's queue in order, then the context tasks; other Inbox items stay out. */
+
 export const scenarioTasks = (taskIds: string[]): Task[] => [
   ...taskIds.map((id) => allTasks.find((task) => task.id === id)!),
   ...allTasks.filter((task) => CONTEXT_TASK_IDS.includes(task.id)),
@@ -716,7 +711,7 @@ async function perform(harness: Harness, action: Action) {
         return;
       }
       if (id === 'createProjectEarly') {
-        // The keyboard's submit, which also picks an exact match (no Create button then).
+
         const inputs = root.findAll((node) => String(node.type) === 'TextInput' && node.props.accessibilityLabel === t('projects.search'));
         if (inputs.length !== 1) throw new Error(`Expected one project search, found ${inputs.length}`);
         await act(async () => { inputs[0].props.onSubmitEditing(); });
@@ -805,7 +800,7 @@ async function perform(harness: Harness, action: Action) {
       return;
     }
     case 'extraAction': {
-      // The next-action field comes first, then one field per extra row.
+
       const fields = root.findAll((node) => String(node.type) === 'TextInput' && node.props.accessibilityLabel === t('process.nextAction'));
       if (action[1] === 'add') {
         await press(findPressable(root, `+ ${t('process.addAnotherAction')}`));
@@ -910,8 +905,7 @@ describe('React Native Process Inbox parity fixture', () => {
     }
   }, 120_000);
 
-  // The controller used to reset dates after the next item had opened, so the
-  // next item lost them and filing it erased them from the task.
+
   it('keeps the next item\'s dates after Start later, Next, Incubate and Waiting', async () => {
     const scenario = scenarios.find(({ name }) => name.startsWith('the next item keeps its dates'))!;
     const observed = await runScenario(scenario) as { taskId?: string; draft?: Record<string, { date: string } | null>; writes: unknown[][] }[];
@@ -925,4 +919,141 @@ describe('React Native Process Inbox parity fixture', () => {
     expect(dates('dated-4')).toEqual(['2026-10-08', '2026-10-13', '2026-10-09']);
     expect(observed.at(-1)!.writes[0][2]).toMatchObject({ startTime: '2026-10-08', dueDate: '2026-10-13', reviewAt: '2026-10-09' });
   }, 60_000);
+
+
+  it('keeps a context and a note another device synced while the decision waited', async () => {
+    await seedStore(settingsVariants.base, scenarioTasks(['inbox-a', 'inbox-c']));
+    useTaskStore.setState({ settings: { ...useTaskStore.getState().settings, deviceId: 'this-device' } });
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<Root onClose={() => undefined} />); });
+    await flush();
+    const harness: Harness = { renderer, closed: () => 0 };
+    const stored = () => useTaskStore.getState()._tasksById.get('inbox-a')!;
+    for (const action of guidedToFile) await perform(harness, action);
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const save = runSyncStoreSave(async () => {
+      await held;
+      useTaskStore.setState({
+        _allTasks: useTaskStore.getState()._allTasks.map((entry) => (entry.id === 'inbox-a'
+          ? { ...entry, rev: 5, revBy: 'other-device', contexts: ['@phone', '@remote'], description: 'Synced note' }
+          : entry)),
+      });
+    });
+    await perform(harness, ['press', 'fileIt']);
+    release();
+    await save;
+    await flush();
+    expect(stored()).toMatchObject({ status: 'next', contexts: ['@phone', '@remote'], description: 'Synced note' });
+    await act(async () => { renderer.unmount(); });
+    await flushPendingSave();
+  }, 60_000);
+
+  it('keeps a context and a note another device synced before File it was pressed, after the screen re-rendered', async () => {
+    await seedStore(settingsVariants.base, scenarioTasks(['inbox-a', 'inbox-c']));
+    useTaskStore.setState({ settings: { ...useTaskStore.getState().settings, deviceId: 'this-device' } });
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<Root onClose={() => undefined} />); });
+    await flush();
+    const harness: Harness = { renderer, closed: () => 0 };
+    const stored = () => useTaskStore.getState()._tasksById.get('inbox-a')!;
+    for (const action of guidedToFile) await perform(harness, action);
+
+    await act(async () => {
+      useTaskStore.setState({
+        _allTasks: useTaskStore.getState()._allTasks.map((entry) => (entry.id === 'inbox-a'
+          ? { ...entry, rev: 5, revBy: 'other-device', contexts: ['@phone', '@remote'], description: 'Synced note' }
+          : entry)),
+      });
+    });
+    await flush();
+    await perform(harness, ['press', 'fileIt']);
+    await flush();
+    expect(stored()).toMatchObject({ status: 'next', contexts: ['@phone', '@remote'], description: 'Synced note' });
+    await act(async () => { renderer.unmount(); });
+    await flushPendingSave();
+  }, 60_000);
+
+  it('keeps an attachment a sync save published while a title link waited, and refuses Undo once another device changed the task', async () => {
+    toastLog.entries.length = 0;
+    await seedStore(settingsVariants.base, scenarioTasks(['inbox-a', 'inbox-c']));
+    useTaskStore.setState({ settings: { ...useTaskStore.getState().settings, deviceId: 'this-device' } });
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<Root onClose={() => undefined} />); });
+    await flush();
+    const harness: Harness = { renderer, closed: () => 0 };
+    const stored = () => useTaskStore.getState()._tasksById.get('inbox-a')!;
+    const publish = (task: Task) => useTaskStore.setState({
+      _allTasks: useTaskStore.getState()._allTasks.map((entry) => (entry.id === task.id ? task : entry)),
+    });
+    await perform(harness, ['set', 'title', 'Call Alice /link:https://notes.example']);
+    for (const action of guidedToFile) await perform(harness, action);
+
+
+    const remote = { id: 'att-remote', kind: 'link' as const, title: 'Remote', uri: 'https://remote.example', createdAt: at('22'), updatedAt: at('22') };
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const save = runSyncStoreSave(async () => {
+      await held;
+      publish({ ...stored(), rev: 5, attachments: [remote] });
+    });
+    await perform(harness, ['press', 'fileIt']);
+    release();
+    await save;
+    await flush();
+    expect(stored().status).toBe('next');
+    expect(stored().attachments?.map((attachment) => attachment.uri)).toEqual(['https://remote.example', 'https://notes.example']);
+
+
+    publish({ ...stored(), title: 'Edited elsewhere', rev: 9, revBy: 'other-device' });
+    toastLog.entries.length = 0;
+    await act(async () => { toastLog.lastAction?.(); });
+    await flush();
+    expect(stored()).toMatchObject({ title: 'Edited elsewhere', status: 'next' });
+    expect(toastLog.entries).toEqual([['error', 'Error', expect.stringMatching(/^STALE_REVISION/), null]]);
+    await act(async () => { renderer.unmount(); });
+    await flushPendingSave();
+  }, 60_000);
+
+
+  it('offers the chosen project\'s sections, drops the pick on a project change, and files the task in it', async () => {
+    await seedStore(settingsVariants.base, scenarioTasks(['inbox-a', 'inbox-c']));
+    const design = await useTaskStore.getState().addSection('p-launch', 'Design');
+    if (!design) throw new Error('Expected a section');
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<Root onClose={() => undefined} />); });
+    await flush();
+    const harness: Harness = { renderer, closed: () => 0 };
+    const sectionChip = (title: string) => pressables(renderer.root)
+      .find((node) => node.props.accessibilityLabel === `${t('taskEdit.sectionLabel')}: ${title}`);
+    const pressChip = async (title: string) => {
+      const chip = sectionChip(title);
+      if (!chip) throw new Error(`No section chip ${title}`);
+      await act(async () => { chip.props.onPress(); });
+      await flush();
+    };
+    for (const action of guidedToFile) await perform(harness, action);
+
+    expect(sectionChip('Design')).toBeUndefined();
+    await perform(harness, ['chip', 'project', 'p-launch']);
+    await pressChip('Design');
+    expect(sectionChip('Design')?.props.accessibilityState).toEqual({ selected: true });
+
+
+    await perform(harness, ['chip', 'project', 'p-home']);
+    expect(sectionChip('Design')).toBeUndefined();
+    await perform(harness, ['chip', 'project', 'p-launch']);
+    expect(sectionChip(t('taskEdit.noSectionOption'))?.props.accessibilityState).toEqual({ selected: true });
+
+    await pressChip('Design');
+    await perform(harness, ['press', 'fileIt']);
+    await flush();
+    expect(useTaskStore.getState()._tasksById.get('inbox-a')).toMatchObject({
+      status: 'next', projectId: 'p-launch', sectionId: design.id,
+    });
+    await act(async () => { renderer.unmount(); });
+    await flushPendingSave();
+  }, 60_000);
 });
+

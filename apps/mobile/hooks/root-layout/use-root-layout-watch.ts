@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 
-import { useTaskStore, type AppData, type Language } from '@mindwtr/core';
+import { getNextFutureStartRevealAt, safeParseDate, useTaskStore, type AppData, type Language, type Task } from '@mindwtr/core';
 
 import {
   activateWatchConnectivity,
@@ -11,13 +11,25 @@ import {
 } from '@/modules/watch-connectivity';
 import { logInfo, logWarn } from '@/lib/app-log';
 import { mobilePomodoroController } from '@/lib/pomodoro-controller';
-import { getFocusWidgetFilter } from '@/lib/focus-widget-filter';
+import { focusWidgetFilterKey, getFocusWidgetFilter } from '@/lib/focus-widget-filter';
+import { getLocalDayKey } from '@/hooks/use-local-day-key';
 import { buildWidgetPayload } from '@/lib/widget-data';
 import { buildWatchApplicationContext, watchPomodoroPublicationKey } from '@/lib/watch-snapshot';
 
 const WATCH_SNAPSHOT_RELEASE_CHECK = 'v1.3.0/watch-snapshot';
 const WATCH_NUMERIC_BRIDGE_RELEASE_CHECK = 'v1.3.0/watch-numeric-bridge';
 const WATCH_PUBLICATION_COALESCE_MS = 120;
+
+
+function getNextReviewDueAt(tasks: readonly Task[], nowMs: number): number | null {
+  let next: number | null = null;
+  for (const task of tasks) {
+    const reviewAt = safeParseDate(task.reviewAt)?.getTime();
+    if (reviewAt === undefined || reviewAt <= nowMs) continue;
+    if (next === null || reviewAt < next) next = reviewAt;
+  }
+  return next;
+}
 
 export function useRootLayoutWatch({
     canonicalDataReady,
@@ -39,6 +51,32 @@ export function useRootLayoutWatch({
     let publishing = false;
     let publishAgain = false;
     let lastContextKey = '';
+
+
+    let lastInputs: readonly unknown[] | null = null;
+    let nextRevealAt: number | null = null;
+    const readInputs = () => {
+      const store = useTaskStore.getState();
+      return [
+        store.tasks, store.projects, store.sections, store.areas, store.people, store.settings,
+        watchPomodoroPublicationKey(mobilePomodoroController.getSnapshot()),
+        getLocalDayKey(),
+        focusWidgetFilterKey(getFocusWidgetFilter()),
+      ] as const;
+    };
+    const inputsUnchanged = (inputs: readonly unknown[]) => lastInputs !== null
+      && inputs.every((value, index) => value === lastInputs![index])
+      && (nextRevealAt === null || Date.now() < nextRevealAt);
+    const rememberInputs = (inputs: ReturnType<typeof readInputs>) => {
+      lastInputs = inputs;
+      const startAt = getNextFutureStartRevealAt(inputs[0]);
+      const reviewAt = getNextReviewDueAt(inputs[0], Date.now());
+      nextRevealAt = startAt === null ? reviewAt : reviewAt === null ? startAt : Math.min(startAt, reviewAt);
+    };
+    const forgetPublished = () => {
+      lastContextKey = '';
+      lastInputs = null;
+    };
 
     const buildContext = () => {
       const store = useTaskStore.getState();
@@ -88,12 +126,18 @@ export function useRootLayoutWatch({
       try {
         do {
           publishAgain = false;
+          const inputs = readInputs();
+          if (inputsUnchanged(inputs)) continue;
           const context = buildContext();
           const key = JSON.stringify(context, (field, value) => field === 'generatedAt' ? undefined : value);
-          if (key === lastContextKey) continue;
+          if (key === lastContextKey) {
+            rememberInputs(inputs);
+            continue;
+          }
           await updateWatchApplicationContext(context);
           if (!active) return;
           lastContextKey = key;
+          rememberInputs(inputs);
           void logInfo('Watch snapshot published', {
             scope: 'watch',
             extra: {
@@ -126,8 +170,8 @@ export function useRootLayoutWatch({
 
     const nativeListener = addPendingWatchCaptureListener(() => {
       onPendingCapture();
-      // Settlement also emits this edge, after the task save is durable.
-      lastContextKey = '';
+
+      forgetPublished();
       requestPublish();
     });
     const unsubscribeStore = useTaskStore.subscribe(requestPublish);
@@ -146,7 +190,7 @@ export function useRootLayoutWatch({
         .then(() => {
           if (!active) return;
           activated = true;
-          lastContextKey = '';
+          forgetPublished();
           requestPublish();
         })
         .catch(() => {
@@ -162,8 +206,8 @@ export function useRootLayoutWatch({
     };
     const appStateSubscription = AppState.addEventListener('change', (nextState) => {
       if (nextState !== 'active') return;
-      // Foreground is both the retry boundary for failed activation and a
-      // chance to replace context after pairing/session state changed.
+
+
       activated = false;
       void ensureActivated();
     });

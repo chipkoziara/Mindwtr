@@ -4,7 +4,7 @@ Native Android home-screen widgets, the floating quick-capture dialog, and the
 opt-in automation capture receiver.
 Every widget string comes from the payload `apps/mobile/lib/widget-service.ts`
 publishes (`AndroidTasksWidgetPayload`) into SharedPreferences
-`mindwtr_widget` / `payload`; Kotlin only lays it out.
+`mindwtr_widget` / `payload`; Kotlin lays it out and refreshes Upcoming dates.
 
 ## Kinds
 
@@ -24,7 +24,7 @@ intent.
 
 The Tasks widget reads optional payload sections and supports a list chooser.
 Its default Focus projection combines Today's Focus and Today. A user's
-explicit choice of Focus, Inbox, Next Actions, Waiting, Someday, or a saved
+explicit choice of Focus, Inbox, Next Actions, Upcoming, Waiting, Someday, or a saved
 filter remains selected across payload updates. The title opens the displayed
 list in the app; blank background, space below the visible rows, section
 headers, and the empty message open Focus regardless of the selected list. A
@@ -67,7 +67,7 @@ together with the header.
 
 List payloads may provide a validated hostless `mindwtr:///...` `openUri`.
 Legacy Focus, Inbox, Waiting, and Someday payloads map to their existing app
-routes. Next Actions and saved-filter ids map to the shared
+routes. Next Actions, Upcoming, saved-filter and context/tag ids map to the shared
 `/widget-list/<encoded-list-id>` destination; unknown or malformed ids fall
 back to Focus rather than becoming arbitrary paths.
 
@@ -77,9 +77,49 @@ the separate chooser chevron follows the muted-text token for contrast instead
 of retaining a fixed or semi-transparent accent tint.
 
 Every Android snapshot includes bounded Focus, Inbox, Next Actions, Waiting,
-and Someday lists, even before a Tasks widget is placed. After the app has
+Upcoming, and Someday lists, even before a Tasks widget is placed. After the app has
 published once, a newly placed widget can select those cached lists without
-another app opening. Saved-filter lists remain published on demand.
+another app opening. The chooser also offers every saved filter (up to the
+established 50-filter limit), context and tag by name, but the payload carries
+their lists only for what placed widgets chose: a list for every label made each
+refresh grow with the labels (#1399). A newly chosen one shows under its name,
+empty, until the app's next publication (unless another widget already shows that
+list). The Tasks chooser groups these under their existing translated headings and
+offers search for longer inventories.
+Rows recycle through a native ListView; searching preserves the pending choice.
+Each widget stores its own selection.
+
+Context/tag options come from undeleted tasks visible under the current area and
+active-project rules, including retained done/archived task labels and hierarchy
+ancestors. They have no arbitrary token-count cap. Rows use the full actionable
+widget pool across statuses, shared canonical hierarchical filtering, and widget
+sorting; the Focus screen's current token filter does not narrow these lists.
+Selected removed labels stay empty under their own heading. IDs are
+`context:<canonical-token>` and `tag:<canonical-token>`; links encode the whole ID
+as one path segment. Android-only chooser metadata does not change iOS snapshots.
+
+When a placed widget chose a context or tag, publication indexes task/token
+memberships once, then verifies indexed candidates with shared `applyFilter`. Each
+list retains the existing 200-row Android cache limit, with total count and
+overflow navigation. Snapshot size grows with the chosen lists, not with the
+number of labels.
+
+Upcoming is a preview of the shared Focus seven-day list. Its rows have no
+completion ring and open their task directly. Each row supplies `upcomingDate`
+(a calendar date, floating local datetime or canonical UTC instant) and `upcomingLabel` (localized Starts
+or Returns). Every render excludes dates outside tomorrow through local day
+seven, and relabels the day with the payload's `upcomingDays` (Today, Tomorrow,
+a short weekday within six days, else a numeric date, as core's Next Actions
+rows) in the current time zone, with the time in the Android locale's format.
+Empty Upcoming stays selected. Tasks and legacy Tasks providers listen for
+clock and timezone changes and request Android's inexact 30-minute widget
+updates. Android skips DATE_CHANGED for manifest receivers, so every Tasks
+render also sets an inexact alarm (10-minute window) for the next local
+midnight that redraws the Tasks widgets. Compact and Quick Capture keep their
+existing cadence. Launcher and
+power-management delays can postpone redraws. Native refresh only filters the
+cached rows: newly eligible tasks and data/filter changes require the app's
+next payload publication.
 
 ## Picker previews
 
@@ -101,6 +141,13 @@ schema core's `packages/core/src/pending-captures.ts` (`parsePendingCapture`) re
 through `PendingCaptureWriter` (temp file + rename), then bumps the stored
 payload's `inboxCount` and redraws every widget. The tile, app shortcut,
 capture notification and all three widgets launch it by explicit class name.
+
+A Tasks widget showing one context or tag opens the dialog with that token typed
+in (`@Todd `), editable like any text; the drain's quick-add parse applies it
+(#1418). `WidgetListStore.captureText` writes simple and hierarchical tokens
+as typed (`@person/todd `) and other names in quoted form (`@"Two words" `), the
+forms quick-add parses without a known-token list (#1428). A name with a quote,
+a backslash, or a space before `@ # + ! % /` opens empty.
 
 After a text **Save** it starts `CaptureSyncHeadlessService` (not exported), which
 wakes the JS task `MindwtrCaptureSync` in `apps/mobile/lib/background-sync-task.ts`:

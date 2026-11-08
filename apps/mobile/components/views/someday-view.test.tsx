@@ -150,7 +150,6 @@ vi.mock('../use-task-list-selection', () => ({
 vi.mock('./deferred-projects-section', () => ({
   DeferredProjectsSection: () => null,
   DeferredProjectRow: (props: any) => React.createElement('DeferredProjectRow', props),
-  selectDeferredProjects: () => [],
 }));
 
 const makeTask = (id: string, overrides: Partial<Task> = {}): Task => ({
@@ -248,7 +247,7 @@ describe('SomedayView section grouping', () => {
     const groups = mocked.taskListProps.taskGroups as { title: string; projects?: { id: string }[]; tasks: Task[] }[];
     expect(groups.map((group) => [group.title, (group.projects ?? []).map((project) => project.id), group.tasks.map((task) => task.id)]))
       .toEqual([['Books to read', ['trip'], ['book']], ['Travel', [], []], ['No section', ['loose'], []]]);
-    // The top block does not list them again.
+
     const header = mocked.taskListProps.ListHeaderComponent as React.ReactElement<{ projects: unknown[] }>;
     expect(header.props.projects).toEqual([]);
 

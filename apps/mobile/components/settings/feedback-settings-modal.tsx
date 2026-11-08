@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     KeyboardAvoidingView,
     Modal,
     Platform,
@@ -64,6 +65,7 @@ export function FeedbackSettingsModal({
     const [category, setCategory] = useState<FeedbackCategory>('bug');
     const [message, setMessage] = useState('');
     const [email, setEmail] = useState('');
+    const emailRef = useRef<TextInput>(null);
     const [bugLocation, setBugLocation] = useState<FeedbackLocation | ''>('');
     const [includeDiagnostics, setIncludeDiagnostics] = useState(false);
     const [status, setStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
@@ -72,13 +74,14 @@ export function FeedbackSettingsModal({
         Platform.OS === 'android' ? { scrollsChildToFocus: false } : {}
     );
 
-    // Each opening is its own visit: a send from an earlier visit that ends later changes nothing here.
+
     const visit = useRef(0);
     useEffect(() => {
         visit.current += 1;
         if (!visible) return;
         setStatus('idle');
         setError(null);
+        return () => { visit.current += 1; };
     }, [visible]);
 
     useEffect(() => {
@@ -87,7 +90,7 @@ export function FeedbackSettingsModal({
         setBugLocation('');
     }, [category]);
 
-    // Core's words and rules (about-settings-model.ts), shared with the native host.
+
     const text = useMemo(() => buildFeedbackModalText(tr), [tr]);
     const categoryLabels = text.categories;
     const messagePlaceholders = text.messagePlaceholders;
@@ -95,10 +98,23 @@ export function FeedbackSettingsModal({
 
     const { canSubmit, visibleError } = getFeedbackDraftState({ tr, isConfigured, message, email, status, error });
 
-    const submit = async () => {
+    const submit = async (withoutEmailConfirmed = false) => {
+        if (!canSubmit) return;
         const plan = planFeedbackSubmit({ category, message, email, location: bugLocation, includeDiagnostics }, tr);
         if ('error' in plan) {
             setError(plan.error);
+            return;
+        }
+        if (!plan.input.email && !withoutEmailConfirmed) {
+            const promptedIn = visit.current;
+            Alert.alert(text.noEmailTitle, text.noEmailDescription, [
+                { text: text.addEmail, style: 'cancel', onPress: () => {
+                    if (visit.current === promptedIn) emailRef.current?.focus();
+                } },
+                { text: text.sendWithoutEmail, onPress: () => {
+                    if (visit.current === promptedIn) void submit(true);
+                } },
+            ]);
             return;
         }
         setStatus('sending');
@@ -269,6 +285,8 @@ export function FeedbackSettingsModal({
                                     placeholder={messagePlaceholders[category]}
                                     placeholderTextColor={tc.secondaryText}
                                     multiline
+
+                                    scrollEnabled={Platform.OS !== 'ios'}
                                     maxLength={getFeedbackMessageMaxLength({ category, location: bugLocation }, tr)}
                                     style={[
                                         styles.feedbackTextArea,
@@ -285,6 +303,7 @@ export function FeedbackSettingsModal({
                                     {text.email}
                                 </Text>
                                 <TextInput
+                                    ref={emailRef}
                                     value={email}
                                     onChangeText={(next) => {
                                         setEmail(next);

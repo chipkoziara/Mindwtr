@@ -1,5 +1,5 @@
-// Runs the official MCP client against the native HTTP listener with fixture data.
-// Real persistence is covered by the shared-operation Rust tests.
+
+
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -47,8 +47,9 @@ try {
     }));
     await client.ping();
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 13);
+    assert.equal(tools.length, 14);
     assert.ok(tools.some((tool) => tool.name === 'mindwtr_list_tasks'));
+    assert.ok(tools.some((tool) => tool.name === 'mindwtr_archive_task'));
     for (const tool of tools) assert.equal(tool.inputSchema.type, 'object');
     for (const name of ['mindwtr_list_tasks', 'mindwtr_list_projects', 'mindwtr_list_areas']) {
         const result = await client.callTool({ name, arguments: {} });

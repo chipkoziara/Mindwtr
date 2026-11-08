@@ -1,13 +1,6 @@
-// The mobile attachment files layer: where attachment bytes live on the device, safe
-// temp-then-rename writes, local presence and stat, the per-session upload-refusal budget, the
-// WebDAV download backoff, the stored sync configs, the once-a-day presence stamp (#1119) and
-// the pending-work predicate. It moved here from React Native's
-// `apps/mobile/lib/attachment-sync-utils.ts` so the native apps run the same rules; each host
-// binds it to its own file IO, key-value store, keystore, Dropbox credentials and log.
-//
-// Data safety: attachment bytes stay under `<documents>/attachments/` (`ATTACHMENTS_DIR_NAME`),
-// so every stored `file://` URI stays valid, and a write goes to a temp file first so a cut
-// write never leaves a truncated file at the real path.
+
+
+
 import type { AppData, Attachment } from './types';
 import { ATTACHMENTS_DIR_NAME, extractExtension } from './attachment-paths';
 import { computeSha256Hex, isSha256Hex } from './attachment-hash';
@@ -41,67 +34,94 @@ export const FILE_BACKEND_VALIDATION_CONFIG = {
   blockedMimeTypes: [],
 };
 
-/** The existing managed filename policy only. This does not validate an ID/path or prove
- * ownership, and callers must still authorize the directory and any file operation. */
+
 export const getManagedAttachmentFileName = (attachment: Pick<Attachment, 'id' | 'title' | 'uri'>): string => (
   `${attachment.id}${extractExtension(attachment.title) || extractExtension(attachment.uri)}`
 );
 
-// A per-session count of permanent upload refusals (the mobile twin of desktop's
-// sync-attachment-validation.ts). A third first-upload refusal is terminal; a replacement
-// remains pending and suppresses further attempts for the same content identity.
+
 const ATTACHMENT_UPLOAD_REFUSAL_MAX_ATTEMPTS = 3;
 type AttachmentUploadRefusal = { contentIdentity: string; attempts: number };
 
 const ATTACHMENT_TEMP_FILE_PREFIX = '.mindwtr-attachment-write-';
 
-/** What the host's file system reports for a path. `exists` stays undefined when the platform
- *  cannot tell; `modificationTime` is in seconds, as expo-file-system reports it. */
-export type MobileAttachmentFileInfo = { exists?: boolean; size?: number; modificationTime?: number };
 
-/** Android Storage Access Framework folders (`content://` trees). */
+export type MobileAttachmentFileInfo = { exists?: boolean; isDirectory?: boolean; size?: number; modificationTime?: number };
+
+
 export type MobileAttachmentSafPort = {
-  /** The entry URIs of a folder. */
+
   readDirectory(uri: string): Promise<string[]>;
-  /** Creates a subfolder and returns its URI. */
+
   makeDirectory(parentUri: string, name: string): Promise<string>;
-  /** Creates a document and returns its URI; a provider may rename it on a name clash.
-   *  Absent where the host cannot write SAF folders: File Sync then refuses the upload. */
+
+
   createFile?(parentUri: string, name: string, mimeType: string): Promise<string>;
-  /** Replaces a document's bytes. */
+
   writeBytes?(uri: string, bytes: Uint8Array): Promise<void>;
+
+
+  listChildren?(uri: string): Promise<{ uri: string; name: string | null; size?: number | null; mime?: string | null }[]>;
+
+  stat?(uri: string): Promise<{ name: string | null } | null>;
 };
 
-/** The device's file IO for attachments (React Native: expo-file-system). URIs pass through
- *  verbatim, scheme included (`file://`, Android `content://`). */
+
+const listSafEntries = async (saf: MobileAttachmentSafPort, dirUri: string): Promise<Map<string, { uri: string; size: number | null; directory: boolean }>> => {
+  const entries = saf.listChildren
+    ? await saf.listChildren(dirUri)
+    : (await saf.readDirectory(dirUri)).map((uri) => ({ uri, name: null, size: null, mime: null }));
+  const byName = new Map<string, { uri: string; size: number | null; directory: boolean }>();
+  for (const entry of entries) {
+    const name = entry.name || getSafLeafName(entry.uri);
+    if (name && !byName.has(name)) {
+      byName.set(name, {
+        uri: entry.uri,
+        size: typeof entry.size === 'number' ? entry.size : null,
+
+        directory: entry.mime === 'vnd.android.document/directory',
+      });
+    }
+  }
+  return byName;
+};
+
+
+export const listSafEntriesByName = async (saf: MobileAttachmentSafPort, dirUri: string): Promise<Map<string, string>> => (
+  new Map([...(await listSafEntries(saf, dirUri))].map(([name, entry]) => [name, entry.uri]))
+);
+
+
+export const getSafDocumentName = async (saf: MobileAttachmentSafPort, uri: string): Promise<string> => (
+  (saf.stat ? (await saf.stat(uri))?.name : null) || getSafLeafName(uri)
+);
+
+
 export type MobileAttachmentFileSystemPort = {
-  /** The app's document and cache directory URIs, or null when unknown. */
+
   documentDirectory(): string | null;
   cacheDirectory(): string | null;
   getInfo(uri: string): Promise<MobileAttachmentFileInfo>;
-  /** Creates the directory and any missing parents. */
+
   makeDirectory(uri: string): Promise<void>;
-  /** The entry names of a directory. */
+
   readDirectory(uri: string): Promise<string[]>;
   readBytes(uri: string): Promise<Uint8Array>;
-  /** `length` bytes starting at byte `position`. */
+
   readBytesRange(uri: string, position: number, length: number): Promise<Uint8Array>;
-  /** Creates or replaces the file. */
+
   writeBytes(uri: string, bytes: Uint8Array): Promise<void>;
   copy(from: string, to: string): Promise<void>;
   move(from: string, to: string): Promise<void>;
-  /** Deletes a file or directory; a missing path is not an error. */
+
   delete(uri: string): Promise<void>;
-  /**
-   * Deletes the file unless `keep()` says a record owns it again, asking `keep()` in the same turn as the delete and after
-   * every file call made before this one, so no restore can land between the check and the delete. Answers whether it deleted.
-   * Absent where a delete starts at once (React Native: expo's delete); then `keep()` runs right before `delete`.
-   */
+
+
   deleteUnlessKept?(uri: string, keep: () => boolean): Promise<boolean>;
-  /** Null when the platform has no Storage Access Framework. Read on every use. */
+
   saf(): MobileAttachmentSafPort | null;
-  /** A file's SHA-256 (hex), streamed by the host so its bytes never cross into memory here. Absent where only bytes can be
-   *  hashed (React Native: they go through `setSha256HexProvider`). */
+
+
   sha256?(uri: string): Promise<string>;
 };
 
@@ -110,17 +130,13 @@ export type AttachmentSyncDir =
   | { type: 'saf'; dirUri: string; attachmentsDirUri: string };
 
 export type AttachmentSafDirectoryEntries =
-  | { status: 'available'; entries: Map<string, string> }
+  | { status: 'available'; entries: Map<string, string>; sizes: Map<string, number | null>; directories: Set<string> }
   | { status: 'unreadable' };
 
 export type PersistAttachmentOutcome = {
   attachment: Attachment;
-  /**
-   * 'copied' — bytes were re-homed into the managed attachments dir now;
-   * 'already-local' — the uri already points into the managed dir (success);
-   * 'not-applicable' — nothing to persist (link/http/non-file, or no dir);
-   * 'failed' — the copy was attempted and did not succeed.
-   */
+
+
   status: 'copied' | 'already-local' | 'not-applicable' | 'failed';
 };
 
@@ -146,12 +162,7 @@ export const getSafLeafName = (value: string): string => {
   return lastSeparator >= 0 ? stripped.slice(lastSeparator + 1) : stripped;
 };
 
-const hasSafLeafName = (value: string, expected: string): boolean => (
-  getSafLeafName(value) === expected
-);
 
-/** The whole buffer when `bytes` covers it, else a copy (unlike http-utils' `toArrayBuffer`,
- *  which always copies). */
 export const toAttachmentArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
   if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
     return bytes.buffer;
@@ -168,6 +179,9 @@ const buildTempUri = (targetUri: string): string => {
   return `${parent}${ATTACHMENT_TEMP_FILE_PREFIX}${suffix}.tmp`;
 };
 
+
+const FS_ERROR_CODE_PATTERN = /\b(EACCES|EPERM|ENOENT|ENOSPC|EEXIST|EISDIR|ENOTDIR|EROFS|EBUSY|EIO|EMFILE|ENFILE|EXDEV)\b/;
+
 const isTempAttachmentFile = (name: string): boolean => {
   return /^\.mindwtr-attachment-write-[0-9a-z]+-[0-9a-f]{12}\.tmp$/.test(name);
 };
@@ -182,29 +196,23 @@ const isExplicitLocalFileNotFoundError = (error: unknown): boolean => {
   return /(?:^|\b)ENOENT(?:\b|$)|no such file or directory|file not found/i.test(message);
 };
 
-/**
- * A local uri whose bytes we may read at all. `migrateAttachmentsLocallyBeforeSync` copies
- * legitimate outside picks (content:// / SAF) into the managed dir, so a uri that fails here
- * must be refused by both the upload gate and that migration — otherwise a traversal uri
- * simply gets copied in and uploaded anyway.
- */
+
 const isTraversalFreeAttachmentUri = (uri: string): boolean =>
   Boolean(sanitizeAttachmentUriForSyncMerge(uri));
 
-/** Core functions called through here so a host's tests can replace them the way they
- *  replace `@mindwtr/core`. A host that passes nothing gets core's own. */
+
 export type MobileAttachmentFilesCoreFunctions = {
   isSandboxMode: typeof isSandboxMode;
 };
 
 export type MobileAttachmentFilesHost = {
   fs: MobileAttachmentFileSystemPort;
-  /** The device key-value store (React Native: AsyncStorage). */
+
   storage: SyncKeyValueStoragePort;
-  /** Reads a secret sync key from the keystore. */
+
   getSecureConfigValue(key: string): Promise<string | null>;
   log: Pick<MobileSyncLogPort, 'info' | 'warn' | 'sanitize'>;
-  /** The fetch Dropbox token refreshes use when a caller passes none. */
+
   fetch: typeof fetch;
   dropboxAuth: Pick<MobileSyncDropboxAuthPort, 'getValidAccessToken' | 'forceRefreshAccessToken'>;
   core?: Partial<MobileAttachmentFilesCoreFunctions>;
@@ -254,7 +262,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
       ATTACHMENT_UPLOAD_REFUSAL_MAX_ATTEMPTS,
     );
     attachmentUploadRefusals.set(attachment.id, { contentIdentity, attempts });
-    // The id, not the title: mobile's attachment warnings never carry the file name.
+
     const message = `Attachment upload refused (${reason}) for ${attachment.id}`
       + ` [attempt ${attempts}/${ATTACHMENT_UPLOAD_REFUSAL_MAX_ATTEMPTS}]`;
     if (attempts < ATTACHMENT_UPLOAD_REFUSAL_MAX_ATTEMPTS) {
@@ -276,13 +284,36 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     return { attempts, reachedLimit: true, mutated, message, logMessage };
   };
 
+
+  const describeErrorForLog = (error: unknown, knownUris: string[]): string => {
+    let text = error instanceof Error ? error.message : String(error);
+    for (const uri of knownUris) {
+      const path = uri.replace(/^file:\/\//i, '');
+      for (const form of [uri, decodeUriSafe(uri), path, decodeUriSafe(path)]) {
+        if (form) text = text.split(form).join(describeAttachmentUriForLog(uri));
+      }
+    }
+
+
+    const start = /(^|[\s'"(=:])['"]?(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|\/)/.exec(text);
+    if (!start) return text;
+    const code = FS_ERROR_CODE_PATTERN.exec(text.slice(start.index))?.[1];
+    return `${text.slice(0, start.index)}${start[1]}[path]${code ? ` (${code})` : ''}`;
+  };
+
   const logAttachmentWarn = (
     message: string,
     error?: unknown,
     extra?: Record<string, string>,
+    knownUris: string[] = [],
   ) => {
     const fields = error
-      ? { ...extra, error: host.log.sanitize(error instanceof Error ? error.message : String(error)) }
+      ? {
+        ...extra,
+        error: host.log.sanitize(knownUris.length > 0
+          ? describeErrorForLog(error, knownUris)
+          : error instanceof Error ? error.message : String(error)),
+      }
       : extra;
     void host.log.warn(message, { scope: 'attachment', extra: fields });
   };
@@ -301,6 +332,11 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
 
   const clearWebdavDownloadBackoff = (attachmentId: string): void => {
     webdavDownloadBackoff.deleteEntry(attachmentId);
+  };
+
+
+  const clearWebdavDownloadBackoffs = (): void => {
+    webdavDownloadBackoff.clear();
   };
 
   const pruneWebdavDownloadBackoff = (): void => {
@@ -325,7 +361,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
           try {
             await fs.delete(tempUri);
           } catch {
-            // Ignore temp cleanup failures.
+
           }
         }
       }
@@ -354,36 +390,38 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
       try {
         await fs.delete(tempUri);
       } catch {
-        // Ignore cleanup errors for temp file.
+
       }
     }
   };
 
   const copyFileSafely = async (sourceUri: string, targetUri: string): Promise<void> => {
     const tempUri = buildTempUri(targetUri);
+    const knownUris = [sourceUri, targetUri, tempUri];
+    const copied = { sourceUri: describeAttachmentUriForLog(sourceUri), targetUri: describeAttachmentUriForLog(targetUri) };
     try {
       await fs.copy(sourceUri, tempUri);
     } catch (error) {
-      logAttachmentWarn('Attachment temp copy failed, falling back to byte write', error);
+      logAttachmentWarn('Attachment temp copy failed, falling back to byte write', error, undefined, knownUris);
       await writeBytesSafely(targetUri, await readFileAsBytes(sourceUri));
-      logAttachmentInfo('Attachment byte fallback copied file', { sourceUri, targetUri });
+      logAttachmentInfo('Attachment byte fallback copied file', copied);
       return;
     }
     try {
       await fs.move(tempUri, targetUri);
     } catch (moveError) {
-      logAttachmentWarn('Attachment temp move failed, falling back to direct copy', moveError);
+      logAttachmentWarn('Attachment temp move failed, falling back to direct copy', moveError, undefined, knownUris);
       try {
         await fs.copy(sourceUri, targetUri);
       } catch (copyError) {
-        logAttachmentWarn('Attachment direct copy failed, falling back to byte write', copyError);
+        logAttachmentWarn('Attachment direct copy failed, falling back to byte write', copyError, undefined, knownUris);
         await writeBytesSafely(targetUri, await readFileAsBytes(sourceUri));
-        logAttachmentInfo('Attachment byte fallback copied file', { sourceUri, targetUri });
+        logAttachmentInfo('Attachment byte fallback copied file', copied);
       } finally {
         try {
           await fs.delete(tempUri);
         } catch {
-          // Ignore cleanup errors for temp file.
+
         }
       }
     }
@@ -441,13 +479,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     return dir;
   };
 
-  /**
-   * Removes a local attachment only when its URI proves it is the id-named copy
-   * owned by Mindwtr's managed attachments directory. Draft settlement passes
-   * candidates here; arbitrary user-picked paths and sibling directories are
-   * intentionally rejected. `keep` runs after every await, immediately before the delete:
-   * true keeps the file (a live attachment points at it again).
-   */
+
   const deleteManagedAttachmentFile = async (
     attachment: Attachment,
     options?: { keep?: () => boolean },
@@ -521,10 +553,9 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     const readableCandidates: string[] = [];
     for (const candidate of directoryCandidates) {
       try {
-        const entries = await saf.readDirectory(candidate);
+        const entries = await listSafEntriesByName(saf, candidate);
         readableCandidates.push(candidate);
-        const matchEntry = entries.find((entry: string) => hasSafLeafName(entry, ATTACHMENTS_DIR_NAME));
-        attachmentsDirUri = matchEntry ?? null;
+        attachmentsDirUri = entries.get(ATTACHMENTS_DIR_NAME) ?? null;
         if (attachmentsDirUri) break;
       } catch (error) {
         if (candidate === directoryCandidates[directoryCandidates.length - 1]) {
@@ -533,8 +564,8 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
       }
     }
     if (!attachmentsDirUri) {
-      // Creating after every inventory attempt failed can create a duplicate
-      // provider document and falsely turn an unreadable remote into an empty one.
+
+
       if (readableCandidates.length === 0) return null;
       for (const candidate of readableCandidates) {
         try {
@@ -581,34 +612,27 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     const saf = fs.saf();
     if (!saf) return entriesByName;
     try {
-      const entries = await saf.readDirectory(dirUri);
-      for (const entry of entries) {
-        const name = getSafLeafName(entry);
-        if (name && !entriesByName.has(name)) {
-          entriesByName.set(name, entry);
-        }
-      }
+      for (const [name, uri] of await listSafEntriesByName(saf, dirUri)) entriesByName.set(name, uri);
     } catch (error) {
       logAttachmentWarn('Failed to read SAF directory', error);
     }
     return entriesByName;
   };
 
-  /** Strict SAF inventory used by mutation-capable sync. Missing capability and
-   * provider errors are not equivalent to an empty directory. */
+
   const inspectSafDirectoryEntriesByName = async (
     dirUri: string,
   ): Promise<AttachmentSafDirectoryEntries> => {
     const saf = fs.saf();
     if (!saf) return { status: 'unreadable' };
     try {
-      const entries = await saf.readDirectory(dirUri);
-      const entriesByName = new Map<string, string>();
-      for (const entry of entries) {
-        const name = getSafLeafName(entry);
-        if (name && !entriesByName.has(name)) entriesByName.set(name, entry);
-      }
-      return { status: 'available', entries: entriesByName };
+      const listed = await listSafEntries(saf, dirUri);
+      return {
+        status: 'available',
+        entries: new Map([...listed].map(([name, entry]) => [name, entry.uri])),
+        sizes: new Map([...listed].map(([name, entry]) => [name, entry.size])),
+        directories: new Set([...listed].filter(([, entry]) => entry.directory).map(([name]) => name)),
+      };
     } catch (error) {
       logAttachmentWarn('Failed to read SAF directory', error);
       return { status: 'unreadable' };
@@ -646,26 +670,14 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     }
   };
 
-  // #1057: check-on-touch content-change detection. A `content://` (Android SAF)
-  // uri's mtime isn't reliably comparable across accesses, so this returns null for
-  // those — the per-sync pre-pass simply skips detection for them, matching the
-  // scope note that linked-file detection is desktop-first; SAF-backed files still
-  // participate fully on the re-download side via the ordinary cloudKey/hasCloudCopy
-  // path, unaffected by this being null.
+
   const statAttachmentFile = async (uri: string): Promise<LocalFileStat | null> => {
     if (uri.startsWith('content://')) return null;
     try {
       const info = await fs.getInfo(uri);
       if (!info.exists || typeof info.size !== 'number' || typeof info.modificationTime !== 'number') return null;
-      // expo-file-system reports modificationTime with only whole-second resolution
-      // (review S6). The recorded value is never itself transported cross-device
-      // (sanitizeAppDataForRemote strips contentMtimeMs/contentSize before any sync
-      // write — see sync-helpers.ts), so this coarseness can't corrupt another
-      // device's view; the accepted, narrow gap is purely local: an edit that lands
-      // within the same second as the last recorded stat AND preserves the exact
-      // byte size is invisible to the cheap compare until a later stat call sees a
-      // different second. A hash-confirming re-check (e.g. after the file is opened
-      // through Mindwtr) closes that window; this cheap path alone does not.
+
+
       return { mtimeMs: Math.round(info.modificationTime * 1000), size: info.size };
     } catch (error) {
       logAttachmentWarn('Failed to stat attachment file', error);
@@ -686,29 +698,18 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     }
   };
 
-  /**
-   * SEC-07: which local uris this device may read bytes from for sync. An attachment `uri`
-   * travels inside the synced document and survives the merge sanitizer, so without this a
-   * hostile sync document makes the next cycle upload an arbitrary local file to the remote.
-   * `migrateAttachmentsLocallyBeforeSync` runs first and copies every legitimate outside
-   * file (legacy content:// / SAF references) into the managed dir; whatever is still
-   * outside afterwards is refused rather than read.
-   */
+
   const canUploadAttachmentFrom = (uri: string): boolean => {
     const attachmentsDir = getManagedAttachmentsDir();
     if (!attachmentsDir || !uri.startsWith(attachmentsDir)) return false;
     if (!isTraversalFreeAttachmentUri(uri)) return false;
-    // The managed layout is flat and id-named (see deleteManagedAttachmentFile), so
-    // anything with a further separator is not a file this device owns.
+
+
     const leaf = uri.slice(attachmentsDir.length).split(/[?#]/, 1)[0];
     return leaf.length > 0 && !leaf.includes('/');
   };
 
-  /**
-   * A uri is task content — the file name is the user's (#854: ids and field names only).
-   * Log the scheme, whether the file sits in our own storage, and the extension; those are
-   * what every attachment bug so far actually needed, and none of them is user text.
-   */
+
   const describeAttachmentUriForLog = (uri?: string): string => {
     if (!uri) return 'none';
     const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.exec(uri)?.[0] ?? '';
@@ -741,10 +742,8 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
         return { attachment, status: 'failed' };
       }
       if (targetPresence === 'confirmed-not-found') {
-        // copyFileSafely streams through the native copy (temp + rename) and
-        // only falls back to the JS byte round-trip when the provider refuses
-        // the copy — content:// sources included, so share-sheet files avoid a
-        // double base64 pass on the JS thread.
+
+
         await copyFileSafely(uri, targetUri);
       }
       let size = attachment.size;
@@ -774,9 +773,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     }
   };
 
-  // Compatibility shape: callers that only need the (possibly re-homed)
-  // attachment. Note the ambiguity — an unchanged result can mean failure OR
-  // already-managed; callers that must tell them apart use the Detailed variant.
+
   const persistAttachmentLocally = async (attachment: Attachment): Promise<Attachment> => (
     (await persistAttachmentLocallyDetailed(attachment)).attachment
   );
@@ -832,21 +829,12 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
 
       migrationAttempts += 1;
       const migrated = await ensureAttachmentStoredLocally(attachment);
-      // If migration failed but the original URI is still readable, the backend can upload from it.
+
       return { migrated, skipped: false };
     };
   };
 
-  /**
-   * Identity of the place attachments live: the backend plus the location/account that
-   * decides which remote a `cloudKey` points at. Read from device config rather than passed
-   * in, so `hasPendingAttachmentSyncWork` keeps its `(appData, options)` signature and the
-   * two gates that consult it (that predicate, and each backend's own presence pass) can
-   * never disagree about what "the same backend configuration" means.
-   *
-   * Shared with sync-encryption discovery scoping (#1138) through `readSyncLocationScope`,
-   * so the two features can never disagree about what "the same sync location" means.
-   */
+
   const readAttachmentPresenceScope = (): Promise<string | null> => readSyncLocationScope(host.storage);
 
   const readAttachmentPresenceStamp = async (): Promise<AttachmentPresenceStamp | null> => {
@@ -861,20 +849,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     }
   };
 
-  /**
-   * #1119 follow-up: should the full per-attachment reconciliation pass run now?
-   *
-   * An uploaded attachment's remote key is derived from its id and its bytes never change,
-   * so re-proving presence on every cycle re-establishes something already known — at the
-   * cost of a MKCOL, one HEAD per attachment and three native stats per attachment on every
-   * idle cycle, plus whatever the phase running at all costs upstream. The proof is still
-   * worth having, because a user can delete files on the server directly; it is not worth
-   * having hourly.
-   *
-   * Due when: nothing has ever reconciled, the stamp is unreadable, the backend
-   * configuration changed under it, it is older than a day, or the clock moved backwards
-   * since it was written. Each of those is "don't know", and every "don't know" reconciles.
-   */
+
   const isAttachmentPresenceReconciliationDue = async (): Promise<boolean> => {
     const [scope, stamp] = await Promise.all([
       readAttachmentPresenceScope(),
@@ -884,12 +859,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     return !isAttachmentPresenceStampFresh(stamp, scope, Date.now());
   };
 
-  /**
-   * Records that a full per-attachment pass just ran to completion against the current
-   * backend configuration. Called by each backend at the end of its own pass rather than by
-   * the predicate above, so a pass that never ran (or aborted) leaves the stamp alone and the
-   * next cycle retries instead of parking the reconciliation for a day.
-   */
+
   const markAttachmentPresenceReconciled = async (): Promise<void> => {
     const scope = await readAttachmentPresenceScope();
     if (scope === null) return;
@@ -901,21 +871,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     }
   };
 
-  /**
-   * The durable "this device has completed at least one full cycle against the active
-   * location" fact for backends with no `FastSyncState` record — the file backend above all,
-   * since `buildFastSyncScope` returns `null` for it. A presence stamp is only ever written at
-   * the END of a completed attachment pass (`markAttachmentPresenceReconciled`), so its
-   * existence — for THIS exact scope — proves a full cycle already ran here, which is all the
-   * sync-encryption posture gate needs to stop treating a fresh join as "already known safe".
-   * Scope-exact on purpose: a stamp from a previous location must not vouch for a new one.
-   *
-   * Takes NO scope argument on purpose: it derives the comparison scope the exact same way
-   * `markAttachmentPresenceReconciled` writes it. A caller once passed the sync service's
-   * scope, built from the RESOLVED file path, and the stamp compared unequal forever (review
-   * finding B2); deriving the scope in the one place that also writes it makes the two sides
-   * symmetric by construction.
-   */
+
   const hasCompletedAttachmentPresenceReconciliation = async (): Promise<boolean> => {
     const [scope, stamp] = await Promise.all([
       readAttachmentPresenceScope(),
@@ -949,33 +905,12 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
         return true;
       }
       if (attachment.cloudKey && (!uri || attachment.localStatus === 'missing' || attachment.localStatus === 'downloading')) {
+
+        if (attachment.localStatus !== 'downloading' && getWebdavDownloadBackoff(attachment.id) !== null) continue;
         return true;
       }
-      // #1057 (review B3): the steady state — cloudKey + a managed local file +
-      // localStatus 'available' — used to fall all the way through to "no pending
-      // work", which is exactly the case check-on-touch content detection exists to
-      // catch (an edited-in-place file, or another device's newer upload). Only
-      // counted as pending when the caller's backend actually wires content
-      // detection; the lifecycle's own cheap mtime/size compare is the real cost
-      // gate, this is just what lets the phase run at all.
-      //
-      // #1119 follow-up (audit F3): that made EVERY cycle run the whole phase for
-      // anyone owning one synced attachment. Two things genuinely need the phase from
-      // this state, and each now has its own signal rather than "always":
-      //
-      //  - another device's newer content. `resolveContentIdentity` in core's merge
-      //    (sync.ts) lands an incoming content winner with NO recorded
-      //    contentMtimeMs/contentSize, precisely so the receiving device re-checks and
-      //    re-downloads. An absent recorded stat is therefore the download signal, and
-      //    it is already in the document — no local stat, no request, no file bytes read.
-      //  - the remote copy deleted on the server behind the app's back. Nothing local
-      //    can show that, so it stays a real pass — just a periodic one.
-      //
-      // What is deliberately no longer detected within one cycle is a managed local
-      // file edited in place. Mobile has no path that does that: managed attachment
-      // files live in app-private storage and are only ever created (capture) or
-      // replaced by a download that re-records the stat in the same breath. The daily
-      // pass still catches it.
+
+
       if (options.contentCheckEnabled && attachment.cloudKey && hasLocalUri && attachment.localStatus === 'available') {
         if (
           attachment.pendingContentUpload === true
@@ -999,9 +934,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
       }
     }
 
-    // Nothing in the document says there is work to do. The one remaining reason to run the
-    // phase is the periodic presence proof — and only when there is something to prove, so a
-    // library with no settled attachments never reads device config at all.
+
     return hasReconcilableSteadyState && await isAttachmentPresenceReconciliationDue();
   };
 
@@ -1015,6 +948,7 @@ export const createMobileAttachmentFiles = (host: MobileAttachmentFilesHost) => 
     getWebdavDownloadBackoff,
     setWebdavDownloadBackoff,
     clearWebdavDownloadBackoff,
+    clearWebdavDownloadBackoffs,
     pruneWebdavDownloadBackoff,
     readAttachmentBytesForUpload,
     writeBytesSafely,

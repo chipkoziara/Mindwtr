@@ -1,13 +1,15 @@
+import { logInfo } from '../../../lib/app-log';
 import { useState, useCallback } from 'react';
 import { DndContext, type DragEndEvent, closestCenter, useSensor, useSensors, PointerSensor } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, Trash2, ChevronDown, ChevronRight, Pencil, Check, X, ExternalLink } from 'lucide-react';
 import { buildPersonSearchQuery, DEFAULT_AREA_COLOR, formatI18nTemplate, getPersonNameKey, getPersonTaskCounts, sortViewSectionDefinitions, translateWithFallback, useTaskStore, type Area, type Person, type ViewSectionDefinition,
-    baseTextCollator, buildSomedaySectionsSettingsUpdate, isManageAreaNameTaken, orderSomedaySections, removeSomedaySection, renameSomedaySection,
+    baseTextCollator, buildSomedaySectionsSettingsUpdate, isManageAreaNameTaken, isSafePersonReferenceLink, orderSomedaySections, removeSomedaySection, renameSomedaySection, updateSettingsFromLatest,
 } from '@mindwtr/core';
 import { AreaColorPicker } from '../projects/AreaColorPicker';
 import { reportError } from '../../../lib/report-error';
+import { isImeComposing } from '../../../lib/ime';
 import { isTauriRuntime } from '../../../lib/runtime';
 import type { ConfirmationRequestOptions } from '../../../hooks/useConfirmDialog';
 
@@ -21,22 +23,6 @@ type SettingsManagePageProps = {
     requestConfirmation: (options: ConfirmationRequestOptions) => Promise<boolean>;
 };
 
-const SAFE_PERSON_REFERENCE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:', 'obsidian:']);
-
-const isSafePersonReferenceLink = (value: string | undefined): value is string => {
-    const trimmed = value?.trim();
-    if (!trimmed) return false;
-    try {
-        const url = new URL(trimmed);
-        return SAFE_PERSON_REFERENCE_PROTOCOLS.has(url.protocol);
-    } catch {
-        return false;
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Sortable area row (reused from AreaManagerModal pattern)
-// ---------------------------------------------------------------------------
 
 function SortableAreaRow({
     area,
@@ -92,6 +78,7 @@ function SortableAreaRow({
                 defaultValue={area.name}
                 onBlur={(e) => commitName(e.target.value)}
                 onKeyDown={(e) => {
+                    if (isImeComposing(e)) return;
                     if (e.key === 'Enter') {
                         e.preventDefault();
                         commitName(e.currentTarget.value);
@@ -152,6 +139,7 @@ function SortableViewSectionRow({
                 aria-label={translateWithFallback(translate, 'viewSections.nameHint', 'Section name')}
                 onBlur={(event) => commitTitle(event.currentTarget.value)}
                 onKeyDown={(event) => {
+                    if (isImeComposing(event)) return;
                     if (event.key === 'Enter') {
                         event.preventDefault();
                         commitTitle(event.currentTarget.value);
@@ -172,99 +160,122 @@ function SortableViewSectionRow({
     );
 }
 
-// ---------------------------------------------------------------------------
-// Token row for contexts and tags (inline rename + delete)
-// ---------------------------------------------------------------------------
 
-function TokenRow({
-    value,
-    onRename,
-    onDelete,
-    translate,
-}: {
-    value: string;
-    onRename: (oldValue: string, newValue: string) => void;
-    onDelete: (value: string) => void;
+function NewTokenRow({ kind, onCreate, translate, disabled = false }: {
+    kind: 'context' | 'tag';
+    onCreate: (name: string) => Promise<void>;
+    disabled?: boolean;
     translate: (key: string) => string;
 }) {
-    const [editing, setEditing] = useState(false);
-    const [editValue, setEditValue] = useState(value);
-
-    const commitRename = () => {
-        const trimmed = editValue.trim();
-        if (trimmed && trimmed !== value) {
-            onRename(value, trimmed);
+    const [name, setName] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [failed, setFailed] = useState(false);
+    const label = translate(kind === 'context' ? 'contexts.new' : 'tags.new');
+    const save = async () => {
+        if (saving || disabled || !name.trim()) return;
+        setSaving(true);
+        setFailed(false);
+        try {
+            await onCreate(name.trim());
+            void logInfo('Saved context or tag created', { scope: 'settings', force: true, extra: { releaseCheck: 'v1.3.7/saved-taxonomy', taxonomyKind: kind, outcome: 'persisted' } });
+            setName('');
+        } catch (error) {
+            setFailed(true);
+            reportError('Failed to create saved task token', error);
+        } finally {
+            setSaving(false);
         }
-        setEditing(false);
     };
-
-    const cancelEdit = () => {
-        setEditValue(value);
-        setEditing(false);
-    };
-
-    if (editing) {
-        return (
+    return (
+        <div className="border-t border-border/50 pt-3 space-y-2">
+            <label htmlFor={`manage-new-${kind}`} className="text-xs text-muted-foreground font-medium">{label}</label>
             <div className="flex items-center gap-2">
                 <input
-                    type="text"
-                    value={editValue}
-                    onChange={(e) => setEditValue(e.target.value)}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                            e.preventDefault();
-                            commitRename();
-                        }
-                        if (e.key === 'Escape') {
-                            cancelEdit();
-                        }
+                    id={`manage-new-${kind}`}
+                    value={name}
+                    onChange={(event) => { if (!saving && !failed) setName(event.target.value); }}
+                    onKeyDown={(event) => {
+                        if (isImeComposing(event)) return;
+                        if (event.key === 'Enter') { event.preventDefault(); void save(); }
+                        if (event.key === 'Escape' && !saving && !failed) { setName(''); setFailed(false); }
                     }}
-                    autoFocus
-                    className="flex-1 bg-muted/50 border border-border rounded px-2 py-1 text-sm min-w-0"
+                    placeholder={translate(kind === 'context' ? 'taskEdit.contextsPlaceholder' : 'taskEdit.tagsPlaceholder')}
+                    disabled={saving || disabled || failed}
+                    aria-invalid={failed}
+                    aria-describedby={failed ? `manage-new-${kind}-error` : undefined}
+                    className="min-h-11 min-w-0 flex-1 bg-muted/50 border border-border rounded px-2 py-1 text-sm"
                 />
-                <button
-                    type="button"
-                    onClick={commitRename}
-                    className="text-primary hover:bg-primary/10 h-8 w-8 rounded-md transition-colors flex items-center justify-center shrink-0"
-                    title={translate('common.save')}
-                >
-                    <Check className="w-4 h-4" />
-                </button>
-                <button
-                    type="button"
-                    onClick={cancelEdit}
-                    className="text-muted-foreground hover:bg-muted h-8 w-8 rounded-md transition-colors flex items-center justify-center shrink-0"
-                    title={translate('common.cancel')}
-                >
-                    <X className="w-4 h-4" />
+                <button type="button" onClick={() => void save()} disabled={saving || disabled || !name.trim()}
+                    className="min-h-11 px-3 py-1.5 rounded-md text-sm bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+                    {translate(saving ? 'common.loading' : 'common.add')}
                 </button>
             </div>
-        );
-    }
-
-    return (
-        <div className="flex items-center gap-2 group">
-            <span className="flex-1 px-2 py-1 text-sm min-w-0 truncate">{value}</span>
-            <button
-                type="button"
-                onClick={() => {
-                    setEditValue(value);
-                    setEditing(true);
-                }}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-colors hover:bg-muted hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-                title={translate('common.edit')}
-            >
-                <Pencil className="w-3.5 h-3.5" />
-            </button>
-            <button
-                type="button"
-                onClick={() => onDelete(value)}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-destructive opacity-0 transition-colors hover:bg-destructive/10 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-                title={translate('common.delete')}
-            >
-                <Trash2 className="w-4 h-4" />
-            </button>
+            {failed && <p id={`manage-new-${kind}-error`} role="alert" className="text-sm text-destructive">{translate('settings.feedback.saveFailed')}</p>}
+            {failed && <button type="button" onClick={() => { setName(''); setFailed(false); }} disabled={saving} className="text-sm text-muted-foreground hover:text-foreground">{translate('common.close')}</button>}
         </div>
+    );
+}
+
+type TokenEditorState = {
+    kind: 'context' | 'tag';
+    from: string;
+    values: string[];
+    draft: string;
+    editing: boolean;
+    saving: boolean;
+    failed: boolean;
+};
+
+function TokenRow({ value, state, disabled, onEdit, onDraft, onSave, onDelete, onCancel, translate }: {
+    value: string;
+    state?: TokenEditorState;
+    disabled: boolean;
+    onEdit: () => void;
+    onDraft: (draft: string) => void;
+    onSave: () => void;
+    onDelete: () => void;
+    onCancel: () => void;
+    translate: (key: string) => string;
+}) {
+    const busy = disabled || state?.saving;
+    return (
+        <>
+            {state?.editing ? (
+                <div className="flex items-center gap-2">
+                    <input
+                        type="text"
+                        disabled={busy || state.failed}
+                        value={state.draft}
+                        onChange={(event) => onDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                            if (isImeComposing(event)) return;
+                            if (event.key === 'Enter') { event.preventDefault(); onSave(); }
+                            if (event.key === 'Escape' && !busy && !state.failed) onCancel();
+                        }}
+                        autoFocus
+                        className="flex-1 bg-muted/50 border border-border rounded px-2 py-1 text-sm min-w-0"
+                    />
+                    <button type="button" disabled={busy || !state.draft.trim()} onClick={onSave}
+                        className="text-primary hover:bg-primary/10 h-8 w-8 rounded-md transition-colors flex items-center justify-center shrink-0"
+                        title={translate('common.save')}><Check className="w-4 h-4" /></button>
+                    <button type="button" disabled={busy} onClick={onCancel}
+                        className="text-muted-foreground hover:bg-muted h-8 w-8 rounded-md transition-colors flex items-center justify-center shrink-0"
+                        title={translate(state.failed ? 'common.close' : 'common.cancel')}><X className="w-4 h-4" /></button>
+                </div>
+            ) : (
+                <div className="flex items-center gap-2 group">
+                    <span className="flex-1 px-2 py-1 text-sm min-w-0 truncate">{value}</span>
+                    <button type="button" disabled={busy || state?.failed} onClick={onEdit}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-colors hover:bg-muted hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+                        title={translate('common.edit')}><Pencil className="w-3.5 h-3.5" /></button>
+                    <button type="button" disabled={busy} onClick={onDelete}
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-destructive opacity-0 transition-colors hover:bg-destructive/10 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+                        title={translate('common.delete')}><Trash2 className="w-4 h-4" /></button>
+                </div>
+            )}
+            {state?.failed && <p role="alert" className="text-sm text-destructive">{translate('settings.feedback.saveFailed')}</p>}
+            {state?.failed && !state.editing && <button type="button" onClick={onCancel} className="text-sm text-muted-foreground hover:text-foreground">{translate('common.close')}</button>}
+        </>
     );
 }
 
@@ -330,6 +341,7 @@ function PersonRow({
                     defaultValue={person.name}
                     onBlur={(e) => commitName(e.target.value)}
                     onKeyDown={(e) => {
+                        if (isImeComposing(e)) return;
                         if (e.key === 'Enter') {
                             e.preventDefault();
                             commitName(e.currentTarget.value);
@@ -387,9 +399,6 @@ function PersonRow({
     );
 }
 
-// ---------------------------------------------------------------------------
-// Collapsible section wrapper
-// ---------------------------------------------------------------------------
 
 function ManageSection({
     settingsKey,
@@ -423,9 +432,6 @@ function ManageSection({
     );
 }
 
-// ---------------------------------------------------------------------------
-// Main page
-// ---------------------------------------------------------------------------
 
 export function SettingsManagePage({ t: _t, translate, requestConfirmation }: SettingsManagePageProps) {
     const areas = useTaskStore((s) => s.areas);
@@ -433,6 +439,8 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
     const allTasks = useTaskStore((s) => s._allTasks);
     const settings = useTaskStore((s) => s.settings);
     const addArea = useTaskStore((s) => s.addArea);
+    const addContext = useTaskStore((s) => s.addContext);
+    const addTag = useTaskStore((s) => s.addTag);
     const updateArea = useTaskStore((s) => s.updateArea);
     const deleteArea = useTaskStore((s) => s.deleteArea);
     const reorderAreas = useTaskStore((s) => s.reorderAreas);
@@ -444,12 +452,44 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
     const updatePerson = useTaskStore((s) => s.updatePerson);
     const renamePerson = useTaskStore((s) => s.renamePerson);
     const deletePerson = useTaskStore((s) => s.deletePerson);
-    const updateSettings = useTaskStore((s) => s.updateSettings);
     const getDerivedState = useTaskStore((s) => s.getDerivedState);
 
     const { allContexts, allTags } = getDerivedState();
 
-    // Sort areas by order
+
+    const [tokenEditor, setTokenEditor] = useState<TokenEditorState | null>(null);
+    const contextRows = tokenEditor?.kind === 'context' ? tokenEditor.values : allContexts;
+    const tagRows = tokenEditor?.kind === 'tag' ? tokenEditor.values : allTags;
+    const editToken = (kind: 'context' | 'tag', from: string) => {
+        if (tokenEditor?.failed || tokenEditor?.saving) return;
+        setTokenEditor({ kind, from, values: kind === 'context' ? contextRows : tagRows,
+            draft: from, editing: true, saving: false, failed: false });
+    };
+    const cancelTokenEdit = () => {
+        if (!tokenEditor?.saving) setTokenEditor(null);
+    };
+    const changeToken = async (kind: 'context' | 'tag', from: string, mode: 'rename' | 'delete') => {
+        if (tokenEditor?.saving) return;
+        const current: TokenEditorState = tokenEditor ?? { kind, from,
+            values: kind === 'context' ? contextRows : tagRows, draft: from, editing: false, saving: false, failed: false };
+        const name = current.draft.trim();
+        if (mode === 'rename' && (!name || (name === from && !current.failed))) {
+            setTokenEditor(null);
+            return;
+        }
+        const next = { ...current, editing: mode === 'rename', saving: true, failed: false };
+        setTokenEditor(next);
+        try {
+            if (mode === 'rename') await (kind === 'context' ? renameContext(from, name) : renameTag(from, name));
+            else await (kind === 'context' ? deleteContext(from) : deleteTag(from));
+            setTokenEditor(null);
+        } catch (error) {
+            setTokenEditor({ ...next, saving: false, failed: true });
+            reportError('Failed to update saved task token', error);
+        }
+    };
+
+
     const sortedAreas = [...areas].sort((a, b) => a.order - b.order);
     const sortedPeople = [...people].sort((a, b) => baseTextCollator.compare(a.name, b.name));
     const somedaySections = sortViewSectionDefinitions(settings?.gtd?.viewSections?.someday);
@@ -463,7 +503,7 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
         }));
     };
 
-    // New area form
+
     const [newAreaName, setNewAreaName] = useState('');
     const [newAreaColor, setNewAreaColor] = useState<string | undefined>(DEFAULT_AREA_COLOR);
     const [isCreatingArea, setIsCreatingArea] = useState(false);
@@ -472,15 +512,13 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
 
     const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
-    // One edit against the list stored at write time (a delete waits for its confirmation):
-    // core's edits change only the edited sections and keep every other stored entry.
+
     const persistSomedaySections = useCallback((edit: (stored: ViewSectionDefinition[] | undefined) => ViewSectionDefinition[] | null) => {
-        const current = useTaskStore.getState().settings;
-        const next = edit(current?.gtd?.viewSections?.someday);
-        if (!next) return;
-        void updateSettings(buildSomedaySectionsSettingsUpdate(current, next))
-            .catch((error) => reportError('Failed to update Someday sections from Settings', error));
-    }, [updateSettings]);
+        void updateSettingsFromLatest((current) => {
+            const next = edit(current?.gtd?.viewSections?.someday);
+            return next ? buildSomedaySectionsSettingsUpdate(current, next) : null;
+        }).catch((error) => reportError('Failed to update Someday sections from Settings', error));
+    }, []);
 
     const handleViewSectionDragEnd = useCallback((event: DragEndEvent) => {
         const { active, over } = event;
@@ -493,7 +531,7 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
         persistSomedaySections((stored) => orderSomedaySections(stored, ids));
     }, [persistSomedaySections, somedaySections]);
 
-    // A live area has this name: creating it would add nothing, so Create is off and the line says why.
+
     const newAreaNameTaken = isManageAreaNameTaken('newArea', newAreaName, areas);
     const handleCreateArea = useCallback(async () => {
         const name = newAreaName.trim();
@@ -557,7 +595,7 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
 
     return (
         <div className="space-y-6">
-            {/* Areas */}
+            {           }
             <ManageSection
                 settingsKey="manageAreas"
                 title={resolveText('areas.manage', 'Manage Areas')}
@@ -614,6 +652,7 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
                             value={newAreaName}
                             onChange={(e) => setNewAreaName(e.target.value)}
                             onKeyDown={(e) => {
+                                if (isImeComposing(e)) return;
                                 if (e.key === 'Enter') {
                                     e.preventDefault();
                                     void handleCreateArea();
@@ -639,7 +678,7 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
                 </div>
             </ManageSection>
 
-            {/* People */}
+            {            }
             <ManageSection
                 settingsKey="managePeople"
                 title={resolveText('people.title', 'People')}
@@ -673,6 +712,7 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
                             value={newPersonName}
                             onChange={(e) => setNewPersonName(e.target.value)}
                             onKeyDown={(e) => {
+                                if (isImeComposing(e)) return;
                                 if (e.key === 'Enter') {
                                     e.preventDefault();
                                     void handleCreatePerson();
@@ -693,7 +733,7 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
                 </div>
             </ManageSection>
 
-            {/* Someday sections */}
+            {                      }
             <ManageSection
                 settingsKey="manageSomedaySections"
                 title={resolveText('viewSections.somedaySections', 'Someday sections')}
@@ -730,48 +770,60 @@ export function SettingsManagePage({ t: _t, translate, requestConfirmation }: Se
                 )}
             </ManageSection>
 
-            {/* Contexts */}
+            {              }
             <ManageSection
                 settingsKey="manageContexts"
                 title={resolveText('contexts.title', 'Contexts')}
-                count={allContexts.length}
+                count={contextRows.length}
             >
-                {allContexts.length === 0 && (
+                {contextRows.length === 0 && (
                     <div className="text-sm text-muted-foreground py-2">
-                        {resolveText('contexts.noContexts', 'No contexts found. Add contexts like @home, @work, @computer to your tasks')}
+                        {translate('contexts.empty')}
                     </div>
                 )}
-                {allContexts.map((ctx) => (
+                {contextRows.map((ctx) => (
                     <TokenRow
                         key={ctx}
                         value={ctx}
-                        onRename={(oldVal, newVal) => void renameContext(oldVal, newVal)}
-                        onDelete={(val) => void deleteContext(val)}
+                        state={tokenEditor?.kind === 'context' && tokenEditor.from === ctx ? tokenEditor : undefined}
+                        onEdit={() => editToken('context', ctx)}
+                        onDraft={(draft) => setTokenEditor((current) => current && !current.saving && !current.failed ? { ...current, draft } : current)}
+                        onSave={() => void changeToken('context', ctx, 'rename')}
+                        onDelete={() => void changeToken('context', ctx, 'delete')}
+                        disabled={tokenEditor !== null && (tokenEditor.kind !== 'context' || tokenEditor.from !== ctx)}
+                        onCancel={cancelTokenEdit}
                         translate={translate}
                     />
                 ))}
+                <NewTokenRow kind="context" onCreate={addContext} translate={translate} disabled={tokenEditor !== null} />
             </ManageSection>
 
-            {/* Tags */}
+            {          }
             <ManageSection
                 settingsKey="manageTags"
                 title={resolveText('tags.title', 'Tags')}
-                count={allTags.length}
+                count={tagRows.length}
             >
-                {allTags.length === 0 && (
+                {tagRows.length === 0 && (
                     <div className="text-sm text-muted-foreground py-2">
                         {resolveText('projects.noTags', 'No tags')}
                     </div>
                 )}
-                {allTags.map((tag) => (
+                {tagRows.map((tag) => (
                     <TokenRow
                         key={tag}
                         value={tag}
-                        onRename={(oldVal, newVal) => void renameTag(oldVal, newVal)}
-                        onDelete={(val) => void deleteTag(val)}
+                        state={tokenEditor?.kind === 'tag' && tokenEditor.from === tag ? tokenEditor : undefined}
+                        onEdit={() => editToken('tag', tag)}
+                        onDraft={(draft) => setTokenEditor((current) => current && !current.saving && !current.failed ? { ...current, draft } : current)}
+                        onSave={() => void changeToken('tag', tag, 'rename')}
+                        onDelete={() => void changeToken('tag', tag, 'delete')}
+                        disabled={tokenEditor !== null && (tokenEditor.kind !== 'tag' || tokenEditor.from !== tag)}
+                        onCancel={cancelTokenEdit}
                         translate={translate}
                     />
                 ))}
+                <NewTokenRow kind="tag" onCreate={addTag} translate={translate} disabled={tokenEditor !== null} />
             </ManageSection>
         </div>
     );

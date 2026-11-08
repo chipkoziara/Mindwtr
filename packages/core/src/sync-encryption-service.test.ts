@@ -7,6 +7,7 @@ import {
     type SyncEncryptionRemotePort,
 } from './sync-encryption';
 import { createSyncEncryptionStateStore, readSyncLocationScope } from './sync-encryption-local-state';
+import { SyncRemoteMutationFenceLostError } from './sync-remote-fence';
 import { SyncEncryptionCleanupDeferredError, createSyncEncryptionService } from './sync-encryption-service';
 import {
     ATTACHMENT_PRESENCE_RECONCILE_KEY,
@@ -18,8 +19,7 @@ import {
     SYNC_PATH_KEY,
 } from './sync-storage-keys';
 
-// Argon2id at the writer's default cost takes seconds in pure JS; the service only needs a
-// deterministic key here. AES-GCM stays real.
+
 const fastCrypto: SyncCryptoPrimitives = {
     ...defaultSyncCryptoPrimitives,
     argon2id: async (pass, salt, _params, dkLen) => Uint8Array.from(
@@ -30,8 +30,7 @@ const fastCrypto: SyncCryptoPrimitives = {
 
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 
-/** A File Sync folder in memory: every artifact carries a generation, writes and removes are
- *  compare-and-set on it. */
+
 const createMemoryFolder = (initial: Record<string, Uint8Array>) => {
     let generation = 0;
     const files = new Map<string, { bytes: Uint8Array; version: string }>();
@@ -64,10 +63,62 @@ const createMemoryFolder = (initial: Record<string, Uint8Array>) => {
 
 type Lease = { id: string };
 
+const FENCE_NAME = '.mindwtr-sync-fence-v1.json';
+const SERVER_DATE = 'Tue, 27 Aug 2026 12:00:00 GMT';
+
+
+const createDropboxFolder = (initial: Record<string, Uint8Array>) => {
+    const files = new Map(Object.entries(initial));
+    const revs = new Map([...files.keys()].map((name) => [name, 1]));
+    const requests: Array<{ endpoint: string; path: string }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const endpoint = url.slice(url.lastIndexOf('/files/') + '/files/'.length);
+        const apiArg = new Headers(init?.headers).get('Dropbox-API-Arg');
+        const body = apiArg ? JSON.parse(apiArg) : JSON.parse(String(init?.body ?? '{}'));
+        const name = String(body.path ?? '').replace(/^\//, '');
+        requests.push({ endpoint, path: name });
+        const headers = { date: SERVER_DATE, 'content-type': 'application/json' };
+        if (endpoint === 'list_folder') {
+            const entries = [...files.keys()].filter((key) => key.startsWith('attachments/')).map((key) => ({
+                '.tag': 'file', name: key.slice('attachments/'.length), path_lower: `/${key.toLowerCase()}`,
+            }));
+            return new Response(JSON.stringify({ entries, cursor: 'done', has_more: false }), { headers });
+        }
+        const rev = files.has(name) ? `rev${revs.get(name)}` : null;
+        if (endpoint === 'download') {
+            if (!rev) return new Response(JSON.stringify({ error: { '.tag': 'path', path: { '.tag': 'not_found' } } }), { status: 409, headers });
+            return new Response(files.get(name)!.slice(), { headers: { date: SERVER_DATE, 'Dropbox-API-Result': JSON.stringify({ rev }) } });
+        }
+        if (endpoint === 'upload') {
+            const mode = body.mode as { '.tag': string; update?: string };
+            if ((mode['.tag'] === 'add' && rev) || (mode['.tag'] === 'update' && mode.update !== rev)) {
+                return new Response('{}', { status: 409, headers });
+            }
+            files.set(name, new Uint8Array(init?.body as Uint8Array));
+            revs.set(name, (revs.get(name) ?? 0) + 1);
+            return new Response(JSON.stringify({ rev: `rev${revs.get(name)}` }), { headers });
+        }
+        if (endpoint === 'delete_v2') {
+            if (!rev || body.parent_rev !== rev) return new Response('{}', { status: 409, headers });
+            files.delete(name);
+            return new Response('{}', { headers });
+        }
+        throw new Error(`unexpected Dropbox endpoint ${url}`);
+    }) as unknown as typeof fetch;
+    return { files, revs, requests, fetcher };
+};
+
 const createHarness = (
     backend: Record<string, string> = {},
     folder?: SyncEncryptionRemotePort | null,
-    options: { maxEncryptedArtifactBytes?: number; webdavUrl?: string; dropboxClientId?: string } = {},
+    options: {
+        maxEncryptedArtifactBytes?: number;
+        webdavUrl?: string;
+        dropboxClientId?: string;
+        fetch?: typeof fetch;
+        fenceOwnerId?: string;
+    } = {},
 ) => {
     const plain = new Map<string, string>(Object.entries(backend));
     const secrets = new Map<string, string>();
@@ -111,10 +162,11 @@ const createHarness = (
     };
     const service = createSyncEncryptionService<Lease>({
         maxEncryptedArtifactBytes: options.maxEncryptedArtifactBytes,
+        fenceOwnerId: options.fenceOwnerId,
         storage,
         state,
         crypto: fastCrypto,
-        fetch: vi.fn(async () => {
+        fetch: options.fetch ?? vi.fn(async () => {
             throw new Error('no network in this test');
         }) as unknown as typeof fetch,
         parseWebdavXml: () => {
@@ -192,6 +244,96 @@ describe('sync encryption service', () => {
         await expect(dropbox.service.changeSyncEncryptionPassphrase('a', 'b')).rejects.toThrow('Dropbox is not configured');
     });
 
+    it('logs a no-backend unlock or passphrase change as backend-required, not error', async () => {
+        const { service, transitionLines } = createHarness();
+
+        await expect(service.provideSyncEncryptionPassphrase('x')).rejects.toThrow('SYNC_ENCRYPTION_BACKEND_REQUIRED');
+        await expect(service.changeSyncEncryptionPassphrase('a', 'b')).rejects.toThrow('SYNC_ENCRYPTION_BACKEND_REQUIRED');
+
+        expect(transitionLines().filter((line) => line.extra.phase === 'end').map((line) => [line.extra.kind, line.extra.outcome]))
+            .toEqual([['unlock', 'backend-required'], ['change-passphrase', 'backend-required']]);
+    });
+
+    it('sends every Dropbox transition request, the fence included, through the host fetcher', async () => {
+
+        vi.stubGlobal('fetch', vi.fn(async () => {
+            throw new Error('the default fetch must not be used');
+        }));
+        try {
+            const dropbox = createDropboxFolder({ 'data.json': encode({ tasks: [], projects: [] }) });
+            const { service } = createHarness(
+                { [SYNC_BACKEND_KEY]: 'cloud', [CLOUD_PROVIDER_KEY]: 'dropbox' },
+                undefined,
+                { dropboxClientId: 'app', fetch: dropbox.fetcher },
+            );
+
+            await service.enableSyncEncryption('correct horse');
+
+            expect(isPlaintextSyncArtifact(dropbox.files.get('data.json.enc')!)).toBe(false);
+            const endpoints = new Set(dropbox.requests.map((request) => `${request.endpoint}:${request.path}`));
+            for (const expected of [`upload:${FENCE_NAME}`, `delete_v2:${FENCE_NAME}`, 'list_folder:attachments', 'download:data.json', 'upload:data.json.enc', 'delete_v2:data.json']) {
+                expect(endpoints.has(expected)).toBe(true);
+            }
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it.each([
+        ['the default owner', undefined, 'mindwtr-mobile'],
+        ['a host owner', 'mindwtr-desktop', 'mindwtr-desktop'],
+    ])('writes %s into the transition fence a peer sees', async (_label, fenceOwnerId, expected) => {
+        const dropbox = createDropboxFolder({ 'data.json': encode({ tasks: [], projects: [] }) });
+        const owners: string[] = [];
+        const upload = dropbox.fetcher;
+        const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const arg = new Headers(init?.headers).get('Dropbox-API-Arg');
+            if (String(input).endsWith('/files/upload') && arg && JSON.parse(arg).path === `/${FENCE_NAME}`) {
+                owners.push(JSON.parse(new TextDecoder().decode(init?.body as Uint8Array)).ownerId);
+            }
+            return upload(input, init);
+        }) as typeof fetch;
+        const { service } = createHarness(
+            { [SYNC_BACKEND_KEY]: 'cloud', [CLOUD_PROVIDER_KEY]: 'dropbox' },
+            undefined,
+            { dropboxClientId: 'app', fetch: fetcher, fenceOwnerId },
+        );
+
+        await service.enableSyncEncryption('correct horse');
+
+        expect(owners.length).toBeGreaterThan(0);
+        expect(new Set(owners)).toEqual(new Set([expected]));
+    });
+
+    it('restores the journal and the earlier key when the fence is lost after the final state write', async () => {
+        const dropbox = createDropboxFolder({ 'data.json': encode({ tasks: [], projects: [] }) });
+        const { plain, secrets, service } = createHarness(
+            { [SYNC_BACKEND_KEY]: 'cloud', [CLOUD_PROVIDER_KEY]: 'dropbox' },
+            undefined,
+            {
+                dropboxClientId: 'app',
+
+                fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+                    const arg = new Headers(init?.headers).get('Dropbox-API-Arg');
+                    const committed = plain.get(SYNC_ENCRYPTION_STATE_KEY)?.includes('"enabled"')
+                        && !plain.get(SYNC_ENCRYPTION_STATE_KEY)?.includes('incompleteTransition');
+                    if (committed && String(input).endsWith('/files/download') && arg && JSON.parse(arg).path === `/${FENCE_NAME}`) {
+                        dropbox.files.set(FENCE_NAME, encode({
+                            schema: 1, leaseId: 'peer-lease', ownerId: 'peer', purpose: 'encryption-transition',
+                            expiresAt: Date.parse(SERVER_DATE) + 60_000,
+                        }));
+                    }
+                    return dropbox.fetcher(input, init);
+                }) as typeof fetch,
+            },
+        );
+
+        await expect(service.enableSyncEncryption('correct horse')).rejects.toBeInstanceOf(SyncRemoteMutationFenceLostError);
+
+        expect(JSON.parse(plain.get(SYNC_ENCRYPTION_STATE_KEY)!)).toEqual({ state: 'off', incompleteTransition: 'enable' });
+        expect(secrets.has(SYNC_ENCRYPTION_KEY_KEY)).toBe(false);
+    });
+
     it('encrypts a File Sync folder under its lease and releases the lease once', async () => {
         const folder = createMemoryFolder({ 'data.json': encode({ tasks: [], projects: [] }) });
         const { fileSync, service, state } = createHarness(
@@ -260,7 +402,7 @@ describe('sync encryption service', () => {
 
         await expect(service.abandonSyncEncryptionTransition()).resolves.toBe('enable');
 
-        // Off here, and this location remembered as partly encrypted: sync stays paused at it until it is repaired.
+
         const scope = await readSyncLocationScope({ getItem: async (key: string) => plain.get(key) ?? null });
         expect(JSON.parse(plain.get(SYNC_ENCRYPTION_STATE_KEY)!)).toEqual({ state: 'off', partlyEncryptedScope: scope });
         await expect(state.isSyncEncryptionBlocked(scope)).resolves.toBe(true);
@@ -273,7 +415,7 @@ describe('sync encryption service', () => {
         const line = logs.find((entry) => entry.extra.releaseCheck === 'v1.3.4/encryption-abandon-setup');
         expect(line).toMatchObject({ force: true, extra: { kind: 'abandon', abandoned: 'enable', outcome: 'ok' } });
 
-        // Nothing unfinished: nothing to abandon, nothing changes.
+
         await expect(service.abandonSyncEncryptionTransition()).resolves.toBeNull();
     });
 
@@ -287,7 +429,7 @@ describe('sync encryption service', () => {
         const { service } = createHarness({ [SYNC_BACKEND_KEY]: 'file', [SYNC_PATH_KEY]: '/sync' }, folder.port);
         await expect(service.probeSyncLocationCiphertext()).resolves.toBe('plaintext');
 
-        // The enable seals attachments one at a time, in order, and the folder stops answering after the first.
+
         const write = folder.port.write;
         let writes = 0;
         folder.port.write = async (name, bytes, version) => {

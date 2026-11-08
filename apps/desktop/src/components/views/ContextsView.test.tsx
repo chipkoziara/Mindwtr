@@ -1,4 +1,4 @@
-import { act, fireEvent, render } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import type { Area, Project, Task } from '@mindwtr/core';
 import { safeFormatDate, useTaskStore } from '@mindwtr/core';
 import * as core from '@mindwtr/core';
@@ -6,14 +6,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LanguageProvider } from '../../contexts/language-context';
 import { ContextsView } from './ContextsView';
 import { CONTEXTS_VIEW_STATE_STORAGE_KEY, dispatchContextsTokenSelection } from '../../lib/contexts-view-state';
-import { selectToolbarOption } from '../../test/toolbar-select';
+import { openToolbarSelect, selectToolbarOption } from '../../test/toolbar-select';
 import { expectScrolledEndGap } from '../../test/list-end-gap';
 import * as dataTransfer from '../../lib/data-transfer';
 import { useUiStore } from '../../store/ui-store';
 import { CALENDAR_TASK_DRAG_MIME, setCalendarTaskDragData } from '../../lib/calendar-task-drag';
 import { clearUndoableAction, takeUndoableAction } from '../../lib/undo-registry';
+import { holdSyncSave } from '../../test/hold-sync-save';
 
-// Its own key, separate from the view state above: see the note in ContextsView.
+
 const CONTEXTS_GROUP_COLLAPSE_STORAGE_KEY = 'mindwtr:view:contexts:groups:v1';
 
 const initialTaskState = useTaskStore.getState();
@@ -38,6 +39,21 @@ const renderContextsView = () => render(
 );
 
 describe('ContextsView', () => {
+    it('collapses and restores its own navigation without losing token selection', () => {
+        const view = renderContextsView();
+        const navigation = view.container.querySelector('[data-context-navigation-root]');
+        fireEvent.click(view.getByRole('button', { name: '@Office (1)' }));
+        fireEvent.click(view.getByRole('button', { name: 'Collapse contexts panel' }));
+        expect(navigation).toHaveClass('hidden');
+        expect(navigation).toHaveAttribute('hidden');
+        expect(window.localStorage.getItem('mindwtr:view:contexts:sidebar-collapsed:v1')).toBe('true');
+        view.unmount();
+        const restored = renderContextsView();
+        fireEvent.click(restored.getByRole('button', { name: 'Expand contexts panel' }));
+        expect(restored.container.querySelector('[data-context-navigation-root]')).not.toHaveAttribute('hidden');
+        expect(restored.getByRole('button', { name: '@Office (1)' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
     beforeEach(() => {
         vi.restoreAllMocks();
         clearUndoableAction();
@@ -70,6 +86,32 @@ describe('ContextsView', () => {
         });
     });
 
+    it('removes a saved status chip without dropping raw date/area criteria and resets statuses on deselect', () => {
+        const tasks = [
+            makeTask('next', { title: 'Next meeting', contexts: ['@Office'], areaId: 'a', dueDate: '2026-11-01' }),
+            makeTask('someday', { title: 'Someday meeting', status: 'someday', contexts: ['@Office'], areaId: 'a', dueDate: '2026-11-01' }),
+            makeTask('far', { title: 'Far future meeting', contexts: ['@Office'], areaId: 'a', dueDate: '2030-01-01' }),
+        ];
+        useTaskStore.setState({ tasks, _allTasks: tasks, settings: { savedFilters: [{ id: 'emma', name: 'Emma saved', view: 'contexts',
+            criteria: { contexts: ['@Office'], statuses: ['next', 'someday'], areas: ['a'], dueDateRange: { from: '2026-10-31', to: '2026-11-05' } },
+            createdAt: now, updatedAt: now }] } });
+        renderContextsView();
+        fireEvent.click(screen.getByRole('button', { name: 'Emma saved' }));
+        expect(screen.getByText('Next meeting')).toBeInTheDocument();
+        expect(screen.getByText('Someday meeting')).toBeInTheDocument();
+        expect(screen.queryByText('Far future meeting')).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Remove filter: Someday' }));
+        expect(screen.queryByText('Someday meeting')).not.toBeInTheDocument();
+        expect(screen.getByText('Next meeting')).toBeInTheDocument();
+        expect(screen.queryByText('Far future meeting')).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Emma saved' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Emma saved' }));
+        expect(screen.getByText('Far future meeting')).toBeInTheDocument();
+        expect(screen.getByText('Someday meeting')).toBeInTheDocument();
+    });
+
     const taskDrag = (id: string) => {
         const values: Record<string, string> = {};
         const transfer = {
@@ -94,6 +136,30 @@ describe('ContextsView', () => {
         useTaskStore.setState({ updateTask });
         return updateTask;
     };
+
+    it('adds and undoes a dropped context on the contexts a sync save published while each write waited', async () => {
+        vi.spyOn(core, 'flushPendingSave').mockResolvedValue(undefined);
+        const toast = vi.spyOn(useUiStore.getState(), 'showToast');
+        const view = renderContextsView();
+        const target = view.getByRole('button', { name: '@Office (1)' });
+        const transfer = taskDrag('task-2');
+        const publishContexts = (contexts: string[]) => holdSyncSave(() => useTaskStore.setState({
+            _allTasks: useTaskStore.getState()._allTasks.map((task) => task.id === 'task-2' ? { ...task, contexts } : task),
+        }));
+
+        let finish = publishContexts(['@Home', '@Phone']);
+        fireEvent.dragOver(target, { dataTransfer: transfer });
+        await act(async () => { fireEvent.drop(target, { dataTransfer: transfer }); });
+        await act(finish);
+        await vi.waitFor(() => expect(useTaskStore.getState()._tasksById.get('task-2')?.contexts).toEqual(['@Home', '@Phone', '@Office']));
+
+        await vi.waitFor(() => expect(toast).toHaveBeenCalledWith('Added @Office', 'info', 5000, expect.objectContaining({ label: 'Undo' })));
+        const undo = toast.mock.calls[0]![3]!.onClick;
+        finish = publishContexts(['@Home', '@Phone', '@Office', '@Later']);
+        await act(async () => { undo(); });
+        await act(finish);
+        await vi.waitFor(() => expect(useTaskStore.getState()._tasksById.get('task-2')?.contexts).toEqual(['@Home', '@Phone', '@Later']));
+    });
 
     it('adds the dropped context only after a durable save and undoes only that addition', async () => {
         const updateTask = mockContextWrite();
@@ -271,6 +337,32 @@ describe('ContextsView', () => {
         expect(getByText('Plan launch')).toBeInTheDocument();
     });
 
+
+    it('shows nested contexts and tags under their parent with a short label', () => {
+        const tasks = [
+            makeTask('emma', { title: 'Emma', contexts: ['@person/emma'] }),
+            makeTask('todd', { title: 'Todd', contexts: ['@person/todd'] }),
+            makeTask('bank', { title: 'Bank', contexts: ['@place/bank'], tags: ['#errand/post'] }),
+        ];
+        useTaskStore.setState({ tasks, _allTasks: tasks });
+        const view = renderContextsView();
+        const row = (name: string) => {
+            const button = view.getByRole('button', { name });
+            const label = button.querySelectorAll('span')[1] as HTMLElement;
+            return [label.textContent, label.style.paddingLeft, button.getAttribute('title')];
+        };
+        expect(row('@person (2)')).toEqual(['person', '', null]);
+        expect(row('@person/emma (1)')).toEqual(['/emma', '0.75rem', '@person/emma']);
+        expect(row('@person/todd (1)')).toEqual(['/todd', '0.75rem', '@person/todd']);
+        expect(row('@place/bank (1)')).toEqual(['/bank', '0.75rem', '@place/bank']);
+        expect(row('#errand (1)')).toEqual(['errand', '', null]);
+        expect(row('#errand/post (1)')).toEqual(['/post', '0.75rem', '#errand/post']);
+        fireEvent.click(view.getByRole('button', { name: '@person/todd (1)' }));
+        expect(view.getByRole('heading', { name: '@person/todd' })).toBeInTheDocument();
+        expect(view.getByText('Todd')).toBeInTheDocument();
+        expect(view.queryByText('Emma')).not.toBeInTheDocument();
+    });
+
     it('offers parent filters and keeps a selected parent with zero matches', () => {
         const tasks = [
             makeTask('excavator', { title: 'Excavator', contexts: ['@tools/excavator'] }),
@@ -292,6 +384,8 @@ describe('ContextsView', () => {
         expect(view.getByRole('button', { name: '@tools (0)' })).toHaveAttribute('aria-pressed', 'true');
         expect(view.queryByRole('button', { name: '@tools/chainsaw (0)' })).not.toBeInTheDocument();
         expect(view.queryByText('Home')).not.toBeInTheDocument();
+        vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(600);
+        fireEvent(window, new Event('resize'));
         expect(view.getByRole('button', { name: 'Remove filter @tools' })).toBeInTheDocument();
         fireEvent.click(view.getByRole('button', { name: 'Remove filter @tools' }));
         expect(view.getByText('Home')).toBeInTheDocument();
@@ -313,6 +407,50 @@ describe('ContextsView', () => {
         expect(view.queryByText('Office task')).not.toBeInTheDocument();
     });
 
+
+    it('switches token on click and combines on Ctrl/Cmd-click or Ctrl/Cmd+Enter', () => {
+        const tasks = [
+            makeTask('alice', { title: 'Alice only', contexts: ['@alice'] }),
+            makeTask('bob', { title: 'Bob only', contexts: ['@bob'] }),
+            makeTask('both', { title: 'Alice and Bob', contexts: ['@alice', '@bob'] }),
+            makeTask('none', { title: 'Untagged' }),
+        ];
+        useTaskStore.setState({ tasks, _allTasks: tasks });
+        const view = renderContextsView();
+        const alice = () => view.getByRole('button', { name: '@alice (2)' });
+        const bob = () => view.getByRole('button', { name: '@bob (2)' });
+        const none = () => view.getByRole('button', { name: /No context/ });
+        fireEvent.click(alice());
+        fireEvent.click(bob());
+        expect(alice()).toHaveAttribute('aria-pressed', 'false');
+        expect(view.getByRole('heading', { name: '@bob' })).toBeInTheDocument();
+        expect(view.getByText('Bob only')).toBeInTheDocument();
+        expect(view.queryByText('Alice only')).not.toBeInTheDocument();
+        fireEvent.click(bob());
+        expect(view.getByText('Alice only')).toBeInTheDocument();
+        expect(view.getByText('Bob only')).toBeInTheDocument();
+
+        fireEvent.click(alice());
+        fireEvent.click(bob(), { metaKey: true });
+        expect(view.getByRole('heading', { name: '@alice + @bob' })).toBeInTheDocument();
+        fireEvent.click(bob(), { ctrlKey: true });
+        expect(view.getByRole('heading', { name: '@alice' })).toBeInTheDocument();
+        fireEvent.keyDown(bob(), { key: 'Enter', ctrlKey: true });
+        expect(view.getByRole('heading', { name: '@alice + @bob' })).toBeInTheDocument();
+        fireEvent.click(alice());
+        expect(view.getByRole('heading', { name: '@alice' })).toBeInTheDocument();
+
+        fireEvent.click(none());
+        expect(view.getByText('Untagged')).toBeInTheDocument();
+        expect(view.queryByText('Alice only')).not.toBeInTheDocument();
+        fireEvent.click(alice());
+        expect(view.getByRole('heading', { name: '@alice' })).toBeInTheDocument();
+        fireEvent.click(none());
+        fireEvent.click(none());
+        expect(view.getByText('Alice only')).toBeInTheDocument();
+        expect(view.getByText('Bob only')).toBeInTheDocument();
+    });
+
     it('combines context and tag tokens with All or Any without duplicate rows', () => {
         const tasks = [
             makeTask('alice', { title: 'Alice only', contexts: ['@alice'] }),
@@ -325,7 +463,7 @@ describe('ContextsView', () => {
         const view = renderContextsView();
         fireEvent.click(view.getByRole('button', { name: '@alice (2)' }));
         expect(view.queryByRole('button', { name: 'Any' })).not.toBeInTheDocument();
-        fireEvent.click(view.getByRole('button', { name: '#bob (2)' }));
+        fireEvent.click(view.getByRole('button', { name: '#bob (2)' }), { ctrlKey: true });
 
         expect(view.getByRole('button', { name: '@alice (2)' })).toHaveAttribute('aria-pressed', 'true');
         expect(view.getByRole('button', { name: '#bob (2)' })).toHaveAttribute('aria-pressed', 'true');
@@ -350,6 +488,7 @@ describe('ContextsView', () => {
     });
 
     it('migrates the old single persisted token and adds tokens from the compact selector', () => {
+        vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(600);
         window.localStorage.setItem(CONTEXTS_VIEW_STATE_STORAGE_KEY,
             JSON.stringify({ selectedContext: '@Office', statusFilters: [], groupBy: 'none' }));
         const view = renderContextsView();
@@ -369,6 +508,7 @@ describe('ContextsView', () => {
     });
 
     it('returns the compact token selector to all contexts', () => {
+        vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(600);
         const view = renderContextsView();
         const compactSelect = view.getByRole('combobox', { name: 'Contexts & Tags' });
 
@@ -447,8 +587,7 @@ describe('ContextsView', () => {
 
         selectToolbarOption('Group', 'Status');
 
-        // Status names also appear as filter chips, so assert on the group
-        // header shape (a span next to the count) via duplicate presence.
+
         expect(getAllByText('Next').length).toBeGreaterThan(1);
         expect(getAllByText('Waiting').length).toBeGreaterThan(1);
         expect(getAllByText('Someday').length).toBeGreaterThan(1);
@@ -505,7 +644,7 @@ describe('ContextsView', () => {
         fireEvent.click(view.getByRole('button', { name: 'Select' }));
         fireEvent.click(view.getByRole('button', { name: 'Select All' }));
 
-        // The folded group renders no rows, so it contributes no tasks to act on.
+
         expect(view.getAllByRole('checkbox', { name: 'Select task' }).map((checkbox) => (
             (checkbox as HTMLInputElement).checked
         ))).toEqual([true]);
@@ -653,6 +792,32 @@ describe('ContextsView', () => {
         expect(text.indexOf('Plan launch')).toBeLessThan(text.indexOf('Write brief'));
     });
 
+
+    it('offers the Priority sort while Priorities is on and stores it as the shared list sort', () => {
+        const tasks = [
+            makeTask('task-low', { title: 'Low task', contexts: ['@Office'], priority: 'low' }),
+            makeTask('task-none', { title: 'Unranked task', contexts: ['@Office'] }),
+            makeTask('task-high', { title: 'High task', contexts: ['@Office'], priority: 'high' }),
+        ];
+        useTaskStore.setState({ tasks, _allTasks: tasks, projects: [], areas: [], settings: {} });
+
+        const { container } = renderContextsView();
+        selectToolbarOption('Sort', 'Priority');
+
+        expect(useTaskStore.getState().settings.taskSortBy).toBe('priority');
+        const text = container.textContent ?? '';
+        expect(text.indexOf('High task')).toBeLessThan(text.indexOf('Low task'));
+        expect(text.indexOf('Low task')).toBeLessThan(text.indexOf('Unranked task'));
+    });
+
+    it('hides the Priority sort while Priorities is off', () => {
+        useTaskStore.setState({ settings: { features: { priorities: false } } });
+        renderContextsView();
+        openToolbarSelect('Sort');
+        expect(screen.queryByRole('option', { name: 'Priority' })).not.toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'Title' })).toBeInTheDocument();
+    });
+
     it('applies task token navigation while the context view is mounted', () => {
         const { getByRole, getByText } = renderContextsView();
 
@@ -663,6 +828,24 @@ describe('ContextsView', () => {
         expect(getByRole('heading', { name: '#ERP' })).toBeInTheDocument();
         expect(getByText('Plan launch')).toBeInTheDocument();
         expect(window.localStorage.getItem(CONTEXTS_VIEW_STATE_STORAGE_KEY)).toContain('"selectedContexts":["#ERP"]');
+    });
+
+    it.each([
+        ['Add context', 'Remove context', '@unused'],
+        ['Add tag', 'Remove tag', '#unused'],
+    ])('offers saved unused tokens in %s while Remove stays assigned-only', (add, remove, token) => {
+        useTaskStore.setState({ settings: { taxonomy: {
+            contexts: [{ token: '@unused', rev: 1, revBy: 'test', updatedAt: now }],
+            tags: [{ token: '#unused', rev: 1, revBy: 'test', updatedAt: now }],
+        } } });
+        const view = renderContextsView();
+        fireEvent.click(view.getByRole('button', { name: 'Select' }));
+        fireEvent.click(view.getByRole('button', { name: 'Select All' }));
+        fireEvent.click(view.getByRole('button', { name: add }));
+        expect(within(view.getByRole('dialog')).getByRole('button', { name: token })).toBeInTheDocument();
+        fireEvent.click(within(view.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+        fireEvent.click(view.getByRole('button', { name: remove }));
+        expect(within(view.getByRole('dialog')).queryByRole('button', { name: token })).toBeNull();
     });
 
     it('selects and clears all visible tasks in context selection mode', () => {

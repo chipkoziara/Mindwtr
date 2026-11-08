@@ -1,8 +1,7 @@
-// Shared file-reading frontend for the third-party importers (OmniFocus, Todoist, TickTick,
-// DGT). Every importer used to hand-write its own copy of "sniff bytes -> unzip or decode ->
-// sanitize -> split CSV into rows/header index" — this module owns that once. Per-format parse
-// logic (what a row/record MEANS) stays in each importer; only the byte/CSV mechanics move here.
-import { strFromU8, unzipSync } from 'fflate';
+
+
+
+import { inflateSync, strFromU8 } from 'fflate';
 
 const ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04];
 
@@ -50,8 +49,7 @@ export const DEFAULT_IMPORT_CSV_LIMITS: Readonly<ImportCsvLimits> = {
 
 export const DEFAULT_IMPORT_CHECKLIST_ITEM_LIMIT = 1_000;
 
-// These are archive-wide ceilings. Per-entry CSV limits still protect the parser, while this
-// budget prevents many individually valid entries from multiplying retained records/checklists.
+
 export const DEFAULT_IMPORT_ARCHIVE_BUDGET_LIMITS: Readonly<ImportArchiveBudgetLimits> = {
     maxChecklistItems: 100_000,
     maxEntities: 100_000,
@@ -182,9 +180,7 @@ export const toImportBytes = (value?: ArrayBuffer | Uint8Array | null): Uint8Arr
 export const isZipBytes = (bytes: Uint8Array): boolean =>
     bytes.length >= ZIP_SIGNATURE.length && ZIP_SIGNATURE.every((byte, index) => bytes[index] === byte);
 
-// Every importer's non-UTF-8 fallback is identical; OmniFocus additionally sniffs a UTF-16 BOM
-// before falling back to this for the rest, so it keeps its own richer decoder that calls this
-// one for the shared tail.
+
 export const decodeTextBytes = (bytes: Uint8Array): string => {
     try {
         return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
@@ -212,11 +208,13 @@ export const parseCsvRows = (
     delimiter: string,
     limits: Readonly<ImportCsvLimits> = DEFAULT_IMPORT_CSV_LIMITS,
     archiveBudget?: ImportArchiveBudget,
+    recordNumbers?: number[],
 ): { hasUnclosedQuote: boolean; rows: string[][] } => {
     const rows: string[][] = [];
     let currentRow: string[] = [];
     let currentCell = '';
     let inQuotes = false;
+    let recordNumber = 0;
 
     const appendCharacter = (character: string): void => {
         if (currentCell.length >= limits.maxCellChars) {
@@ -240,6 +238,7 @@ export const parseCsvRows = (
     };
 
     const finishRow = (): void => {
+        recordNumber += 1;
         if (currentCell.length === 0 && currentRow.every((cell) => cell.length === 0)) {
             currentRow = [];
             return;
@@ -253,6 +252,7 @@ export const parseCsvRows = (
         }
         archiveBudget?.consumeRows();
         rows.push(currentRow);
+        recordNumbers?.push(recordNumber);
         currentRow = [];
     };
 
@@ -300,9 +300,7 @@ export const parseCsvRows = (
     };
 };
 
-// Local-time formatting shared by importers that preserve an offset-less datetime as-is instead
-// of normalizing it through UTC (OmniFocus, Mindwtr CSV) — pure format mechanics, which is what
-// this module exists to own (see header comment).
+
 export const pad = (value: number, width = 2): string => String(value).padStart(width, '0');
 
 export const formatLocalDate = (date: Date): string =>
@@ -331,18 +329,14 @@ export const getCell = (row: string[], headerIndex: Map<string, number>, key: st
     return String(row[index] ?? '').trim();
 };
 
-// Same concept in OmniFocus and DGT: normalize a free-text context name to Mindwtr's `@name`
-// convention. (Not the same as OmniFocus's/DGT's *own* `normalizeContexts`/`normalizeTags`
-// functions, which parse an entire CSV token list or a whole JSON array respectively — those
-// happen to share a name across formats but do genuinely different things, so they stay local.)
+
 export const normalizeContextName = (value: string): string | undefined => {
     const trimmed = value.trim();
     if (!trimmed) return undefined;
     return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
 };
 
-// Trim + dedupe case-insensitively, keeping the first-seen casing. Every importer had its own
-// copy of this (some under a different local name, e.g. OmniFocus's `dedupeCaseInsensitive`).
+
 export const dedupeStrings = (values: Array<string | undefined>): string[] => {
     const seen = new Set<string>();
     const result: string[] = [];
@@ -362,8 +356,7 @@ export const joinDescription = (parts: Array<string | undefined>): string | unde
     return normalized.length > 0 ? normalized.join('\n\n') : undefined;
 };
 
-// Every importer's warning list is built from its own counters and its own message strings —
-// only this "if count > 0, push singular/plural" shape was byte-identical across all four.
+
 export const appendWarning = (warnings: string[], count: number, singular: string, plural = singular): void => {
     if (count <= 0) return;
     warnings.push(count === 1 ? singular : plural.replace('{count}', String(count)));
@@ -381,11 +374,109 @@ export type ReadImportSourceResult =
     | { entries: ImportArchiveEntry[]; fileName: string; kind: 'archive' }
     | { fileName: string; kind: 'text'; text: string };
 
-// Bytes -> either a decoded single-file text blob or the raw entries of a ZIP archive. Each
-// importer still walks `entries` itself and owns its own per-entry extension/counter logic
-// (nested zip, wrong extension, invalid parse) since the exact warning message and which
-// extension is expected (.csv vs .json) differs per format; this only removes the byte-sniffing
-// and generic UTF-8 decode that were duplicated verbatim in all four parsers.
+const ZIP_LOCAL_HEADER = 0x04034b50;
+const ZIP_CENTRAL_HEADER = 0x02014b50;
+const ZIP_END_RECORD = 0x06054b50;
+const readU16 = (bytes: Uint8Array, at: number): number => bytes[at] | (bytes[at + 1] << 8);
+const readU32 = (bytes: Uint8Array, at: number): number => (readU16(bytes, at) | (readU16(bytes, at + 2) << 16)) >>> 0;
+
+const damagedArchive = (): never => {
+    throw new Error('The selected archive is damaged or uses an unsupported ZIP feature.');
+};
+
+type ZipCentralEntry = {
+    compressedSize: number; flags: number; localOffset: number; method: number; name: string; nameBytes: Uint8Array; size: number;
+};
+
+
+const readZipEntries = (bytes: Uint8Array, limits: Readonly<ImportSourceLimits>): ImportArchiveEntry[] => {
+    let end = -1;
+    for (let at = bytes.length - 22; at >= Math.max(0, bytes.length - 22 - 0xffff); at -= 1) {
+        if (readU32(bytes, at) === ZIP_END_RECORD) { end = at; break; }
+    }
+    if (end < 0) damagedArchive();
+    const count = readU16(bytes, end + 10);
+    const directorySize = readU32(bytes, end + 12);
+    const directoryStart = readU32(bytes, end + 16);
+    if (readU16(bytes, end + 4) !== 0 || readU16(bytes, end + 6) !== 0 || readU16(bytes, end + 8) !== count
+        || count === 0xffff || directoryStart + directorySize > end) damagedArchive();
+    const central: ZipCentralEntry[] = [];
+    let expandedBytes = 0;
+    let at = directoryStart;
+    for (let index = 0; index < count; index += 1) {
+        if (index + 1 > limits.maxArchiveEntries) {
+            throw new ImportSourceLimitError(
+                'archive-too-many-entries',
+                `The selected archive contains too many files. Choose one with no more than ${limits.maxArchiveEntries} entries.`,
+            );
+        }
+        if (at + 46 > directoryStart + directorySize || readU32(bytes, at) !== ZIP_CENTRAL_HEADER) damagedArchive();
+        const flags = readU16(bytes, at + 8);
+        const method = readU16(bytes, at + 10);
+        const compressedSize = readU32(bytes, at + 20);
+        const size = readU32(bytes, at + 24);
+        const nameLength = readU16(bytes, at + 28);
+        const localOffset = readU32(bytes, at + 42);
+        const nameBytes = bytes.subarray(at + 46, at + 46 + nameLength);
+        if ((flags & 1) !== 0 || (method !== 0 && method !== 8)
+            || compressedSize === 0xffffffff || size === 0xffffffff || localOffset === 0xffffffff) damagedArchive();
+        if (size > limits.maxArchiveEntryBytes) {
+            throw new ImportSourceLimitError(
+                'archive-entry-too-large',
+                `An archive entry is too large. Choose an export whose files are no larger than ${formatLimit(limits.maxArchiveEntryBytes)} each.`,
+            );
+        }
+        expandedBytes += size;
+        if (expandedBytes > limits.maxArchiveExpandedBytes) {
+            throw new ImportSourceLimitError(
+                'archive-expanded-too-large',
+                `The selected archive expands to too much data. Choose an export no larger than ${formatLimit(limits.maxArchiveExpandedBytes)} when unpacked.`,
+            );
+        }
+        central.push({ compressedSize, flags, localOffset, method, name: strFromU8(nameBytes, (flags & 0x800) === 0), nameBytes, size });
+        at += 46 + nameLength + readU16(bytes, at + 30) + readU16(bytes, at + 32);
+    }
+    if (at !== directoryStart + directorySize) damagedArchive();
+    const spans = central.map((entry) => {
+        const header = entry.localOffset;
+        if (header + 30 > directoryStart || readU32(bytes, header) !== ZIP_LOCAL_HEADER) damagedArchive();
+        const nameLength = readU16(bytes, header + 26);
+        const dataStart = header + 30 + nameLength + readU16(bytes, header + 28);
+        const localName = bytes.subarray(header + 30, header + 30 + nameLength);
+        if (readU16(bytes, header + 8) !== entry.method || nameLength !== entry.nameBytes.length
+            || localName.some((byte, index) => byte !== entry.nameBytes[index])) damagedArchive();
+        if ((readU16(bytes, header + 6) & 8) === 0
+            && (readU32(bytes, header + 18) !== entry.compressedSize || readU32(bytes, header + 22) !== entry.size)) damagedArchive();
+        const dataEnd = dataStart + entry.compressedSize;
+        if (dataEnd > directoryStart) damagedArchive();
+        return { entry, header, dataStart, dataEnd };
+    });
+    const ordered = [...spans].sort((left, right) => left.header - right.header);
+    for (let index = 1; index < ordered.length; index += 1) {
+        if (ordered[index].header < ordered[index - 1].dataEnd) damagedArchive();
+    }
+
+    const entries = new Map<string, Uint8Array>();
+    for (const { entry, dataStart, dataEnd } of spans) {
+        const data = bytes.subarray(dataStart, dataEnd);
+        let entryBytes: Uint8Array;
+        if (entry.method === 0) {
+            if (entry.compressedSize !== entry.size) damagedArchive();
+            entryBytes = data.slice();
+        } else {
+            try {
+                entryBytes = inflateSync(data, { out: new Uint8Array(entry.size + 1) });
+            } catch {
+                return damagedArchive();
+            }
+            if (entryBytes.length !== entry.size) damagedArchive();
+        }
+        entries.set(entry.name, entryBytes);
+    }
+    return [...entries].map(([entryName, entryBytes]) => ({ entryName, entryBytes }));
+};
+
+
 export const readImportSource = (
     input: ImportSourceInput,
     decodeText: (bytes: Uint8Array) => string = decodeTextBytes,
@@ -394,39 +485,7 @@ export const readImportSource = (
     const fileName = basename(input.fileName);
     const bytes = toImportBytes(input.bytes);
     assertImportSourceFileSize(bytes?.byteLength, limits);
-    if (bytes && isZipBytes(bytes)) {
-        let entryCount = 0;
-        let expandedBytes = 0;
-        const unzipped = unzipSync(bytes, {
-            // fflate calls this with central-directory sizes before inflating the entry. Rejecting
-            // here prevents a small compressed payload from allocating an unbounded output buffer.
-            filter: (entry) => {
-                entryCount += 1;
-                if (entryCount > limits.maxArchiveEntries) {
-                    throw new ImportSourceLimitError(
-                        'archive-too-many-entries',
-                        `The selected archive contains too many files. Choose one with no more than ${limits.maxArchiveEntries} entries.`,
-                    );
-                }
-                if (entry.originalSize > limits.maxArchiveEntryBytes) {
-                    throw new ImportSourceLimitError(
-                        'archive-entry-too-large',
-                        `The archive entry “${entry.name}” is too large. Choose an export whose files are no larger than ${formatLimit(limits.maxArchiveEntryBytes)} each.`,
-                    );
-                }
-                expandedBytes += entry.originalSize;
-                if (expandedBytes > limits.maxArchiveExpandedBytes) {
-                    throw new ImportSourceLimitError(
-                        'archive-expanded-too-large',
-                        `The selected archive expands to too much data. Choose an export no larger than ${formatLimit(limits.maxArchiveExpandedBytes)} when unpacked.`,
-                    );
-                }
-                return true;
-            },
-        });
-        const entries = Object.entries(unzipped).map(([entryName, entryBytes]) => ({ entryName, entryBytes }));
-        return { kind: 'archive', fileName, entries };
-    }
+    if (bytes && isZipBytes(bytes)) return { kind: 'archive', fileName, entries: readZipEntries(bytes, limits) };
     if (bytes) assertTextSize(bytes.byteLength, limits);
     const text = input.text ?? (bytes ? decodeText(bytes) : '');
     if (text.length > limits.maxTextBytes) assertTextSize(text.length, limits);

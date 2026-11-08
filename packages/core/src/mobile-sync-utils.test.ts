@@ -20,8 +20,7 @@ import { isLikelyOfflineSyncError } from './sync-service-utils';
 import { DropboxUnauthorizedError } from './dropbox';
 import type { MergeStats } from './sync-types';
 
-// Moved with the rules from apps/mobile/lib/sync-service.test.ts, which still runs against
-// React Native's re-exports.
+
 describe('mobile sync utils', () => {
   const emptyEntityStats = {
     localTotal: 0,
@@ -87,6 +86,17 @@ describe('mobile sync utils', () => {
     expect(message).toContain('iCloud Drive or WebDAV');
   });
 
+  it('classifies an iOS temporary Inbox error from its raw text, though logs redact its path (S5)', () => {
+    for (const text of [
+      "File '/private/var/mobile/Containers/Data/Application/abc/tmp/tech.dongdongbh.mindwtr-Inbox/data.json' is not writable",
+      'Missing permission for uri: file:///private/var/mobile/Containers/Data/Application/abc/tmp/tech.dongdongbh.mindwtr-Inbox/data.json',
+    ]) {
+      expect(classifySyncFailure(new Error(text))).toBe('permission');
+    }
+    expect(formatSyncErrorMessage(new Error("File 'file:///private/var/mobile/x/tmp/tech.dongdongbh.mindwtr-Inbox/data.json' is not writable"), 'file'))
+      .toContain('temporary Files copy');
+  });
+
   it('formats writable file sync errors with actionable text', () => {
     const error = new Error("File '/var/mobile/Containers/Data/Application/abc/Documents/MindWtr/data.json.tmp' is not writable");
     const message = formatSyncErrorMessage(error, 'file');
@@ -138,6 +148,16 @@ describe('mobile sync utils', () => {
     expect(classifySyncFailure(
       'Safe File Sync locking is unavailable for this location. Re-select the sync folder, restart Mindwtr, or use WebDAV.',
     )).toBe('fileLockUnavailable');
+  });
+
+  it('classifies a SAF folder the provider cannot list or describe as a permission failure, never its internal code', () => {
+    expect(classifySyncFailure('Error: SAF_DOCUMENT_UNAVAILABLE: the provider could not list the folder')).toBe('permission');
+    expect(classifySyncFailure('SAF_DOCUMENTS_UNAVAILABLE: SAF document calls are unavailable in this build')).toBe('permission');
+  });
+
+  it('classifies a SAF read that could not be proven whole as a conflict to retry', () => {
+    expect(classifySyncFailure('Error: SAF_DOCUMENT_INCOMPLETE: short read')).toBe('conflict');
+    expect(classifySyncFailure('SAF_DOCUMENT_INCOMPLETE: the document is still downloading')).toBe('conflict');
   });
 
   it('classifies terminal File Sync generation corruption separately from retryable failures', () => {

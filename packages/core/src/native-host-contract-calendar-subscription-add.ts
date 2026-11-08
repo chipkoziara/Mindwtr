@@ -12,6 +12,7 @@ import { taskEditValuesEqual } from './json-value-equality';
 import { ensureDeviceId } from './store-helpers';
 import { timestampAtLeastAfter } from './store-settings';
 import { getPersistenceStatus, getStorageAdapter, useTaskStore } from './store';
+import { gateStoreCommands } from './store-write-gate';
 import type { PreparedAreaAuthority } from './store-types';
 import type { ExternalCalendarSubscription } from './ics';
 import { calendarSubscriptionModules } from './store-calendar-subscription-modules';
@@ -62,18 +63,18 @@ const preparedOf = (input: unknown): PreparedCalendarSubscriptionAdd | null => {
     } catch { return null; }
 };
 
-/** The existing RN row factory; IDs, not URL strings, identify a new subscription. */
+
 export function planCalendarSubscriptionAdd(feeds: readonly ExternalCalendarSubscription[], input: CalendarSubscriptionAddRequest): ExternalCalendarSubscription[] | null {
     const request = requestOf(input);
     if (!request || feeds.some((feed) => feed.id === request.requestId)) return null;
     const next = addCalendarFeed(feeds, { id: request.requestId, name: request.name, url: request.url, defaultName: request.defaultName });
-    // Legacy RN defaults can include color:undefined; capture the JSON SQLite will actually store.
+
     return next ? JSON.parse(JSON.stringify(next)) as ExternalCalendarSubscription[] : null;
 }
 
 calendarSubscriptionModules.add = planCalendarSubscriptionAdd;
 
-/** Canonical-only URL Add; native holds the legacy fixed-cell lease through COMMIT. */
+
 export function createCalendarSubscriptionAddMethods(deps: {
     readiness: () => NativeHostResult<null>; save: () => Promise<NativeHostResult<null>>;
     storage: () => CalendarSubscriptionSourceStorage | null;
@@ -107,7 +108,7 @@ export function createCalendarSubscriptionAddMethods(deps: {
             const owned = authorizations.get(id);
             if (!owned || !await ownsSource(owned)) return recovery();
             if (useTaskStore.getState().persistenceFailure) {
-                // A rolled-back save may outlive a later durable import; never flush its old snapshot over that data.
+
                 try {
                     const durable = await owned.adapter.getData({ rawTasks: true });
                     if (!await ownsSource(owned) || !taskEditValuesEqual(durable, owned.authority.snapshot)) return recovery();
@@ -177,7 +178,8 @@ export function createCalendarSubscriptionAddMethods(deps: {
         return source ? { ok: true as const, value: { adapter, authority, source, storage, legacyRaw } }
             : fail('INVALID_INPUT', 'Saved calendar subscriptions are malformed or exceed the source bound');
     };
-    return {
+
+    return gateStoreCommands({
         createCalendarSubscriptionFileAddRequest(input: unknown): NativeHostResult<CalendarSubscriptionAddRequest> {
             const invalid = () => fail('INVALID_INPUT', 'A bounded native calendar file selection is required');
             if (!isNativeJsonWithinBytes(input, CALENDAR_SUBSCRIPTION_REQUEST_BYTES)) return invalid();
@@ -188,7 +190,7 @@ export function createCalendarSubscriptionAddMethods(deps: {
                 || typeof value.fileName !== 'string' || value.fileName.length > 500) return invalid();
             const request = requestOf({ ...value.request, url: value.uri });
             if (!request) return invalid();
-            // Native owns the copied file; shared RN code owns its display name.
+
             const row = addCalendarFile([], { id: request.requestId, name: request.name,
                 fileName: value.fileName, uri: value.uri, defaultName: request.defaultName })[0];
             const frozen = requestOf({ ...request, name: row.name });
@@ -238,7 +240,7 @@ export function createCalendarSubscriptionAddMethods(deps: {
                 return { ok: true, value: resultFor() };
             });
             if (outcome.ok) {
-                // A hot receipt cache cannot replace proof after an external import removes the SQL receipt.
+
                 const proven = await saved(request);
                 if (!proven) return fail('STALE_REVISION', 'Calendar subscription outcome is no longer recorded');
                 if (!proven.ok) return proven;
@@ -247,5 +249,5 @@ export function createCalendarSubscriptionAddMethods(deps: {
             }
             return outcome;
         },
-    };
+    });
 }

@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetForTests, useTaskStore, type Task } from '@mindwtr/core';
+import { resetForTests, safeFormatDate, useTaskStore, type Task } from '@mindwtr/core';
 
 import { DailyReviewGuideModal } from './DailyReviewModal';
+import { fetchExternalCalendarEvents } from '../../../lib/external-calendar-events';
 
 vi.mock('../../../contexts/language-context', () => ({
     useLanguage: () => ({
@@ -38,6 +39,8 @@ vi.mock('../../../contexts/language-context', () => ({
             'review.of': 'of',
             'review.step': 'Step',
             'review.waitingEmpty': 'Nothing waiting',
+            'taskEdit.startDateLabel': 'Start Date',
+            'taskEdit.dueDateLabel': 'Due Date',
         }[key] ?? key),
     }),
 }));
@@ -91,6 +94,30 @@ describe('DailyReviewGuideModal', () => {
         vi.useRealTimers();
     });
 
+    it('does not close the review for IME Escape', () => {
+        const onClose = vi.fn();
+        render(<DailyReviewGuideModal onClose={onClose} />);
+        fireEvent.keyDown(window, { key: 'Escape', isComposing: true });
+        fireEvent.keyDown(window, { key: 'Escape', keyCode: 229 });
+        expect(onClose).not.toHaveBeenCalled();
+        fireEvent.keyDown(window, { key: 'Escape' });
+        expect(onClose).toHaveBeenCalledOnce();
+    });
+
+    it('opens the next step at its top (#1471)', () => {
+        useTaskStore.setState({
+            _allTasks: [
+                makeTask({ id: 'waiting-1', title: 'Waiting for invoice', status: 'waiting' }),
+                makeTask({ id: 'next-1', title: 'Write report', status: 'next' }),
+            ],
+        });
+        render(<DailyReviewGuideModal onClose={vi.fn()} />);
+        const scroller = document.querySelector<HTMLElement>('.flex-1.overflow-y-auto')!;
+        Object.defineProperty(scroller, 'scrollTop', { value: 480, writable: true, configurable: true });
+        fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+        expect(scroller.scrollTop).toBe(0);
+    });
+
     it('shows skipped empty steps as checked and lands on all clear when nothing needs review', () => {
         render(<DailyReviewGuideModal onClose={vi.fn()} />);
 
@@ -98,6 +125,32 @@ describe('DailyReviewGuideModal', () => {
         expect(screen.getByText('Today and Calendar')).toBeInTheDocument();
         expect(screen.getByText('Process Inbox')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /next/i })).not.toBeInTheDocument();
+    });
+
+    it('hides events from calendars the user switched off or disabled', async () => {
+        window.localStorage.setItem('mindwtr.calendar.hiddenExternalCalendars', JSON.stringify(['hidden']));
+        const calendars = ['visible', 'hidden', 'disabled'].map((id) => ({
+            id, name: id, url: '', enabled: id !== 'disabled',
+        }));
+        const start = new Date();
+        const end = new Date(start.getTime() + 60 * 1000);
+        vi.mocked(fetchExternalCalendarEvents).mockResolvedValueOnce({
+            calendars,
+            events: calendars.map((calendar) => ({
+                id: `${calendar.id}-event`, sourceId: calendar.id, title: `${calendar.id} appointment`,
+                start: start.toISOString(), end: end.toISOString(), allDay: false,
+            })),
+            warnings: [],
+        });
+
+        const dueToday = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
+        useTaskStore.setState({ _allTasks: [makeTask({ id: 'today-1', title: 'Due today', dueDate: dueToday })] });
+
+        render(<DailyReviewGuideModal onClose={vi.fn()} />);
+
+        await waitFor(() => expect(screen.getByText('visible appointment')).toBeInTheDocument());
+        expect(screen.queryByText('hidden appointment')).not.toBeInTheDocument();
+        expect(screen.queryByText('disabled appointment')).not.toBeInTheDocument();
     });
 
     it('persists the current step across modal remounts and clears it when finished', () => {
@@ -238,6 +291,50 @@ describe('DailyReviewGuideModal', () => {
         expect(screen.getByText('focus task 11')).toBeInTheDocument();
     });
 
+    it('shows labeled date-only and timed focus dates with normal row urgency without changing star behavior', () => {
+        seedStep('focus', { status: 'next' });
+        const tasks = [
+            makeTask({ id: 'undated', title: 'Undated' }),
+            makeTask({ id: 'date-only', title: 'Date only', dueDate: '2026-07-15' }),
+            makeTask({ id: 'timed', title: 'Timed', startTime: '2026-07-15T08:00', dueDate: '2026-07-15T14:00' }),
+            makeTask({ id: 'start-only', title: 'Start only', startTime: '2026-07-14' }),
+            makeTask({ id: 'overdue', title: 'Overdue', dueDate: '2026-07-14', isFocusedToday: true }),
+        ];
+        const updateTask = vi.fn();
+        useTaskStore.setState({ _allTasks: tasks, updateTask });
+
+        render(<DailyReviewGuideModal onClose={vi.fn()} />);
+
+        const card = (title: string) => screen.getByText(title).parentElement!.parentElement!.parentElement!;
+        expect(within(card('Undated')).queryByText(/(?:Start|Due) Date:/)).not.toBeInTheDocument();
+        const dateOnly = within(card('Date only')).getByText(`Due Date: ${safeFormatDate('2026-07-15', 'P')}`);
+        expect(dateOnly).not.toHaveClass('text-destructive');
+        expect(dateOnly.textContent).not.toMatch(/AM|PM|00:00/);
+        expect(within(card('Timed')).getByText(`Start Date: ${safeFormatDate('2026-07-15T08:00', 'Pp')}`)).toBeInTheDocument();
+        expect(within(card('Timed')).getByText(`Due Date: ${safeFormatDate('2026-07-15T14:00', 'Pp')}`)).toBeInTheDocument();
+        expect(within(card('Start only')).getByText(`Start Date: ${safeFormatDate('2026-07-14', 'P')}`)).toBeInTheDocument();
+        expect(within(card('Start only')).queryByText(/Due Date:/)).not.toBeInTheDocument();
+        expect(within(card('Overdue')).getByText(`Due Date: ${safeFormatDate('2026-07-14', 'P')}`)).toHaveClass('text-destructive', 'font-bold');
+        expect(updateTask).not.toHaveBeenCalled();
+
+        fireEvent.click(within(card('Undated')).getByRole('button', { name: 'Add to Focus' }));
+        expect(updateTask).toHaveBeenLastCalledWith('undated', { isFocusedToday: true });
+        fireEvent.click(within(card('Overdue')).getByRole('button', { name: 'Remove from Focus' }));
+        expect(updateTask).toHaveBeenLastCalledWith('overdue', { isFocusedToday: false });
+        expect(useTaskStore.getState()._allTasks).toEqual(tasks);
+    });
+
+    it('refreshes focus due-date urgency when a timed deadline passes', () => {
+        seedStep('focus', { status: 'next', dueDate: '2026-07-15T10:00' });
+        render(<DailyReviewGuideModal onClose={vi.fn()} />);
+        const dueLabel = `Due Date: ${safeFormatDate('2026-07-15T10:00', 'Pp')}`;
+        expect(screen.getAllByText(dueLabel)[0]).not.toHaveClass('text-destructive');
+
+        act(() => vi.advanceTimersByTime(60_001));
+
+        expect(screen.getAllByText(dueLabel)[0]).toHaveClass('text-destructive');
+    });
+
     it.each([1, 10])('shows the configured focus limit of %i in the focus step header', (limit) => {
         seedStep('focus', { status: 'next' });
         useTaskStore.setState({
@@ -271,9 +368,8 @@ describe('DailyReviewGuideModal', () => {
 
         expect(screen.getByTestId('task-tomorrow-1')).toBeInTheDocument();
     });
-    // The star swallowed the blocked reason (`if (!action.canToggle) return;`)
-    // and the cap-only render gate left it enabled, so a task that can never be
-    // focused offered an Add to Focus button that did nothing when pressed.
+
+
     it('disables the focus star for a task that must be clarified first and says why', () => {
         const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
         useTaskStore.setState({

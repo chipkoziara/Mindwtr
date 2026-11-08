@@ -15,16 +15,7 @@ import { flushPendingSave, getStorageAdapter, resetForTests, setStorageAdapter, 
 import type { AppSettings, Area } from './types';
 import { deterministicHash128Hex, generateUUID } from './uuid';
 
-/**
- * The frozen React Native Calendar settings screen
- * (calendar-settings-parity.fixtures.json, captured by
- * apps/mobile/components/settings/calendar-settings-screen.parity.test.tsx),
- * replayed through the native host contract. The replay plays the native screen:
- * it keeps the screen's own state (the open cards, the open Area choice, the
- * drafts, the confirmation), reads the view, sends each control's edit, and lays
- * the view out in the order React Native draws it. The device is the harness's:
- * the same calendars, feeds, storage and recorded writes.
- */
+
 type Device = {
     os?: 'android' | 'ios';
     language?: string;
@@ -58,13 +49,11 @@ const value = <T,>(result: NativeHostResult<T>): T => {
 };
 const normalize = (entry: unknown): unknown => JSON.parse(JSON.stringify(entry, (_key, item) => (item === undefined ? '<undefined>' : item)));
 
-// ---------------------------------------------------------------------------
-// The store: the fixture's data, with settings writes recorded as the harness records them.
 
 const writes: unknown[][] = [];
 let realUpdateSettings: ((...args: unknown[]) => Promise<unknown>) | null = null;
 
-/** Makes the store's saves fail while true. */
+
 let failSaves = false;
 
 async function seed(settings: AppSettings) {
@@ -96,10 +85,7 @@ async function seed(settings: AppSettings) {
     writes.length = 0;
 }
 
-// ---------------------------------------------------------------------------
-// The device: the harness's expo-calendar, AsyncStorage, fetch and picker.
 
-/** The process died before a device write: the write did not happen, and every later one fails too. */
 class Death extends Error {}
 
 function phone(device: Device) {
@@ -155,7 +141,7 @@ function phone(device: Device) {
                 tick();
                 state.nextCalendar += 1;
                 const id = `created-${state.nextCalendar}`;
-                // The harness records the random install marker in the internal name as <marker>.
+
                 state.calendarWrites.push(['createCalendar', { ...details, ...(typeof details.name === 'string' ? { name: details.name.replace(/[0-9a-f-]{36}$/, '<marker>') } : {}) }]);
                 state.calendars.push({ ...(details as DeviceCalendar), id, allowsModifications: true });
                 return id;
@@ -206,8 +192,6 @@ const settle = async () => {
     await flushPendingSave();
 };
 
-// ---------------------------------------------------------------------------
-// The native screen.
 
 type Control = { label: string; selected: boolean | null; disabled: boolean; press: () => Promise<void> };
 
@@ -241,9 +225,11 @@ function calendarDriver(contract: Host, device: ReturnType<typeof phone>, openin
             screen.name = '';
             screen.url = '';
         }
+
+        if (answer.requestAccess) addToasts(value(await contract.grantDeviceCalendarAccess()).toasts);
     };
     const run = async (command: Promise<NativeHostResult<{ toasts: NativeCalendarToast[] }>>) => { addToasts(value(await command).toasts); };
-    /** A new subscription: its own command, never journaled (its URL may carry a password). */
+
     const add = async (input: Parameters<Host['addCalendarFeed']>[0]) => {
         const answer = value(await contract.addCalendarFeed(input));
         addToasts(answer.toasts);
@@ -253,7 +239,7 @@ function calendarDriver(contract: Host, device: ReturnType<typeof phone>, openin
         }
     };
 
-    /** React Native's layout, from the view and the screen state. */
+
     const layout = () => {
         const texts: string[] = [view.title];
         const controls: Control[] = [];
@@ -276,7 +262,7 @@ function calendarDriver(contract: Host, device: ReturnType<typeof phone>, openin
             if (screen.expanded !== choice.key) return;
             for (const option of choice.options) {
                 texts.push(option.label);
-                control(option.label, option.checked, false, () => send(option.edit));
+                control(option.accessibilityLabel, option.checked, false, () => send(option.edit));
             }
         };
 
@@ -416,10 +402,7 @@ function calendarDriver(contract: Host, device: ReturnType<typeof phone>, openin
     };
 }
 
-/**
- * A contract over the same store and device, as after a restart: no request receipts in
- * memory, and no screen open (the journal replays a write at boot before any screen).
- */
+
 async function restart(device: ReturnType<typeof phone>, open = false) {
     await flushPendingSave();
     const contract = await openHost(device.host);
@@ -433,7 +416,7 @@ const edit = async (contract: Host, change: NativeCalendarSettingsEdit, requestI
     await settle();
     return answer;
 };
-/** Everything a replay could touch: the synced settings, the device keys, the device calendars. */
+
 const everything = (device: ReturnType<typeof phone>) => normalize({
     settings: useTaskStore.getState().settings.externalCalendars ?? null,
     storage: device.snapshot(),
@@ -602,6 +585,28 @@ describe('native host contract: Settings › Calendar', () => {
             try { await expect(starting).rejects.toThrow('NOT_READY'); }
             finally { lifecycle.stop(); }
             expect(handset.state.calendarWrites).toEqual([]);
+        });
+
+        it('binds Android with no admission: its own debounce pushes a task change, as RN\'s watcher does', async () => {
+            await seed({});
+            await useTaskStore.getState().addTask('Due task', { status: 'next', dueDate: '2026-10-10' });
+            await flushPendingSave();
+            const task = useTaskStore.getState()._allTasks[0]!;
+            const handset = phone({ os: 'android', calendars: ['primary'],
+                storage: { [KEYS.pushEnabled]: '1', [KEYS.pushTarget]: 'g-primary' } });
+            let lifecycle!: Parameters<NonNullable<NativeCalendarHost['bindPushLifecycle']>>[0];
+            handset.host.bindPushLifecycle = (bound) => { lifecycle = bound; };
+            await openHost(handset.host);
+            expect(lifecycle).toBeDefined();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            try {
+                expect(await lifecycle.start()).toBe(true);
+                await lifecycle.run();
+                expect(handset.state.calendarWrites).toEqual([['createEvent', 'g-primary', 'Due task']]);
+                await useTaskStore.getState().updateTask(task.id, { title: 'Changed' });
+                await vi.advanceTimersByTimeAsync(2500);
+                expect(handset.state.calendarWrites).toEqual([['createEvent', 'g-primary', 'Due task'], ['createEvent', 'g-primary', 'Changed']]);
+            } finally { lifecycle.stop(); vi.useRealTimers(); }
         });
 
         it.each(['ios', 'android'] as const)('does not bind lifecycle without iOS admission capability: %s', async (os) => {
@@ -920,7 +925,7 @@ describe('native host contract: Settings › Calendar', () => {
             const done = await replay(handset, requestId, change);
             expect(value(done.answer).changed).toBe(false);
             expect(done.after).toEqual(done.before);
-            // Push on again makes a new Mindwtr calendar; the old request must not delete it.
+
             const restarted = await restart(handset, true);
             expect(value(await edit(restarted, value(restarted.getCalendarSettings()).push.toggle)).changed).toBe(true);
             expect(handset.state.calendars.map((calendar) => calendar.id)).toEqual(['g-primary', 'created-1']);
@@ -1146,6 +1151,22 @@ describe('native host contract: Settings › Calendar', () => {
             }
         });
 
+        it('the device calendars switch: the write never shows the system prompt (nor its replay); it asks the host to run Grant access', async () => {
+            const { handset, contract, view } = await boot({ calendars: ['primary'], permission: 'undetermined' });
+            const requestId = generateUUID();
+            const change = view().device.toggle;
+            expect(value(await edit(contract, change, requestId))).toMatchObject({ changed: true, open: 'device', requestAccess: true });
+            expect(handset.state.prompts).toBe(0);
+            expect(JSON.parse(handset.state.storage.get(KEYS.system)!).enabled).toBe(true);
+            const { answer, before, after } = await replay(handset, requestId, change);
+            expect(value(answer).changed).toBe(false);
+            expect(after).toEqual(before);
+            expect(handset.state.prompts).toBe(0);
+            value(await contract.grantDeviceCalendarAccess());
+            expect(handset.state.prompts).toBe(1);
+            expect(value(contract.getCalendarSettings()).device.calendars.map((calendar) => calendar.id)).toEqual([fixture.calendars.primary.id]);
+        });
+
         it('the device calendar choices: a replay after a later change keeps it', async () => {
             const { handset, contract, view } = await boot({ calendars: ['primary', 'phone'], storage: { [KEYS.system]: JSON.stringify({ enabled: true }) } });
             const requestId = generateUUID();
@@ -1221,7 +1242,7 @@ describe('native host contract: Settings › Calendar', () => {
             expect(value(replayed.answer).changed).toBe(false);
             expect(replayed.after).toEqual(replayed.before);
             expect(useTaskStore.getState().settings.externalCalendars?.map((feed) => feed.id)).toEqual(['feed-b']);
-            // A view from before a later edit (here: synced from another device) removes nothing.
+
             const staleRemove = value(contract.getCalendarSettings()).feeds.items[0].remove.edit;
             await useTaskStore.getState().updateSettings({ externalCalendars: [{ ...fixture.settings.synced.externalCalendars![1], name: 'Renamed' }] });
             expect(await edit(contract, staleRemove)).toMatchObject({ ok: false, error: { code: 'STALE_REVISION' } });
@@ -1250,7 +1271,7 @@ describe('native host contract: Settings › Calendar', () => {
     describe('durable receipts', () => {
         afterEach(() => { resetNativeRequestReceipts(); });
 
-        /** The native host over a real SQLite file with its request receipts, booted again by `restart` (process death). */
+
         async function receiptHost(settings: AppSettings, handset: ReturnType<typeof phone>) {
             const dir = mkdtempSync(join(tmpdir(), 'mindwtr-calendar-receipts-'));
             const { client, close } = openScratchSqlite(join(dir, 'mindwtr.db'));
@@ -1296,14 +1317,14 @@ describe('native host contract: Settings › Calendar', () => {
                     expect(answer.changed).toBe(true);
                     sent.push({ requestId, edit, answer });
                 };
-                // The switch carries the value it showed (compare-and-set where no receipt answers).
+
                 expect(view().push.toggle).toEqual({ type: 'push', before: true, enabled: false });
                 await send(view().push.target!.colors!.options.find((option) => option.color === '#059669')!.edit);
                 await send(view().push.target!.options.find((option) => option.key === 'g-primary')!.edit);
                 await send(view().device.calendars[0].edit!);
                 await send(view().feeds.items[1].toggle);
                 await send(view().push.target!.delete.edit);
-                // Push off by the delete, then on and off again: a replay of an older toggle must not undo the later one.
+
                 await send(view().push.toggle);
                 await send(view().push.toggle);
                 const rows = await env.client.all<{ request_id: string }>('SELECT request_id FROM native_request_receipts');
@@ -1358,7 +1379,7 @@ describe('native host contract: Settings › Calendar', () => {
                 const receipts = await client.all<{ request_id: string; method: string; reply: string }>('SELECT request_id, method, reply FROM native_request_receipts');
                 expect(receipts.map((row) => row.request_id)).toEqual([toggled]);
                 expect(JSON.stringify(receipts)).not.toContain('s3cret');
-                // A URL is no setCalendarSetting edit.
+
                 for (const edit of [
                     { type: 'addFeed', name: 'Private', url, revision: view.feeds.revision },
                     { type: 'addFile', name: '', fileName: 'x.ics', uri: 'content://x', revision: view.feeds.revision },
@@ -1415,21 +1436,19 @@ describe('native host contract: Settings › Calendar', () => {
     });
 
     describe('without calendar push bound (until the push pass)', () => {
-        it('shows the stored push options and refuses the push commands', async () => {
+        it('hides the push card and refuses the push commands', async () => {
             freezeClock();
             await seed({});
             const handset = phone({ calendars: ['primary', 'managed'], storage: { [KEYS.pushEnabled]: '1', [KEYS.pushCalendar]: 'g-mindwtr' } });
             const { syncEntries: _entries, ...readOnly } = handset.host;
             const contract = await openHost({ ...readOnly, calendars: { ...handset.host.calendars, createCalendar: undefined } });
+
             const view = value(await contract.openCalendarSettings());
-            expect(view.push.enabled).toBe(true);
-            expect(view.push.target?.options.map((option) => option.name)).toEqual(['Mindwtr calendar', 'alex@gmail.com']);
-            for (const change of [view.push.target!.colors!.options[1].edit, view.push.target!.delete.edit]) {
-                expect(await edit(contract, change)).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
-            }
-            // Off needs no calendar writes.
-            expect(value(await edit(contract, view.push.toggle)).changed).toBe(true);
-            expect(await edit(contract, value(contract.getCalendarSettings()).push.toggle)).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
+            expect(view.push).toBeNull();
+
+            expect(value(await edit(contract, { type: 'push', before: true, enabled: false })).changed).toBe(true);
+            expect(await edit(contract, { type: 'push', before: false, enabled: true })).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
+            expect(value(contract.getCalendarSettings()).push).toBeNull();
             expect(handset.state.calendarWrites).toEqual([]);
         });
     });
@@ -1630,7 +1649,7 @@ describe('native host contract: Settings › Calendar', () => {
             if (stop === 'provider failure') gate.reject(new Error('Calendar provider unavailable'));
             else await vi.advanceTimersByTimeAsync(15_000);
             expect(value(await pending)).toEqual({ toasts: [warning()] });
-            expect(cells).toHaveBeenCalledTimes(1); // A failure warning does not claim a fresh source or start another read.
+            expect(cells).toHaveBeenCalledTimes(1);
             expect(info).not.toHaveBeenCalled(); expect(error).toHaveBeenCalledTimes(1);
             if (stop === 'deadline') {
                 expect(error.mock.calls[0][0]).toEqual(new Error('External calendar request timed out'));
@@ -1752,7 +1771,7 @@ describe('native host contract: Settings › Calendar', () => {
 
         it('answers the merged calendars, joins a load of the same range, and lets a newer range replace a running one', async () => {
             await seed({});
-            // The fetch reads the device copy of the subscriptions (sync and the settings screen keep it).
+
             const handset = phone({ calendars: ['primary'], storage: {
                 [KEYS.feeds]: JSON.stringify(fixture.settings.synced.externalCalendars),
                 [KEYS.system]: JSON.stringify({ enabled: true }),
@@ -1773,9 +1792,9 @@ describe('native host contract: Settings › Calendar', () => {
             const contract = await openHost(handset.host);
             const first = contract.loadExternalCalendarFeed({ slot: 'calendar', ...range });
             const joined = contract.loadExternalCalendarFeed({ slot: 'calendar', ...range });
-            // Source admission is call-owned; identical sources join one inner IO.
+
             await settle();
-            expect(fetches).toBe(1); // One enabled subscription fetched once for both callers.
+            expect(fetches).toBe(1);
             const replacing = contract.loadExternalCalendarFeed({ slot: 'calendar', start: '2026-10-01T00:00:00.000Z', end: '2026-11-01T00:00:00.000Z' });
             expect(await first).toMatchObject({ ok: false, error: { code: 'STALE_REVISION' } });
             expect(await joined).toEqual(await first);
@@ -1841,8 +1860,8 @@ describe('native host contract: Settings › Calendar', () => {
             await settle();
             expect(fetches).toBe(1);
             joinedOwner.abort(new Error('The Calendar page closed'));
-            // Native cancellation also rejects outstanding fetches independently
-            // of their signal. This must not become a legitimate partial result.
+
+
             rejectTransport?.(Object.assign(new Error('The host operation timed out'), { name: 'AbortError' }));
             const cancelled = await pending;
             expect(await joined).toEqual(cancelled);
@@ -1912,6 +1931,37 @@ describe('native host contract: Settings › Calendar', () => {
             oldOwner.abort(); joinedOwner.abort(); nextOwner.abort();
             expect(value(await contract.loadExternalCalendarFeed(next))).toEqual(replaced);
             expect(fetches).toBe(2);
+        });
+
+        it('a change to the subscriptions replaces a running load of the same range: a removed subscription\'s events never show', async () => {
+            const [kept, removed] = fixture.settings.synced.externalCalendars!;
+            await seed({ externalCalendars: [kept, removed] });
+            const handset = phone({ calendars: [] });
+            const fetched: string[] = [];
+            let hold = true;
+            const fetchFeed = handset.host.fetch;
+            handset.host.fetch = (async (...args: Parameters<typeof fetch>) => {
+                fetched.push(String(args[0]));
+                if (hold) {
+                    await new Promise<void>((_resolve, reject) => {
+                        args[1]?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+                    });
+                }
+                return fetchFeed(...args);
+            }) as typeof fetch;
+            const contract = await openHost(handset.host);
+            const first = contract.loadExternalCalendarFeed({ slot: 'calendar', ...range });
+            await settle();
+            await useTaskStore.getState().updateSettings({ externalCalendars: [kept] });
+            hold = false;
+            const after = contract.loadExternalCalendarFeed({ slot: 'calendar', ...range });
+            expect(after).not.toBe(first);
+            expect(await first).toMatchObject({ ok: false, error: { code: 'STALE_REVISION' } });
+            const shown = value(await after);
+            if (shown.status !== 'ready') throw new Error('not ready');
+            expect(shown.calendars.map((calendar) => calendar.id)).toEqual([kept.id]);
+
+            expect(fetched.length).toBeGreaterThan(0);
         });
 
         it('answers a refresh within a second from the last load, and loads again after it', async () => {

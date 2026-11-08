@@ -11,6 +11,55 @@ const safeView = (view: string) => view.startsWith('savedSearch:') ? 'saved-sear
 const rendererRun = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 let navigationSequence = 0;
 let committedView = 'unknown';
+let activitySequence = 0;
+
+type RendererActivity = 'board-sequential' | 'timeline-measurement' | 'timeline-centering';
+type RendererActivityStage = 'scheduled' | 'fired' | 'committed' | 'attached' | 'initial-start' | 'initial-end' | 'callback-start' | 'callback-end' | 'centering-start' | 'centering-end' | 'cleanup';
+type RendererActivityDetails = {
+    attachMode?: 'observer' | 'window-resize';
+    outcome?: 'cancelled' | 'already-fired';
+    callbackCount?: number;
+    widthChangeCount?: number;
+    width?: number;
+    measured?: boolean;
+    todayVisible?: boolean;
+    zoom?: 'day' | 'week' | 'month';
+    filteredCount?: number;
+    visibleCount?: number;
+    sequentialProjectCount?: number;
+    sequentialResultCount?: number;
+};
+
+
+export function beginRendererActivity(activity: RendererActivity) {
+    if (!isLoggingEnabled()) return null;
+    return { activity, sequence: ++activitySequence, navigationSequence, startedAt: performance.now(), entries: 0, closed: false };
+}
+
+export function recordRendererActivity(trace: ReturnType<typeof beginRendererActivity>, stage: RendererActivityStage, details: RendererActivityDetails = {}) {
+    if (!trace || trace.closed) return;
+    if (stage === 'cleanup') trace.closed = true;
+    if (!isLoggingEnabled()) return;
+
+    if (stage !== 'cleanup' && trace.entries >= 11) return;
+    trace.entries++;
+    void logInfo('Renderer view work phase', {
+        scope: 'renderer-navigation',
+        extra: {
+            releaseCheck: 'v1.3.6/renderer-view-work', rendererRun,
+            navigationSequence: trace.navigationSequence, currentNavigationSequence: navigationSequence,
+            activitySequence: trace.sequence, activity: trace.activity, stage,
+            elapsedMs: Math.round(performance.now() - trace.startedAt),
+            attachMode: details.attachMode, outcome: details.outcome,
+            callbackCount: details.callbackCount, widthChangeCount: details.widthChangeCount,
+            width: details.width, measured: details.measured, todayVisible: details.todayVisible, zoom: details.zoom,
+            filteredCountBucket: details.filteredCount === undefined ? undefined : bucket(details.filteredCount),
+            visibleCountBucket: details.visibleCount === undefined ? undefined : bucket(details.visibleCount),
+            sequentialProjectCountBucket: details.sequentialProjectCount === undefined ? undefined : bucket(details.sequentialProjectCount),
+            sequentialResultCountBucket: details.sequentialResultCount === undefined ? undefined : bucket(details.sequentialResultCount),
+        },
+    });
+}
 
 export type RendererNavigationTrace = {
     sequence: number;
@@ -69,7 +118,7 @@ function write(trace: RendererNavigationTrace, stage: string, actualView?: strin
     });
 }
 
-/** Called before the transition; logging never delays navigation or awaits disk. */
+
 export function beginRendererNavigation(view: string): RendererNavigationTrace {
     const trace = {
         sequence: ++navigationSequence, previousView: committedView, nextView: safeView(view),
@@ -79,7 +128,7 @@ export function beginRendererNavigation(view: string): RendererNavigationTrace {
     return trace;
 }
 
-/** Only called by content committed inside Suspense, never by its fallback. */
+
 export function commitRendererNavigation(view: string, trace: RendererNavigationTrace | null): () => void {
     committedView = safeView(view) === 'other' ? 'inbox' : safeView(view);
     if (!trace?.enabled || !isLoggingEnabled()) return () => {};
@@ -93,7 +142,7 @@ export function commitRendererNavigation(view: string, trace: RendererNavigation
     const frame = requestAnimationFrame(() => {
         if (cancelled || trace.sequence !== navigationSequence || trace.frameLogged) return;
         trace.frameLogged = true;
-        // A callback is evidence of renderer progress, not proof of a successful paint.
+
         write(trace, 'animation-frame', actualView, state);
     });
     return () => { cancelled = true; cancelAnimationFrame(frame); };

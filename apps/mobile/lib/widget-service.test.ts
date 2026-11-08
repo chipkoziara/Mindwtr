@@ -55,9 +55,7 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
     },
 }));
 
-// Only useTaskStore.getState is replaced -- widget-data.ts pulls real logic
-// (sortTasksBy, isTaskActionable, translations, ...) from the rest of
-// '@mindwtr/core' and must keep using it.
+
 vi.mock('@mindwtr/core', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@mindwtr/core')>();
     return {
@@ -66,8 +64,7 @@ vi.mock('@mindwtr/core', async (importOriginal) => {
     };
 });
 
-// Real projection, wrapped so gate 0 (the store-level pre-check) can
-// be asserted by call count instead of only by its native-render side effect.
+
 vi.mock('./widget-data', async (importOriginal) => {
     const actual = await importOriginal<typeof import('./widget-data')>();
     return {
@@ -95,8 +92,7 @@ vi.mock('react-native-widgetkit', () => ({
     setItem: mockIosWidgetSetItem,
 }));
 
-// Controllable per-test so gate 0's colour-scheme key (correction #2) can be
-// flipped without a real Appearance/NativeModules mock.
+
 vi.mock('./system-color-scheme', () => ({
     getSystemColorSchemeForWidget: mockGetSystemColorSchemeForWidget,
 }));
@@ -143,14 +139,41 @@ describe('widget-service', () => {
         mockLogInfo.mockReset();
         mockLogWarn.mockReset();
         mockUseTaskStoreGetState.mockReset();
-        // app-log's isLoggingEnabled reads useTaskStore.getState().settings on
-        // every log call; give it a safe default even in tests that never call
-        // updateMobileWidgetFromStore (which overrides this per-test).
+
+
         mockUseTaskStoreGetState.mockReturnValue({ settings: {} });
         vi.mocked(buildWidgetPayload).mockClear();
         vi.mocked(createWidgetPayloadProjection).mockClear();
         resetFocusWidgetFilter();
         resetMobileWidgetRenderCache();
+    });
+
+    it('publishes placed widgets\' context and tag lists, offers every label, and logs content-free proving diagnostics', async () => {
+        const source = buildData(3);
+        source.tasks[0].contexts = ['@家/desk +?'];
+        source.tasks[1].tags = ['#urgent'];
+        source.tasks[2].contexts = ['@empty'];
+        source.tasks[2].status = 'done';
+        mockAndroidWidgetGetWidgetListSelections.mockReturnValue(['context:@家/desk +?', 'tag:#urgent', 'context:@empty']);
+        expect(await updateMobileWidgetFromData(source)).toBe(true);
+        const payload = JSON.parse(mockAndroidWidgetSetPayload.mock.calls[0][0]);
+        expect(payload.lists['context:@家/desk +?'].items.map((row: { id: string }) => row.id)).toEqual(['1']);
+        expect(payload.lists['tag:#urgent'].items.map((row: { id: string }) => row.id)).toEqual(['2']);
+        expect(payload.lists['context:@empty'].items).toEqual([]);
+
+
+        mockAndroidWidgetGetWidgetListSelections.mockReturnValue([]);
+        mockAndroidWidgetSetPayload.mockClear();
+        resetMobileWidgetRenderCache();
+        expect(await updateMobileWidgetFromData(source)).toBe(true);
+        const unplaced = JSON.parse(mockAndroidWidgetSetPayload.mock.calls[0][0]);
+        expect(Object.keys(unplaced.lists).filter((id) => /^(context|tag):/.test(id))).toEqual([]);
+        expect([...unplaced.contexts, ...unplaced.tags].map((option: { id: string }) => option.id).sort())
+            .toEqual(['context:@empty', 'context:@家', 'context:@家/desk +?', 'tag:#urgent']);
+        expect(mockLogInfo).toHaveBeenCalledWith('Android widget context and tag snapshots published', {
+            scope: 'widget', force: true,
+            extra: { releaseCheck: 'v1.3.7/widget-context-selection', count: 4, lists: 3 },
+        });
     });
 
     it('never calls the native module when it is not linked (Expo Go)', async () => {
@@ -160,6 +183,28 @@ describe('widget-service', () => {
 
         expect(mockAndroidWidgetSetPayload).not.toHaveBeenCalled();
         expect(mockAndroidWidgetUpdateWidgets).not.toHaveBeenCalled();
+    });
+
+    it.each(['android', 'ios'])('publishes a preview-only Upcoming snapshot and receipt on %s', async (platform) => {
+        mockPlatform.OS = platform;
+        const data = buildData(1);
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        data.tasks[0] = { ...data.tasks[0], isFocusedToday: false, startTime: tomorrow.toISOString() };
+
+        expect(await updateMobileWidgetFromData(data)).toBe(true);
+        const serialized = platform === 'android'
+            ? mockAndroidWidgetSetPayload.mock.calls.at(-1)![0]
+            : mockIosWidgetSetItem.mock.calls[0][1];
+        const upcoming = JSON.parse(serialized).lists.upcoming;
+        expect(upcoming.items).toHaveLength(1);
+        expect(upcoming.items[0].upcomingDate).toBe(tomorrow.toISOString());
+        expect(upcoming.items[0].completionToken).toBeUndefined();
+        expect(mockLogInfo).toHaveBeenCalledWith('Widget lists published from one snapshot', {
+            scope: 'widget',
+            force: true,
+            extra: { releaseCheck: 'v1.3.8/widget-snapshot-rollover', platform, count: 1 },
+        });
     });
 
     it('republishes native audio availability when only the speech setting changes (#1184)', async () => {
@@ -246,7 +291,10 @@ describe('widget-service', () => {
         expect(payload.palette.background).toMatch(/^#/);
         expect(payload.quickCapture).toMatchObject({
             title: 'Quick capture',
-            placeholder: 'Add task to inbox...',
+            placeholder: 'Add a task… use @context +Project #tag',
+            statusLabel: 'Status',
+            statusLabels: { inbox: 'Inbox', next: 'Next Actions', waiting: 'Waiting For', someday: 'Someday/Maybe' },
+            queued: 'Saved. Your task will be added when Mindwtr opens.',
             save: 'Save',
             cancel: 'Cancel',
             added: 'Task added to Mindwtr.',
@@ -363,16 +411,16 @@ describe('widget-service', () => {
     it('carries every GTD list before placement for Compact fallback and offline list switching (#1211)', async () => {
         const data = buildData(2);
         data.tasks.push({ id: 'w1', title: 'Waiting on Sam', status: 'waiting', tags: [], contexts: [], createdAt: data.tasks[0].createdAt, updatedAt: data.tasks[0].updatedAt });
-        // Compact also needs Next Actions. A newly placed Tasks widget must be
-        // able to switch to Inbox before the app next publishes.
+
+
         expect(await updateMobileWidgetFromData(data)).toBe(true);
-        expect(Object.keys(JSON.parse(mockAndroidWidgetSetPayload.mock.calls[0][0] as string).lists)).toEqual(['focus', 'inbox', 'next', 'waiting', 'someday']);
+        expect(Object.keys(JSON.parse(mockAndroidWidgetSetPayload.mock.calls[0][0] as string).lists)).toEqual(['focus', 'inbox', 'next', 'waiting', 'someday', 'upcoming']);
 
         mockAndroidWidgetGetWidgetListSelections.mockReturnValue(['waiting', 'project:missing']);
         expect(await updateMobileWidgetFromData(data)).toBe(true);
         expect(mockAndroidWidgetSetPayload).toHaveBeenCalledTimes(1);
         const payload = JSON.parse(mockAndroidWidgetSetPayload.mock.calls[0][0] as string);
-        expect(Object.keys(payload.lists)).toEqual(['focus', 'inbox', 'next', 'waiting', 'someday']);
+        expect(Object.keys(payload.lists)).toEqual(['focus', 'inbox', 'next', 'waiting', 'someday', 'upcoming']);
         expect(payload.lists.waiting).toMatchObject({ title: 'Waiting For', items: [{ title: 'Waiting on Sam' }] });
         expect(payload.listTitles).toMatchObject({ inbox: 'Inbox', next: 'Next Actions', someday: 'Someday/Maybe' });
         expect(payload.headerTitle).toBe('Today');
@@ -395,7 +443,7 @@ describe('widget-service', () => {
             scope: 'widget',
             extra: {
                 releaseCheck: 'v1.3.1/android-widget-lists',
-                count: '5',
+                count: '6',
                 focusItems: '0',
                 nextItems: '25',
                 inboxItems: '1',
@@ -434,7 +482,13 @@ describe('widget-service', () => {
         expect(payloadByKey.get('mindwtr-ios-widget-payload-extra-large')?.items).toHaveLength(30);
         expect(payloadByKey.get('mindwtr-ios-widget-payload')?.items).toHaveLength(20);
         expect(payloadByKey.get('mindwtr-ios-widget-payload')?.headerTitle).toBe('Today');
-        expect(Object.keys(payloadByKey.get('mindwtr-ios-widget-payload')?.lists)).toEqual(['focus', 'inbox', 'next', 'waiting', 'someday']);
+
+        expect(Object.keys(payloadByKey.get('mindwtr-ios-widget-payload')?.lists)).toEqual(['focus', 'focus:available', 'inbox', 'next', 'waiting', 'someday', 'upcoming']);
+        expect(mockLogInfo).toHaveBeenCalledWith('Focus widget available actions published', {
+            scope: 'widget',
+            force: true,
+            extra: expect.objectContaining({ releaseCheck: 'v1.3.8/widget-focus-available', platform: 'ios' }),
+        });
         expect(payloadByKey.get('mindwtr-ios-widget-payload-small')?.lists.focus.items).toHaveLength(11);
         expect(mockIosWidgetReloadTimelines).toHaveBeenCalledWith('MindwtrTasksWidget');
         expect(mockIosWidgetReloadTimelines).toHaveBeenCalledWith('MindwtrCompactWidget');
@@ -454,7 +508,7 @@ describe('widget-service', () => {
         });
         expect(JSON.stringify(mockLogInfo.mock.calls)).not.toContain('Focused 1');
 
-        const listIds = ['focus', 'inbox', 'next', 'waiting', 'someday'];
+        const listIds = ['focus', 'inbox', 'next', 'waiting', 'someday', 'upcoming', 'focus:available'];
         const expectedFamilies = new Map([
             ['mindwtr-ios-widget-payload', 20],
             ['mindwtr-ios-widget-payload-small', 11],
@@ -598,8 +652,7 @@ describe('widget-service', () => {
         mockIosWidgetSetItem.mockClear();
         mockIosWidgetReloadTimelines.mockClear();
 
-        // A deferred, unstarred Next task is outside the curated widget lists,
-        // but still rides the independently fingerprinted Shortcuts snapshot.
+
         const withDeferredTask: AppData = {
             ...data,
             tasks: [
@@ -618,9 +671,7 @@ describe('widget-service', () => {
         };
         await updateMobileWidgetFromData(withDeferredTask);
 
-        // Only the snapshot key was written -- the widget's own fingerprint
-        // didn't change, so its five setItem calls and reloadTimelines must be
-        // skipped (restoring the #766 skip the shared fingerprint broke).
+
         expect(mockIosWidgetSetItem).toHaveBeenCalledTimes(1);
         expect(mockIosWidgetReloadTimelines).not.toHaveBeenCalled();
         const [key, value] = mockIosWidgetSetItem.mock.calls[0] as [string, string];
@@ -671,14 +722,7 @@ describe('widget-service', () => {
         mockPlatform.OS = 'ios';
         mockIosWidgetSetItem.mockResolvedValue(undefined);
 
-        // 30 starred/next tasks: the widget only shows its top slice, so
-        // pushing well past that slice (without changing snapshot content --
-        // same tasks, same lists) isn't representative. Instead, change a
-        // widget-visible task's title, which alters the widget fingerprint
-        // (it's inside the widget's own payload) and also alters the
-        // snapshot's "next" list content -- so assert the inverse case: a
-        // theme change affects only the widget payload (palette), never the
-        // snapshot (it carries no palette).
+
         const data = buildData(2);
         await updateMobileWidgetFromData(data);
         mockIosWidgetSetItem.mockClear();
@@ -713,15 +757,12 @@ describe('widget-service', () => {
         expect(vi.mocked(createWidgetPayloadProjection)).toHaveBeenCalledTimes(1);
         expect(mockAndroidWidgetSetPayload).toHaveBeenCalledTimes(1);
 
-        // Repeated call, nothing changed: gate 0 must skip the payload build
-        // entirely, before the JSON fingerprint gate even runs.
+
         expect(await updateMobileWidgetFromStore()).toBe(true);
         expect(vi.mocked(createWidgetPayloadProjection)).toHaveBeenCalledTimes(1);
         expect(mockAndroidWidgetSetPayload).toHaveBeenCalledTimes(1);
 
-        // lastDataChangeAt moves and the content actually differs: gate 0 lets
-        // the rebuild through, and gate 1 (the JSON fingerprint) sees new
-        // content and renders again.
+
         const changedTasks = data.tasks.map((task, index) => (
             index === 0 ? { ...task, title: 'Renamed' } : task
         ));
@@ -739,8 +780,7 @@ describe('widget-service', () => {
     it('skips the native render when a persisted fingerprint from a prior (cold) module instance matches (#766 follow-up)', async () => {
         const data = buildData(3);
 
-        // First render, from a "cold" instance: persists its fingerprint to
-        // AsyncStorage as updateMobileWidgetFromData does after every render.
+
         await updateMobileWidgetFromData(data);
         expect(mockAndroidWidgetSetPayload).toHaveBeenCalledTimes(1);
         const [, persistedFingerprint] = mockAsyncStorageSetItem.mock.calls.find(
@@ -748,8 +788,7 @@ describe('widget-service', () => {
         ) as [string, string];
         expect(typeof persistedFingerprint).toBe('string');
 
-        // Simulate a fresh headless instance: module-scope render cache reset,
-        // and AsyncStorage now serving the fingerprint persisted above.
+
         resetMobileWidgetRenderCache();
         mockAndroidWidgetSetPayload.mockClear();
         mockAsyncStorageGetItem.mockImplementation(async (key: string) => (
@@ -783,9 +822,7 @@ describe('widget-service', () => {
             ([message]) => message === 'Widget Focus pools published to native host',
         )).toBe(false);
 
-        // Retry with unchanged inputs (the immediate + 800ms pair callers
-        // use): gate 0 must not have cached the failed render, so the
-        // payload is built and the native call attempted again.
+
         mockAndroidWidgetSetPayload.mockReset();
         expect(await updateMobileWidgetFromStore()).toBe(true);
         expect(vi.mocked(createWidgetPayloadProjection)).toHaveBeenCalledTimes(2);
@@ -810,11 +847,29 @@ describe('widget-service', () => {
         expect(await updateMobileWidgetFromStore()).toBe(true);
         expect(vi.mocked(createWidgetPayloadProjection)).toHaveBeenCalledTimes(1);
 
-        // Same store state, but the system flips to dark mode: gate 0's key
-        // must include the colour scheme so this is not treated as unchanged.
+
         mockGetSystemColorSchemeForWidget.mockReturnValue('dark');
         expect(await updateMobileWidgetFromStore()).toBe(true);
         expect(vi.mocked(createWidgetPayloadProjection)).toHaveBeenCalledTimes(2);
+    });
+
+    it('rebuilds the widget payload via updateMobileWidgetFromStore when only a placed widget\'s list choice changes', async () => {
+        const data = buildData(3);
+        data.tasks[0].contexts = ['@desk'];
+        mockUseTaskStoreGetState.mockReturnValue({
+            _allTasks: data.tasks, _allProjects: [], _allSections: [], _allAreas: [],
+            tasks: data.tasks, projects: [], sections: [], areas: [], settings: {}, lastDataChangeAt: 1,
+        });
+
+        expect(await updateMobileWidgetFromStore()).toBe(true);
+        expect(vi.mocked(createWidgetPayloadProjection)).toHaveBeenCalledTimes(1);
+
+
+        mockAndroidWidgetGetWidgetListSelections.mockReturnValue(['context:@desk']);
+        expect(await updateMobileWidgetFromStore()).toBe(true);
+        expect(vi.mocked(createWidgetPayloadProjection)).toHaveBeenCalledTimes(2);
+        const published = JSON.parse(mockAndroidWidgetSetPayload.mock.calls.at(-1)![0] as string);
+        expect(published.lists['context:@desk'].items.map((item: { id: string }) => item.id)).toEqual(['1']);
     });
 
     it('renders again when a persisted fingerprint carries a different app version (correction #4)', async () => {
@@ -827,10 +882,7 @@ describe('widget-service', () => {
         ) as [string, string];
         expect(typeof persistedFingerprint).toBe('string');
 
-        // The fingerprint's leading `<version>:` segment is the app version
-        // this module was built with (mocked to '1.0.0' above); replace it to
-        // simulate a value persisted by an older build, keeping the rest (an
-        // otherwise byte-identical payload) the same.
+
         const staleVersionFingerprint = persistedFingerprint.replace('1.0.0:', 'stale-app-version:');
         expect(staleVersionFingerprint).not.toBe(persistedFingerprint);
 

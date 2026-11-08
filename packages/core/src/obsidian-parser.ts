@@ -151,7 +151,7 @@ export const extractObsidianTags = (text: string): string[] => {
     return uniqueObsidianStrings(tags);
 };
 
-/** One inline tag, with the same character set as the existing tag extractor. */
+
 export const normalizeObsidianRequiredInlineTag = (value: string | null | undefined): string => {
     const tag = normalizeObsidianTagValue(value ?? '');
     if (!tag && !(value ?? '').trim()) return '';
@@ -337,15 +337,16 @@ export const parseObsidianDataviewData = (text: string): ObsidianDataviewData | 
         const key = normalizeDataviewKey(field.key);
         if (!key) continue;
         if (key === 'project' || key === 'projects') {
-            projects.push(...splitDataviewListValue(field.value));
+
+            for (const item of splitDataviewListValue(field.value)) projects.push(item);
             continue;
         }
         if (key === 'context' || key === 'contexts') {
-            contexts.push(...splitDataviewListValue(field.value).map((item) => normalizeDataviewToken(item, '@')));
+            for (const item of splitDataviewListValue(field.value)) contexts.push(normalizeDataviewToken(item, '@'));
             continue;
         }
         if (key === 'tag' || key === 'tags') {
-            tags.push(...splitDataviewListValue(field.value).map((item) => normalizeDataviewToken(item, '#')));
+            for (const item of splitDataviewListValue(field.value)) tags.push(normalizeDataviewToken(item, '#'));
             continue;
         }
         if ((key === 'due' || key === 'deadline') && !dueDate) {

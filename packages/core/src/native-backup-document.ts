@@ -1,7 +1,9 @@
+import { findLiveAttachmentResourceReferences, holdRestoreUndoAttachments, markMissingLocalAttachmentFiles } from './attachment-cleanup';
+import type { LocalAttachmentPresence } from './attachment-transfer';
 import { MAX_BACKUP_SOURCE_BYTES, serializeBackupData } from './backup-transfer';
 import { base64ToBytes } from './base64-bytes';
 import { runSerializedSyncDocumentWriteOperation } from './data-transfer-transaction';
-import { createImportDiagnostics, formatImportDiagnostic, type ImportDiagnosticTranslator } from './import-diagnostics';
+import { createImportDiagnostic, createImportDiagnostics, formatImportDiagnostic, importDiagnosticLocationParams, type ImportDiagnostic, type ImportDiagnosticCode, type ImportDiagnosticTranslator } from './import-diagnostics';
 import { DEFAULT_IMPORT_SOURCE_LIMITS } from './import-source-reader';
 import { applyImportSource, parseImportSource, summarizeBackupMerge } from './import-runner';
 import { taskEditValuesEqual } from './json-value-equality';
@@ -10,11 +12,19 @@ import type { TodoistImportExecutionResult } from './todoist-import';
 import type { TickTickImportExecutionResult } from './ticktick-import';
 import type { DgtImportExecutionResult } from './dgt-import';
 import type { OmniFocusImportExecutionResult } from './omnifocus-import';
-import { MAX_NATIVE_DOCUMENT_RECEIPT_REPLY_BYTES, type NativeReceiptSqliteAdapter } from './native-request-receipts';
+import { MAX_NATIVE_DOCUMENT_RECEIPT_REPLY_BYTES, UNDO_LIMIT_EXCEEDED, type NativeReceiptSqliteAdapter } from './native-request-receipts';
+import { DATA_TRANSFER_TOAST_MS } from './data-settings-model';
+import {
+    buildAreaImportResultMessage, buildBackupPreviewSummary, buildDgtPreviewSummary, buildMergeResultMessage, buildMindwtrCsvPreviewSummary,
+    buildMindwtrCsvResultMessage, buildOmniFocusPreviewSummary, buildOmniFocusResultMessage, buildTickTickPreviewSummary,
+    buildTodoistPreviewSummary, buildTodoistResultMessage,
+} from './data-transfer-messages';
+import { formatRecoverySnapshotLabel } from './recovery-snapshot-names';
 import { flushPendingSave, useTaskStore } from './store';
 import { markNextLoadAsDocumentReplacement } from './store-settings';
+import { stripSensitiveSettings } from './store-helpers';
+import { logInfo } from './logger';
 import { validateMergedSyncData } from './sync-normalization';
-import { cloneAppData } from './sync-runtime-utils';
 import type { AppData } from './types';
 
 export const MAX_NATIVE_BACKUP_PLAN_BYTES = 512 * 1024 * 1024;
@@ -28,7 +38,8 @@ export type NativeBackupTodoistImportResult = Omit<TodoistImportExecutionResult,
 export type NativeBackupTickTickImportResult = Omit<TickTickImportExecutionResult, 'data'>;
 export type NativeBackupDgtImportResult = Omit<DgtImportExecutionResult, 'data'>;
 export type NativeBackupOmniFocusImportResult = Omit<OmniFocusImportExecutionResult, 'data'>;
-export type NativeBackupDocumentReply = NativeBackupJsonDocumentReply | {
+
+export type NativeBackupDocumentReply = (NativeBackupJsonDocumentReply | {
     version: 1; operation: 'csv'; snapshotName: string; result: NativeBackupCsvImportResult;
 } | {
     version: 1; operation: 'todoist'; snapshotName: string; result: NativeBackupTodoistImportResult;
@@ -38,18 +49,39 @@ export type NativeBackupDocumentReply = NativeBackupJsonDocumentReply | {
     version: 1; operation: 'dgt'; snapshotName: string; result: NativeBackupDgtImportResult;
 } | {
     version: 1; operation: 'omnifocus'; snapshotName: string; result: NativeBackupOmniFocusImportResult;
-};
+}) & { undo?: false };
 type Operation = 'merge' | 'restore' | 'replace' | 'csv' | 'todoist' | 'ticktick' | 'dgt' | 'omnifocus';
 export type NativeBackupDocumentPrepareInput = {
     requestId: string; mode: Operation; snapshotName: string;
     text: string; metadata: NativeBackupDocumentMetadata;
+
+
+    admission?: { sourceBytes: number; maxTransferBytes: number };
 };
 type Plan = {
     version: 1; requestId: string; mode: Operation; preparedAt: string;
     expectedCurrent: AppData; data: AppData; reply: NativeBackupDocumentReply;
+
+
+    maxLibraryBytes?: number;
+
+    undoLibraryBytes?: number;
 };
 class BackupInputError extends Error {}
 function invalid(message = 'Invalid backup document input'): never { throw new BackupInputError(`INVALID_INPUT: ${message}`); }
+function tooLarge(message: string): never { throw new BackupInputError(`TOO_LARGE: ${message}`); }
+const UNDO_TOO_LARGE = 'TOO_LARGE: The imported library would be too large to undo';
+
+
+const SQLITE_BYTES_PER_JSON_BYTE = 1.8;
+const logUndoUnavailable = (operation: string, outcome: 'estimate' | 'after-save'): void => {
+    try {
+        logInfo(outcome === 'estimate' ? 'Native data transfer may run without Undo: the library may be too large to undo'
+            : 'Native data transfer ran without Undo: the library is too large to undo', { scope: 'transfer', category: 'storage',
+            context: { releaseCheck: 'v1.3.7/large-library-no-undo', operation, outcome } });
+    } catch {                                             }
+};
+const RESTORE_TOO_LARGE = 'TOO_LARGE: The restored library would exceed the transfer limit';
 function saveFailed(): never { throw new Error('SAVE_FAILED: Backup document outcome could not be verified'); }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const exact = (value: unknown, fields: string[]): value is Record<string, unknown> => record(value)
@@ -71,10 +103,11 @@ const metadataValid = (value: unknown): value is NativeBackupDocumentMetadata =>
     && typeof value.appVersion === 'string' && value.appVersion.length <= 128
     && typeof value.lastModified === 'number' && Number.isFinite(value.lastModified) && value.lastModified >= 0;
 
-// Count without allocating a second encoded copy of a document up to 512 MiB.
-// Unpaired UTF-16 surrogates become the UTF-8 replacement character, as TextEncoder does.
-const withinUtf8Limit = (value: unknown, limit: number): value is string => {
-    if (typeof value !== 'string' || value.length > limit) return false;
+
+const withinUtf8Limit = (value: unknown, limit: number): value is string =>
+    typeof value === 'string' && value.length <= limit && utf8Bytes(value, limit) <= limit;
+
+const utf8Bytes = (value: string, limit = Number.POSITIVE_INFINITY): number => {
     let bytes = 0;
     for (let index = 0; index < value.length; index += 1) {
         const code = value.charCodeAt(index);
@@ -84,10 +117,39 @@ const withinUtf8Limit = (value: unknown, limit: number): value is string => {
             && value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff) {
             bytes += 4; index += 1;
         } else bytes += 3;
-        if (bytes > limit) return false;
+        if (bytes > limit) return bytes;
     }
-    return true;
+    return bytes;
 };
+
+
+const WARNING_TOKEN = /^([a-z]+(?:-[a-z]+)*):(\d{1,9})(?: \[csv-locations=[\d:,]+; omitted=\d+\])?$/u;
+const persistedWarnings = (warnings: readonly string[]): string[] => warnings.map((warning) => {
+    const token = WARNING_TOKEN.exec(warning);
+    const diagnostic = token ? { code: token[1], params: { count: Number(token[2]) } } : createImportDiagnostic(warning, 'warning');
+    const { code } = diagnostic;
+    const count = typeof diagnostic.params.count === 'number' ? diagnostic.params.count : 1;
+    const { locations, omittedLocations } = code === 'unknown-columns' || code === 'unmapped-date'
+        ? importDiagnosticLocationParams(warning) : {};
+    return `${code}:${count}${typeof locations === 'string' ? ` [csv-locations=${locations}; omitted=${omittedLocations}]` : ''}`;
+});
+
+const storedReply = <R extends NativeBackupDocumentReply>(reply: R): R => 'result' in reply
+    ? { ...reply, result: { ...reply.result, warnings: persistedWarnings(reply.result.warnings) } } : reply;
+const COUNTED_WARNINGS = new Set<ImportDiagnosticCode>(['adjusted-records', 'duplicate-identity', 'empty-records', 'invalid-archive-entry',
+    'missing-parent', 'skipped-archive-entry', 'skipped-existing-records', 'unknown-columns', 'unmapped-date', 'unmapped-status', 'unsupported-recurrence']);
+const warningDiagnostic = (warning: string): ImportDiagnostic => {
+    const token = WARNING_TOKEN.exec(persistedWarnings([warning])[0]);
+    if (!token) return { code: 'adjusted-records', params: { count: 1 }, severity: 'warning' };
+    const code = COUNTED_WARNINGS.has(token[1] as ImportDiagnosticCode) ? token[1] as ImportDiagnosticCode : 'adjusted-records';
+    return { code, params: { count: Number(token[2]), ...importDiagnosticLocationParams(warning) }, severity: 'warning' };
+};
+
+let liveWarnings: { snapshotName: string; tokens: string[]; diagnostics: ImportDiagnostic[] } | null = null;
+
+export const releaseNativeBackupDocumentWarnings = (): void => { liveWarnings = null; };
+
+export const nativeBackupDocumentWarningsHeld = (): boolean => liveWarnings !== null;
 const parseSource = (text: unknown, metadata: unknown) => {
     if (!withinUtf8Limit(text, MAX_BACKUP_SOURCE_BYTES)) invalid('Backup source exceeds 128 MiB');
     if (!metadataValid(metadata)) invalid();
@@ -96,7 +158,7 @@ const parseSource = (text: unknown, metadata: unknown) => {
 const sextet = (code: number): number => code >= 65 && code <= 90 ? code - 65
     : code >= 97 && code <= 122 ? code - 71 : code >= 48 && code <= 57 ? code + 4
         : code === 43 ? 62 : code === 47 ? 63 : -1;
-// Validate canonical padding and trailing bits, and bound decoded bytes before allocating.
+
 const decodeBinarySource = (text: unknown, metadata: unknown, label: 'CSV' | 'Todoist' | 'TickTick' | 'DGT' | 'OmniFocus') => {
     const limit = DEFAULT_IMPORT_SOURCE_LIMITS.maxInputBytes;
     if (typeof text !== 'string') invalid();
@@ -116,8 +178,6 @@ const parseTodoistSource = (text: unknown, metadata: unknown) => parseImportSour
 const parseTickTickSource = (text: unknown, metadata: unknown) => parseImportSource('ticktick', decodeBinarySource(text, metadata, 'TickTick'));
 const parseDgtSource = (text: unknown, metadata: unknown) => parseImportSource('dgt', decodeBinarySource(text, metadata, 'DGT'));
 const parseOmniFocusSource = (text: unknown, metadata: unknown) => parseImportSource('omnifocus', decodeBinarySource(text, metadata, 'OmniFocus'));
-const warningMessages = (warnings: string[], t: ImportDiagnosticTranslator) => createImportDiagnostics(warnings, 'warning')
-    .map((item) => formatImportDiagnostic(item, t));
 const inspectCsv = (text: string, metadata: NativeBackupDocumentMetadata, t: ImportDiagnosticTranslator) => {
     const model = { valid: false, title: t('settings.backupMobile.importMindwtrCsvData'), summary: '',
         confirmLabel: t('settings.backupMobile.import'), cancelLabel: t('common.cancel'),
@@ -128,17 +188,7 @@ const inspectCsv = (text: string, metadata: NativeBackupDocumentMetadata, t: Imp
             const error = parsed.diagnostics.find((item) => item.severity === 'error');
             return { ...model, errorMessage: error ? formatImportDiagnostic(error, t) : model.errorMessage };
         }
-        const preview = parsed.preview;
-        const projects = preview.projects.slice(0, 4).map((project) => `• ${project.areaName ? `${project.areaName} / ` : ''}${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) projects.push(t('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        const details = [t('settings.backupMobile.importTasksFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.areaCount > 0 ? t('settings.backupMobile.mindwtrCsvAreasWillBeCreated', { areaCount: preview.areaCount }) : null,
-            preview.projectCount > 0 ? t('settings.backupMobile.projectsWillBeCreatedWhenNeeded', { projectCount: preview.projectCount }) : null,
-            preview.sectionCount > 0 ? t('settings.backupMobile.mindwtrCsvSectionsWillBeCreated', { sectionCount: preview.sectionCount }) : null,
-            preview.checklistItemCount > 0 ? t('settings.backupMobile.checklistItemsWillBePreserved', { checklistItemCount: preview.checklistItemCount }) : null,
-            preview.standaloneTaskCount > 0 ? t('settings.backupMobile.tasksWillStayOutsideProjects', { taskCount: preview.standaloneTaskCount }) : null,
-            ...projects, ...warningMessages(preview.warnings, t)].filter(Boolean);
-        return { ...model, valid: true, summary: details.join('\n'), errorMessage: '' };
+        return { ...model, valid: true, summary: buildMindwtrCsvPreviewSummary(parsed.preview, t), errorMessage: '' };
     } catch { return model; }
 };
 const inspectTodoist = (text: string, metadata: NativeBackupDocumentMetadata, t: ImportDiagnosticTranslator) => {
@@ -151,14 +201,7 @@ const inspectTodoist = (text: string, metadata: NativeBackupDocumentMetadata, t:
             const error = parsed.diagnostics.find((item) => item.severity === 'error');
             return { ...model, errorMessage: error ? formatImportDiagnostic(error, t) : model.errorMessage };
         }
-        const preview = parsed.preview;
-        const projects = preview.projects.slice(0, 4).map((project) => `• ${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) projects.push(t('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        const details = [t('settings.backupMobile.importTodoistTasksFromProjects', { taskCount: preview.taskCount, projectCount: preview.projectCount }),
-            preview.sectionCount > 0 ? t('settings.backupMobile.sectionsWillBePreserved', { sectionCount: preview.sectionCount }) : null,
-            preview.checklistItemCount > 0 ? t('settings.backupMobile.subtasksWillBecomeChecklistItems', { subtaskCount: preview.checklistItemCount }) : null,
-            ...projects, ...warningMessages(preview.warnings, t)].filter(Boolean);
-        return { ...model, valid: true, summary: details.join('\n'), errorMessage: '' };
+        return { ...model, valid: true, summary: buildTodoistPreviewSummary(parsed.preview, t), errorMessage: '' };
     } catch { return model; }
 };
 const inspectTickTick = (text: string, metadata: NativeBackupDocumentMetadata, t: ImportDiagnosticTranslator) => {
@@ -171,16 +214,7 @@ const inspectTickTick = (text: string, metadata: NativeBackupDocumentMetadata, t
             const error = parsed.diagnostics.find((item) => item.severity === 'error');
             return { ...model, errorMessage: error ? formatImportDiagnostic(error, t) : model.errorMessage };
         }
-        const preview = parsed.preview;
-        const projects = preview.projects.slice(0, 4).map((project) => `• ${project.areaName ? `${project.areaName} / ` : ''}${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) projects.push(t('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        const details = [t('settings.backupMobile.importTasksFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.areaCount > 0 ? t('settings.backupMobile.ticktickAreasWillBeCreated', { areaCount: preview.areaCount }) : null,
-            preview.projectCount > 0 ? t('settings.backupMobile.ticktickProjectsWillBeCreated', { projectCount: preview.projectCount }) : null,
-            preview.checklistItemCount > 0 ? t('settings.backupMobile.checklistItemsWillBePreserved', { checklistItemCount: preview.checklistItemCount }) : null,
-            preview.recurringCount > 0 ? t('settings.backupMobile.recurringTasksWillKeepSupportedRepeatRules', { taskCount: preview.recurringCount }) : null,
-            ...projects, ...warningMessages(preview.warnings, t)].filter(Boolean);
-        return { ...model, valid: true, summary: details.join('\n'), errorMessage: '' };
+        return { ...model, valid: true, summary: buildTickTickPreviewSummary(parsed.preview, t), errorMessage: '' };
     } catch { return model; }
 };
 
@@ -194,16 +228,7 @@ const inspectDgt = (text: string, metadata: NativeBackupDocumentMetadata, t: Imp
             const error = parsed.diagnostics.find((item) => item.severity === 'error');
             return { ...model, errorMessage: error ? formatImportDiagnostic(error, t) : model.errorMessage };
         }
-        const preview = parsed.preview;
-        const projects = preview.projects.slice(0, 4).map((project) => `• ${project.areaName ? `${project.areaName} / ` : ''}${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) projects.push(t('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        const details = [t('settings.backupMobile.importTasksFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.areaCount > 0 ? t('settings.backupMobile.dgtAreasWillBeCreated', { areaCount: preview.areaCount }) : null,
-            preview.projectCount > 0 ? t('settings.backupMobile.projectsWillBeCreated', { projectCount: preview.projectCount }) : null,
-            preview.checklistItemCount > 0 ? t('settings.backupMobile.checklistItemsWillBePreserved', { checklistItemCount: preview.checklistItemCount }) : null,
-            preview.standaloneTaskCount > 0 ? t('settings.backupMobile.tasksWillStayOutsideProjects', { taskCount: preview.standaloneTaskCount }) : null,
-            ...projects, ...warningMessages(preview.warnings, t)].filter(Boolean);
-        return { ...model, valid: true, summary: details.join('\n'), errorMessage: '' };
+        return { ...model, valid: true, summary: buildDgtPreviewSummary(parsed.preview, t), errorMessage: '' };
     } catch { return model; }
 };
 
@@ -217,21 +242,11 @@ const inspectOmniFocus = (text: string, metadata: NativeBackupDocumentMetadata, 
             const error = parsed.diagnostics.find((item) => item.severity === 'error');
             return { ...model, errorMessage: error ? formatImportDiagnostic(error, t) : model.errorMessage };
         }
-        const preview = parsed.preview;
-        const projects = preview.projects.slice(0, 4).map((project) => `• ${project.name}: ${project.taskCount}`);
-        if (preview.projects.length > 4) projects.push(t('settings.backupMobile.moreProjects', { projectCount: preview.projects.length - 4 }));
-        const details = [t('settings.backupMobile.importTaskCountFromFile', { taskCount: preview.taskCount, fileName: preview.fileName }),
-            preview.projectCount > 0 ? t('settings.backupMobile.projectsWillBeCreatedWhenNeeded', { projectCount: preview.projectCount }) : null,
-            preview.areaCount > 0 ? t('settings.backupMobile.omnifocusAreasWillBeCreated', { areaCount: preview.areaCount }) : null,
-            preview.checklistItemCount > 0 ? t('settings.backupMobile.nestedTasksWillBecomeChecklistItems', { taskCount: preview.checklistItemCount }) : null,
-            preview.standaloneTaskCount > 0 ? t('settings.backupMobile.tasksWillStayOutsideProjects', { taskCount: preview.standaloneTaskCount }) : null,
-            t('settings.backupMobile.importedTasksKeepOmnifocusNotesDatesTagsRecurrenceAndChecklist'),
-            ...projects, ...warningMessages(preview.warnings, t)].filter(Boolean);
-        return { ...model, valid: true, summary: details.join('\n'), errorMessage: '' };
+        return { ...model, valid: true, summary: buildOmniFocusPreviewSummary(parsed.preview, t), errorMessage: '' };
     } catch { return model; }
 };
 
-/** RN's immutable inspection preview. Invalid files are ordinary localized values. */
+
 export function inspectNativeBackupDocument(text: string, metadata: NativeBackupDocumentMetadata, t: ImportDiagnosticTranslator, format: 'json' | 'json-restore' | 'csv' | 'todoist' | 'ticktick' | 'dgt' | 'omnifocus' = 'json') {
     if (format === 'csv') return inspectCsv(text, metadata, t);
     if (format === 'todoist') return inspectTodoist(text, metadata, t);
@@ -256,15 +271,8 @@ export function inspectNativeBackupDocument(text: string, metadata: NativeBackup
             const errors = validation.diagnostics.filter((item) => item.severity === 'error');
             return { ...model, errorMessage: errors.length ? errors.map((item) => formatImportDiagnostic(item, t)).join('\n') : model.errorMessage };
         }
-        const warnings = validation.diagnostics.filter((item) => item.severity === 'warning').map((item) => formatImportDiagnostic(item, t));
-        const details = [
-            validation.metadata?.backupAt
-                ? t('settings.backupMobile.backupDateLabel', { backupDate: new Date(validation.metadata.backupAt).toLocaleString() })
-                : validation.metadata?.fileName ? t('settings.backupMobile.fileLabel', { fileName: validation.metadata.fileName }) : null,
-            t('settings.backupMobile.backupPreviewCounts', { taskCount: validation.metadata?.taskCount ?? 0, projectCount: validation.metadata?.projectCount ?? 0 }),
-            t(replacing ? 'settings.backupMobile.thisWillReplaceAllCurrentLocalDataARecoverySnapshot' : 'settings.mergeBackupConfirm'), ...(warnings.length ? ['', ...warnings] : []),
-        ].filter(Boolean);
-        return { ...model, valid: true, summary: details.join('\n'), errorMessage: '' };
+        const effect = t(replacing ? 'settings.backupMobile.thisWillReplaceAllCurrentLocalDataARecoverySnapshot' : 'settings.mergeBackupConfirm');
+        return { ...model, valid: true, summary: buildBackupPreviewSummary(validation, effect, t), errorMessage: '' };
     } catch { return model; }
 }
 
@@ -277,11 +285,41 @@ const completeDocument = (value: unknown): value is AppData => record(value)
     && ['tasks', 'projects', 'sections', 'areas', 'people'].every((field) => Array.isArray(value[field]))
     && record(value.settings) && validateMergedSyncData(value as unknown as AppData).length === 0;
 
-/** Freeze shared RN policy against a fresh durable base; this performs no document or file write. */
-export async function prepareNativeBackupDocument(adapter: NativeReceiptSqliteAdapter, input: NativeBackupDocumentPrepareInput): Promise<{ planJSON: string; recoveryJSON: string | null }> {
-    if (!exact(input, ['requestId', 'mode', 'snapshotName', 'text', 'metadata'])
-        || !uuid(input.requestId) || !mode(input.mode) || !snapshot(input.snapshotName)) invalid();
-    // Parse owned bytes before admission; no untrusted thrown details escape.
+
+export type NativeBackupPrepareSink = { recovery(text: string): void; plan(part: string): void };
+
+class SinkFailure extends Error { constructor(readonly failure: unknown) { super('Prepare sink failed'); } }
+const sinkCall = (work: () => void): void => { try { work(); } catch (error) { throw new SinkFailure(error); } };
+
+function* planParts(plan: Plan): Generator<string> {
+    yield `{"version":${JSON.stringify(plan.version)},"requestId":${JSON.stringify(plan.requestId)},"mode":${JSON.stringify(plan.mode)},"preparedAt":${JSON.stringify(plan.preparedAt)},"expectedCurrent":`;
+    yield JSON.stringify(plan.expectedCurrent);
+    yield ',"data":';
+    yield JSON.stringify(plan.data);
+    yield `,"reply":${JSON.stringify(plan.reply)}${plan.maxLibraryBytes === undefined ? '' : `,"maxLibraryBytes":${JSON.stringify(plan.maxLibraryBytes)}`}${plan.undoLibraryBytes === undefined ? '' : `,"undoLibraryBytes":${JSON.stringify(plan.undoLibraryBytes)}`}}`;
+}
+
+
+type PreparedUndo = { undo?: boolean };
+export async function prepareNativeBackupDocument(adapter: NativeReceiptSqliteAdapter, input: NativeBackupDocumentPrepareInput): Promise<{ planJSON: string; recoveryJSON: string | null } & PreparedUndo>;
+export async function prepareNativeBackupDocument(adapter: NativeReceiptSqliteAdapter, input: NativeBackupDocumentPrepareInput, sink: NativeBackupPrepareSink): Promise<{ written: true; recovery: boolean } & PreparedUndo>;
+export async function prepareNativeBackupDocument(adapter: NativeReceiptSqliteAdapter, input: NativeBackupDocumentPrepareInput, sink?: NativeBackupPrepareSink): Promise<({ planJSON: string; recoveryJSON: string | null } | { written: true; recovery: boolean }) & PreparedUndo> {
+    releaseNativeBackupDocumentWarnings();
+    const fields = ['requestId', 'mode', 'snapshotName', 'text', 'metadata'];
+    const admission: unknown = (input as { admission?: unknown }).admission;
+    const admitted = admission === undefined ? exact(input, fields) : exact(input, [...fields, 'admission'])
+        && exact(admission, ['sourceBytes', 'maxTransferBytes']) && count(admission.sourceBytes) && count(admission.maxTransferBytes);
+    if (!admitted || !uuid(input.requestId) || !mode(input.mode) || !snapshot(input.snapshotName)) invalid();
+    const admit = async (): Promise<number> => {
+        if (!input.admission) return 0;
+        const libraryBytes = await adapter.libraryBytes();
+        if (input.admission.sourceBytes + libraryBytes > input.admission.maxTransferBytes) {
+            tooLarge('The selected file and the library exceed the transfer limit');
+        }
+        return libraryBytes;
+    };
+    await admit();
+
     let parsed: ReturnType<typeof parseSource>['data'];
     let csv: ReturnType<typeof parseCsvSource>['parsedData'];
     let todoist: ReturnType<typeof parseTodoistSource>['parsedProjects'] | undefined;
@@ -297,21 +335,34 @@ export async function prepareNativeBackupDocument(adapter: NativeReceiptSqliteAd
         else { const validation = parseSource(input.text, input.metadata); if (!validation.valid || !validation.data) invalid(); parsed = validation.data; }
     }
     catch (error) { if (error instanceof BackupInputError) throw error; return invalid(); }
+
+    if (sink) (input as { text: string }).text = '';
     const { requestId, mode: operation, snapshotName } = input;
     const appVersion = input.metadata.appVersion;
     try {
         return await runSerializedSyncDocumentWriteOperation(async () => {
             await flush();
-            const current = await adapter.getData();
-            if (!completeDocument(current)) invalid();
-            const expectedCurrent = cloneAppData(current);
+
+            const libraryBytes = await admit();
+
+
+            const raw = await adapter.getData();
+            if (!completeDocument(raw)) invalid();
+            const current: AppData = { ...raw, settings: stripSensitiveSettings(raw.settings) };
+
+
+            const expectedCurrent = current;
             const applied = operation === 'merge' ? applyImportSource('backup-merge', current, parsed!) : null;
             const csvApplied = operation === 'csv' ? applyImportSource('mindwtr-csv', current, csv!) : null;
             const todoistApplied = operation === 'todoist' ? applyImportSource('todoist', current, todoist!) : null;
             const ticktickApplied = operation === 'ticktick' ? applyImportSource('ticktick', current, ticktick!) : null;
             const dgtApplied = operation === 'dgt' ? applyImportSource('dgt', current, dgt!) : null;
             const omnifocusApplied = operation === 'omnifocus' ? applyImportSource('omnifocus', current, omnifocus!) : null;
-            const data = omnifocusApplied?.data ?? dgtApplied?.data ?? ticktickApplied?.data ?? todoistApplied?.data ?? csvApplied?.data ?? applied?.data ?? applyImportSource('backup', current, parsed!).data;
+            const appliedData = omnifocusApplied?.data ?? dgtApplied?.data ?? ticktickApplied?.data ?? todoistApplied?.data ?? csvApplied?.data ?? applied?.data ?? applyImportSource('backup', current, parsed!).data;
+
+            parsed = csv = ticktick = dgt = omnifocus = null; todoist = undefined;
+
+            const data: AppData = { ...appliedData, settings: stripSensitiveSettings(appliedData.settings) };
             const counts = applied ? summarizeBackupMerge(applied.result) : { added: 0, updated: 0 };
             let reply: NativeBackupDocumentReply;
             if (omnifocusApplied) {
@@ -319,56 +370,98 @@ export async function prepareNativeBackupDocument(adapter: NativeReceiptSqliteAd
                 reply = { version: 1, operation: 'omnifocus', snapshotName, result: {
                     importedAreaCount: result.importedAreaCount, importedChecklistItemCount: result.importedChecklistItemCount,
                     importedProjectCount: result.importedProjectCount, importedSectionCount: result.importedSectionCount,
-                    importedStandaloneTaskCount: result.importedStandaloneTaskCount, importedTaskCount: result.importedTaskCount, warnings: result.warnings,
+                    importedStandaloneTaskCount: result.importedStandaloneTaskCount, importedTaskCount: result.importedTaskCount, warnings: persistedWarnings(result.warnings),
                 } };
             } else if (dgtApplied) {
                 const result = dgtApplied.result;
                 reply = { version: 1, operation: 'dgt', snapshotName, result: {
                     importedAreaCount: result.importedAreaCount, importedChecklistItemCount: result.importedChecklistItemCount,
                     importedProjectCount: result.importedProjectCount, importedSectionCount: result.importedSectionCount,
-                    importedTaskCount: result.importedTaskCount, warnings: result.warnings,
+                    importedTaskCount: result.importedTaskCount, warnings: persistedWarnings(result.warnings),
                 } };
             } else if (ticktickApplied) {
                 const result = ticktickApplied.result;
                 reply = { version: 1, operation: 'ticktick', snapshotName, result: {
                     importedAreaCount: result.importedAreaCount, importedChecklistItemCount: result.importedChecklistItemCount,
                     importedProjectCount: result.importedProjectCount, importedSectionCount: result.importedSectionCount,
-                    importedTaskCount: result.importedTaskCount, warnings: result.warnings,
+                    importedTaskCount: result.importedTaskCount, warnings: persistedWarnings(result.warnings),
                 } };
             } else if (todoistApplied) {
                 const result = todoistApplied.result;
                 reply = { version: 1, operation: 'todoist', snapshotName, result: {
                     importedChecklistItemCount: result.importedChecklistItemCount, importedProjectCount: result.importedProjectCount,
-                    importedSectionCount: result.importedSectionCount, importedTaskCount: result.importedTaskCount, warnings: result.warnings,
+                    importedSectionCount: result.importedSectionCount, importedTaskCount: result.importedTaskCount, warnings: persistedWarnings(result.warnings),
                 } };
             } else if (csvApplied) {
                 const result = csvApplied.result;
                 reply = { version: 1, operation: 'csv', snapshotName, result: {
                     importedAreaCount: result.importedAreaCount, importedChecklistItemCount: result.importedChecklistItemCount,
                     importedProjectCount: result.importedProjectCount, importedSectionCount: result.importedSectionCount,
-                    importedStandaloneTaskCount: result.importedStandaloneTaskCount, importedTaskCount: result.importedTaskCount, warnings: result.warnings,
+                    importedStandaloneTaskCount: result.importedStandaloneTaskCount, importedTaskCount: result.importedTaskCount, warnings: persistedWarnings(result.warnings),
                 } };
             } else reply = { version: 1, operation: operation as 'merge' | 'restore' | 'replace', snapshotName, ...counts };
             validateReply(reply);
+            const rawWarnings = (omnifocusApplied ?? dgtApplied ?? ticktickApplied ?? todoistApplied ?? csvApplied)?.result.warnings ?? [];
             const plan: Plan = { version: 1, requestId, mode: operation, preparedAt: new Date().toISOString(),
                 expectedCurrent, data, reply };
             if (!completeDocument(data)) invalid();
-            const recoveryJSON = operation !== 'restore' ? serializeBackupData(expectedCurrent) : null;
+            let recoveryJSON = operation !== 'restore' ? serializeBackupData(expectedCurrent) : null;
+            const recovery = recoveryJSON !== null;
             if (recoveryJSON !== null) {
                 if (!withinUtf8Limit(recoveryJSON, MAX_BACKUP_SOURCE_BYTES)) invalid('Recovery snapshot exceeds 128 MiB');
                 if (!parseSource(recoveryJSON, { fileName: snapshotName, lastModified: Date.now(), appVersion }).valid) invalid('Recovery snapshot is not a valid backup');
             }
-            const planJSON = JSON.stringify(plan);
-            if (!withinUtf8Limit(planJSON, MAX_NATIVE_BACKUP_PLAN_BYTES)) invalid('Prepared backup plan exceeds 512 MiB');
-            return { planJSON, recoveryJSON };
+
+
+            const undoRoom = input.admission && recoveryJSON !== null ? input.admission.maxTransferBytes - utf8Bytes(recoveryJSON) : null;
+            if (input.admission && recoveryJSON === null) {
+
+                plan.maxLibraryBytes = input.admission.maxTransferBytes;
+            }
+
+            if (sink && recoveryJSON !== null) { const text = recoveryJSON; sinkCall(() => sink.recovery(text)); recoveryJSON = null; }
+            let planJSON = '';
+            let planBytes = 0;
+            let undo: boolean | undefined;
+            const partBytes: number[] = [];
+            for (const part of planParts(plan)) {
+                const bytes = utf8Bytes(part, MAX_NATIVE_BACKUP_PLAN_BYTES - planBytes);
+                planBytes += bytes;
+                partBytes.push(bytes);
+                if (planBytes > MAX_NATIVE_BACKUP_PLAN_BYTES) invalid('Prepared backup plan exceeds 512 MiB');
+                if (sink) sinkCall(() => sink.plan(part)); else planJSON += part;
+
+                if (undoRoom !== null && partBytes.length === 4) {
+                    const estimate = Math.ceil(libraryBytes + Math.max(0, partBytes[3] - partBytes[1]) * SQLITE_BYTES_PER_JSON_BYTE);
+                    undo = undoRoom >= 0 && estimate <= undoRoom;
+
+                    if (undoRoom >= 0) plan.undoLibraryBytes = undoRoom;
+                    else plan.reply = { ...plan.reply, undo: false };
+                    if (!undo) logUndoUnavailable(operation, 'estimate');
+                }
+            }
+            const diagnostics = createImportDiagnostics(rawWarnings, 'warning');
+            if (diagnostics.some((diagnostic) => diagnostic.code === 'renamed-container')) {
+                liveWarnings = { snapshotName, tokens: [...(reply as { result: { warnings: string[] } }).result.warnings], diagnostics };
+            }
+            const prepared = undo === undefined ? {} : { undo };
+            return sink ? { written: true as const, recovery, ...prepared } : { planJSON, recoveryJSON, ...prepared };
         });
     } catch (error) {
         if (error instanceof BackupInputError) throw error;
+        if (error instanceof SinkFailure) throw error.failure;
         return saveFailed();
     }
 }
 
 const validateReply = (value: unknown, snapshotName?: string, operation?: Operation): NativeBackupDocumentReply => {
+    if (record(value) && 'undo' in value) {
+
+        if (value.undo !== false || value.operation === 'restore') invalid();
+        const { undo: _undo, ...body } = value;
+        validateReply(body, snapshotName, operation);
+        return value as NativeBackupDocumentReply;
+    }
     if (!record(value) || value.version !== 1 || !mode(value.operation) || !snapshot(value.snapshotName)
         || snapshotName !== undefined && value.snapshotName !== snapshotName || operation !== undefined && value.operation !== operation) invalid();
     if (value.operation === 'csv' || value.operation === 'todoist' || value.operation === 'ticktick' || value.operation === 'dgt' || value.operation === 'omnifocus') {
@@ -392,7 +485,9 @@ const readPlan = (reference: NativeBackupOperationReference, planJSON: string, s
         || !snapshot(snapshotName) || !withinUtf8Limit(planJSON, MAX_NATIVE_BACKUP_PLAN_BYTES)) invalid();
     let value: unknown;
     try { value = JSON.parse(planJSON); } catch { return invalid(); }
-    if (!exact(value, ['version', 'requestId', 'mode', 'preparedAt', 'expectedCurrent', 'data', 'reply'])
+    const fields = ['version', 'requestId', 'mode', 'preparedAt', 'expectedCurrent', 'data', 'reply'];
+    if (!(exact(value, fields) || exact(value, [...fields, 'maxLibraryBytes']) && count(value.maxLibraryBytes)
+        || exact(value, [...fields, 'undoLibraryBytes']) && count(value.undoLibraryBytes))
         || value.version !== 1 || value.requestId !== reference.id || !mode(value.mode)
         || typeof value.preparedAt !== 'string' || !Number.isFinite(Date.parse(value.preparedAt))
         || new Date(value.preparedAt).toISOString() !== value.preparedAt
@@ -400,18 +495,22 @@ const readPlan = (reference: NativeBackupOperationReference, planJSON: string, s
     try { if (!completeDocument(value.expectedCurrent) || !completeDocument(value.data)) invalid(); }
     catch { return invalid(); }
     validateReply(value.reply, snapshotName, value.mode);
-    return value as Plan;
+
+    return { ...(value as Plan), reply: storedReply((value as Plan).reply) };
 };
-const payload = (reference: NativeBackupOperationReference, plan: Plan) => JSON.stringify(['backupDocument', plan.mode, reference.id, reference.sha256]);
-const matchedReply = (reply: unknown, plan: Plan): NativeBackupDocumentReply => {
+const payload = (reference: NativeBackupOperationReference, plan: Pick<Plan, 'mode'>) => JSON.stringify(['backupDocument', plan.mode, reference.id, reference.sha256]);
+const matchedReply = (reply: unknown, plan: Pick<Plan, 'mode' | 'reply'>): NativeBackupDocumentReply => {
     try {
-        const validated = validateReply(reply, plan.reply.snapshotName, plan.mode);
-        if (!taskEditValuesEqual(validated, plan.reply)) saveFailed();
+        const validated = storedReply(validateReply(reply, plan.reply.snapshotName, plan.mode));
+
+        const { undo, ...body } = validated;
+        const { undo: planned, ...expected } = plan.reply;
+        if (!taskEditValuesEqual(body, expected) || planned === false && undo !== false) saveFailed();
         return validated;
     } catch { return saveFailed(); }
 };
 
-/** Read terminal success proof only: never flush, reload, reapply policy or save. */
+
 export async function readNativeBackupDocumentOutcome(adapter: NativeReceiptSqliteAdapter, reference: NativeBackupOperationReference, planJSON: string, snapshotName: string): Promise<NativeBackupDocumentReply | null> {
     const plan = readPlan(reference, planJSON, snapshotName);
     try {
@@ -421,92 +520,147 @@ export async function readNativeBackupDocumentOutcome(adapter: NativeReceiptSqli
     } catch { return saveFailed(); }
 }
 
-/** Commit only the frozen plan, or reload after an exact durable replay. */
-export async function commitNativeBackupDocument(adapter: NativeReceiptSqliteAdapter, reference: NativeBackupOperationReference, planJSON: string, snapshotName: string): Promise<NativeBackupDocumentReply> {
-    const plan = readPlan(reference, planJSON, snapshotName);
+
+export type NativeBackupPlanSource = { take(): string };
+
+export type NativeBackupCommitOptions = { getLocalAttachmentPresence?: (uri: string) => Promise<LocalAttachmentPresence> };
+export async function commitNativeBackupDocument(adapter: NativeReceiptSqliteAdapter, reference: NativeBackupOperationReference, planJSON: string | NativeBackupPlanSource, snapshotName: string, options: NativeBackupCommitOptions = {}): Promise<NativeBackupDocumentReply> {
+    try {
+        return await commitPlan(adapter, reference, planJSON, snapshotName, options);
+    } catch (error) {
+
+        releaseNativeBackupDocumentWarnings();
+        throw error;
+    }
+}
+
+async function commitPlan(adapter: NativeReceiptSqliteAdapter, reference: NativeBackupOperationReference, planJSON: string | NativeBackupPlanSource, snapshotName: string, options: NativeBackupCommitOptions): Promise<NativeBackupDocumentReply> {
+
+    let plan: Plan | null = readPlan(reference, typeof planJSON === 'string' ? planJSON : planJSON.take(), snapshotName);
+    const kept = { mode: plan.mode, reply: plan.reply, maxLibraryBytes: plan.maxLibraryBytes, undoLibraryBytes: plan.undoLibraryBytes };
     const ownedReference = { ...reference };
     try {
         return await runSerializedSyncDocumentWriteOperation(async () => {
             await flush();
+
+
+            const undoReferences = kept.mode !== 'restore' ? findLiveAttachmentResourceReferences(plan!.expectedCurrent) : null;
             let result;
             try {
-                result = await adapter.saveDocumentWithReceipt({ requestId: ownedReference.id, payload: payload(ownedReference, plan),
-                    expectedCurrent: plan.expectedCurrent, data: plan.data, reply: plan.reply });
+
+                const saving = adapter.saveDocumentWithReceipt({ requestId: ownedReference.id, payload: payload(ownedReference, kept),
+                    expectedCurrent: plan!.expectedCurrent, reply: kept.reply, owned: true,
+                    data: options.getLocalAttachmentPresence
+                        ? await markMissingLocalAttachmentFiles(plan!.data, options.getLocalAttachmentPresence) : plan!.data,
+                    ...(kept.maxLibraryBytes === undefined ? {} : { maxLibraryBytes: kept.maxLibraryBytes }),
+                    ...(kept.undoLibraryBytes === undefined ? {} : { undoLibraryBytes: kept.undoLibraryBytes }) });
+                plan = null;
+                result = await saving;
             } catch (error) {
                 if (error instanceof Error && error.message === 'Stale document receipt baseline') {
                     throw new Error('STALE_REVISION: Local data changed after backup preparation');
                 }
+                if (error instanceof Error && error.message === UNDO_LIMIT_EXCEEDED) throw new Error(kept.mode === 'restore' ? RESTORE_TOO_LARGE : UNDO_TOO_LARGE);
                 return saveFailed();
             }
-            const reply = matchedReply(result.reply, plan);
+            const reply = matchedReply(result.reply, kept);
+            if (reply.undo === false && kept.reply.undo !== false && !result.replayed) logUndoUnavailable(kept.mode, 'after-save');
+
+            if (undoReferences && reply.undo !== false) holdRestoreUndoAttachments(undoReferences);
             try {
                 markNextLoadAsDocumentReplacement();
-                // Maintenance resumes only after the native journal has been cleared.
+
                 await useTaskStore.getState().fetchData({ throwOnError: true, recoveryLoad: true });
             } catch { throw new Error('SAVE_FAILED: Backup document was saved but reload failed'); }
             return reply;
         });
     } catch (error) {
         if (error instanceof Error && (error.message === 'STALE_REVISION: Local data changed after backup preparation'
+            || error.message === UNDO_TOO_LARGE || error.message === RESTORE_TOO_LARGE
             || error.message === 'SAVE_FAILED: Backup document was saved but reload failed')) throw error;
         return saveFailed();
     }
 }
 
+const IMPORT_OPERATIONS = new Set(['csv', 'todoist', 'ticktick', 'dgt', 'omnifocus']);
+
+const CAPACITY_REFUSALS = new Set(['INVALID_INPUT: Recovery snapshot exceeds 128 MiB', 'INVALID_INPUT: Prepared backup plan exceeds 512 MiB',
+    ...['CSV', 'Todoist', 'TickTick', 'DGT', 'OmniFocus'].map((label) => `INVALID_INPUT: ${label} source exceeds 16 MiB`)]);
+
+
+export function buildNativeBackupDocumentFailure(operation: string, error: string, t: ImportDiagnosticTranslator, limitMb: number) {
+    releaseNativeBackupDocumentWarnings();
+    const imported = IMPORT_OPERATIONS.has(operation);
+    const title = imported ? t('settings.backupMobile.importFailed')
+        : operation === 'merge' ? t('settings.mergeBackupFailed') : t('settings.backupMobile.restoreFailed');
+    const words = /^[A-Z_]+: /u.test(error) ? error.slice(error.indexOf(': ') + 2) : error;
+
+
+    const capacity = imported && CAPACITY_REFUSALS.has(error);
+    if (error === 'TOO_LARGE' || error.startsWith('TOO_LARGE: ') || capacity) {
+        return { title, message: imported ? t('settings.importDiagnostics.limitExceeded') : t('settings.backupDiagnostics.tooLarge', { maxSizeMb: limitMb }) };
+    }
+    return { title, message: imported ? formatImportDiagnostic(createImportDiagnostic(words, 'error'), t) : words };
+}
+
+
 export function buildNativeBackupDocumentResult(reply: NativeBackupDocumentReply, t: ImportDiagnosticTranslator) {
     validateReply(reply);
-    if (reply.operation === 'omnifocus') {
-        const result = reply.result;
-        return { title: t('settings.backupMobile.importComplete'), message: [
-            t('settings.backupMobile.importedTaskProjectCounts', { taskCount: result.importedTaskCount, projectCount: result.importedProjectCount }),
-            result.importedAreaCount > 0 ? t('settings.backupMobile.omnifocusAreasCreated', { areaCount: result.importedAreaCount }) : null,
-            result.importedChecklistItemCount > 0 ? t('settings.backupMobile.nestedTasksBecameChecklistItems', { taskCount: result.importedChecklistItemCount }) : null,
-            result.importedStandaloneTaskCount > 0 ? t('settings.backupMobile.tasksStayedOutsideProjects', { taskCount: result.importedStandaloneTaskCount }) : null,
-            t('settings.backupMobile.recoverySnapshotSaved', { snapshotName: reply.snapshotName }),
-            ...warningMessages(result.warnings, t)].filter(Boolean).join('\n'), undoLabel: t('settings.undoImport'), doneLabel: t('common.done') };
+    if ('result' in reply) {
+        const tokens = persistedWarnings(reply.result.warnings);
+        const live = liveWarnings && liveWarnings.snapshotName === reply.snapshotName && taskEditValuesEqual(liveWarnings.tokens, tokens)
+            ? liveWarnings.diagnostics : null;
+        releaseNativeBackupDocumentWarnings();
+        return importResult({ ...reply, result: { ...reply.result, warnings: live ?? tokens.map(warningDiagnostic) } } as ImportReplyWithDiagnostics, t);
     }
-    if (reply.operation === 'ticktick' || reply.operation === 'dgt') {
-        const result = reply.result;
-        return { title: t('settings.backupMobile.importComplete'), message: [
-            t('settings.backupMobile.importedTaskProjectAreaCounts', { taskCount: result.importedTaskCount,
-                projectCount: result.importedProjectCount, areaCount: result.importedAreaCount }),
-            result.importedChecklistItemCount > 0 ? t('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: result.importedChecklistItemCount }) : null,
-            t('settings.backupMobile.recoverySnapshotSaved', { snapshotName: reply.snapshotName }),
-            ...warningMessages(result.warnings, t)].filter(Boolean).join('\n'), undoLabel: t('settings.undoImport'), doneLabel: t('common.done') };
-    }
-    if (reply.operation === 'todoist') {
-        const result = reply.result;
-        return { title: t('settings.backupMobile.importComplete'), message: [
-            t('settings.backupMobile.importedTodoistTasksIntoProjects', { taskCount: result.importedTaskCount, projectCount: result.importedProjectCount }),
-            result.importedChecklistItemCount > 0 ? t('settings.backupMobile.subtasksBecameChecklistItems', { subtaskCount: result.importedChecklistItemCount }) : null,
-            t('settings.backupMobile.recoverySnapshotSaved', { snapshotName: reply.snapshotName }),
-            ...warningMessages(result.warnings, t)].filter(Boolean).join('\n'), undoLabel: t('settings.undoImport'), doneLabel: t('common.done') };
-    }
-    if (reply.operation === 'csv') {
-        const result = reply.result;
-        return { title: t('settings.backupMobile.importComplete'), message: [
-            t('settings.backupMobile.importedTaskProjectSectionAreaCounts', { taskCount: result.importedTaskCount,
-                projectCount: result.importedProjectCount, sectionCount: result.importedSectionCount, areaCount: result.importedAreaCount }),
-            result.importedChecklistItemCount > 0 ? t('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: result.importedChecklistItemCount }) : null,
-            t('settings.backupMobile.recoverySnapshotSaved', { snapshotName: reply.snapshotName }),
-            ...warningMessages(result.warnings, t)].filter(Boolean).join('\n'), undoLabel: t('settings.undoImport'), doneLabel: t('common.done') };
-    }
+    return importResult(reply as ImportReplyWithDiagnostics, t);
+}
+type ImportReplyWithDiagnostics = NativeBackupDocumentReply extends infer R
+    ? R extends { result: infer Result } ? Omit<R, 'result'> & { result: Omit<Result, 'warnings'> & { warnings: ImportDiagnostic[] } } : R
+    : never;
+function importResult(reply: ImportReplyWithDiagnostics, t: ImportDiagnosticTranslator) {
+    const durationMs = reply.operation === 'restore' ? null : DATA_TRANSFER_TOAST_MS[reply.operation];
+
+    const noUndo = reply.undo === false;
+    const withUndoNote = (message: string) => (noUndo ? `${message}\n\n${t('settings.backupMobile.undoUnavailableResult')}` : message);
+    const imported = (message: string) => ({ title: t('settings.backupMobile.importComplete'), message: withUndoNote(message),
+        undoLabel: noUndo ? '' : t('settings.undoImport'), doneLabel: t('common.done'), durationMs });
+    if (reply.operation === 'omnifocus') return imported(buildOmniFocusResultMessage(reply.result, reply.snapshotName, t));
+    if (reply.operation === 'ticktick' || reply.operation === 'dgt') return imported(buildAreaImportResultMessage(reply.result, reply.snapshotName, t));
+    if (reply.operation === 'todoist') return imported(buildTodoistResultMessage(reply.result, reply.snapshotName, t));
+    if (reply.operation === 'csv') return imported(buildMindwtrCsvResultMessage(reply.result, reply.snapshotName, t));
     return {
         title: t(reply.operation === 'merge' ? 'settings.mergeBackup' : 'settings.backupMobile.restoreComplete'),
-        message: reply.operation === 'merge' ? [
-            t('settings.mergeBackupSummary', { addedCount: reply.added, updatedCount: reply.updated }),
-            t('settings.backupMobile.recoverySnapshotSaved', { snapshotName: reply.snapshotName }),
-        ].join('\n') : reply.operation === 'replace' ? t('settings.backupMobile.backupRestoredWithSnapshot', { snapshotName: reply.snapshotName })
-            : t('settings.backupMobile.recoverySnapshotRestored'),
-        undoLabel: reply.operation !== 'restore' ? t('settings.undoImport') : '', doneLabel: t('common.done'),
+        message: withUndoNote(reply.operation === 'merge' ? buildMergeResultMessage(reply, reply.snapshotName, t)
+            : reply.operation === 'replace' ? t('settings.backupMobile.backupRestoredWithSnapshot', { snapshotName: reply.snapshotName })
+                : t('settings.backupMobile.recoverySnapshotRestored')),
+        undoLabel: reply.operation !== 'restore' && !noUndo ? t('settings.undoImport') : '', doneLabel: t('common.done'), durationMs,
     };
 }
 
-export function buildNativeBackupSnapshotRestoreConfirmation(snapshotName: string, t: ImportDiagnosticTranslator) {
+
+export function holdNativeBackupUndoAttachments(snapshotText: string, snapshotName: string): boolean {
     if (!snapshot(snapshotName)) invalid();
-    const match = snapshotName.match(snapshotPattern)!;
-    const date = new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5] ?? '000'}Z`);
-    const label = `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    return { title: t('settings.undoImportConfirmTitle'), message: t('settings.undoImportConfirm', { snapshotName: label }),
-        confirmLabel: t('markdown.referenceRestore'), cancelLabel: t('common.cancel') };
+    const validation = parseSource(snapshotText, { fileName: snapshotName, lastModified: 0, appVersion: '0.0.0' });
+    if (!validation.valid || !validation.data) return false;
+    holdRestoreUndoAttachments(findLiveAttachmentResourceReferences(validation.data));
+    return true;
+}
+
+
+export function buildNativeBackupNoUndoConfirmation(t: ImportDiagnosticTranslator) {
+    return { title: t('settings.backupMobile.undoUnavailableTitle'), message: t('settings.backupMobile.undoUnavailableConfirm'),
+        confirmLabel: t('settings.backupMobile.undoUnavailableContinue'), cancelLabel: t('common.cancel') };
+}
+
+
+export function buildNativeBackupSnapshotRestoreConfirmation(snapshotName: string, t: ImportDiagnosticTranslator, undo = true) {
+    if (!snapshot(snapshotName)) invalid();
+    const label = formatRecoverySnapshotLabel(snapshotName);
+    return undo
+        ? { title: t('settings.undoImportConfirmTitle'), message: t('settings.undoImportConfirm', { snapshotName: label }),
+            confirmLabel: t('markdown.referenceRestore'), cancelLabel: t('common.cancel') }
+        : { title: t('settings.backupMobile.restoreRecoverySnapshot'),
+            message: t('settings.backupMobile.restoreSnapshotReplaceLocalData', { snapshotName: label }),
+            confirmLabel: t('markdown.referenceRestore'), cancelLabel: t('common.cancel') };
 }

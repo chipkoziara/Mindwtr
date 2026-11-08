@@ -10,12 +10,13 @@ import {
     type ExternalCalendarSubscription,
     type SystemCalendarInfo,
     type SystemCalendarSettings,
+    useTaskStore,
 } from '@mindwtr/core';
 import * as FileSystem from './file-system';
 import { logInfo } from './app-log';
 import { getAllCalendarSyncEntries } from './storage-adapter';
 
-// The feeds and device calendar rules are core's (external-calendar-feeds.ts); this binds the device.
+
 export {
     EXTERNAL_CALENDARS_KEY,
     SYSTEM_CALENDAR_SETTINGS_KEY,
@@ -44,6 +45,7 @@ const getFeeds = (): ExternalCalendarFeeds => {
         },
         getAllCalendarSyncEntries: (platform) => getAllCalendarSyncEntries(platform),
         logInfo: (message, context) => logInfo(message, context),
+        syncedSubscriptions: () => useTaskStore.getState().settings.externalCalendars,
     });
     return feeds;
 };

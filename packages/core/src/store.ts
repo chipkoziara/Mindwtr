@@ -21,27 +21,26 @@ import {
 import { markCoreStartupPhase } from './startup-profiler';
 import { createProjectActions } from './store-projects';
 import { createSettingsActions } from './store-settings';
+export { getStorageTimeoutMs, lastStoreLoadWasRecovery, markNextLoadAsDocumentReplacement, setStorageTimeoutMs } from './store-settings';
 import { createTaskActions } from './store-tasks';
-import { createArchiveRetentionActions } from './store-archive-retention';
+import { createArchiveRetentionActions, resetArchiveRetentionSyncForTests } from './store-archive-retention';
 import { sleep } from './async-utils';
 import { instrumentStoreSubscribe } from './store-notify-profiler';
 import { runAfterStoreWriteLock } from './data-transfer-transaction';
+import { markStoreCommand, runStoreCommand } from './store-write-gate';
 
 export { applyTaskUpdates } from './store-helpers';
 
 let storage: StorageAdapter = noopStorage;
 
-/**
- * Configure the storage adapter to use for persistence.
- * Must be called before using the store.
- */
+
 export const setStorageAdapter = (adapter: StorageAdapter) => {
     storage = adapter;
 };
 
 export const getStorageAdapter = () => storage;
 
-// Save queue helper - coalesces writes while ensuring the latest snapshot is persisted quickly.
+
 type PendingSave = {
     version: number;
     data: AppData;
@@ -54,8 +53,8 @@ let pendingVersion = 0;
 let savedVersion = 0;
 let saveInFlight: Promise<void> | null = null;
 const immediateSavesInFlight = new Set<Promise<void>>();
-// Module-global: concurrent runWithImmediateSaveTracking scopes would cross-capture
-// each other's saves. Callers must serialize (the MCP server does via its op queue).
+
+
 const immediateSaveTrackers = new Set<Set<Promise<void>>>();
 let scheduledSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let errorAutoClearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -68,7 +67,7 @@ const SAVE_FLUSH_DELAY_MS = 120;
 const ERROR_AUTO_CLEAR_MS = 10_000;
 const SAVE_QUEUE_OVERFLOW_ERROR_PREFIX = 'Save queue overflow:';
 const hasPendingSaveWork = (): boolean => pendingSaves.length > 0 || saveInFlight !== null || immediateSavesInFlight.size > 0;
-/** Read-only diagnostics: does not flush, retry, or acknowledge persistence. */
+
 export const getPersistenceStatus = () => ({
     queued: pendingSaves.length,
     inFlight: saveInFlight !== null,
@@ -77,19 +76,28 @@ export const getPersistenceStatus = () => ({
     generation: pendingVersion,
     failed: useTaskStore.getState().persistenceFailure !== null,
 });
-// Each queued snapshot's generation. Every saved change moves the generation on and takes
-// its snapshot in the same step, so a snapshot tagged g holds every change saved at
-// generation g or before: a save of it makes all of them durable.
-// Only the native host's durable receipts read them (React Native never turns this on).
+
+
 const snapshotGenerations = new WeakMap<AppData, number>();
 let tagSnapshotGenerations = false;
 export const trackSaveSnapshotGenerations = (on: boolean) => { tagSnapshotGenerations = on; };
-/** The generation (getPersistenceStatus's) a save-queue snapshot was taken at; undefined for data the queue did not build, or while not tracked. */
+
 export const getSaveSnapshotGeneration = (data: AppData): number | undefined => snapshotGenerations.get(data);
 const hasOwnField = (value: object, field: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(value, field);
 const getSaveRetryDelayMs = (attempt: number): number => {
     const cappedAttempt = Math.max(0, attempt - 1);
     return Math.min(MAX_SAVE_RETRY_DELAY_MS, INITIAL_SAVE_RETRY_DELAY_MS * (2 ** cappedAttempt));
+};
+let saveRetrySleepForTests: ((ms: number) => Promise<void>) | null = null;
+
+export const setSaveRetrySleepForTests = (wait: ((ms: number) => Promise<void>) | null): void => {
+    saveRetrySleepForTests = wait;
+};
+
+
+const waitBeforeSaveRetry = (ms: number): Promise<void> => {
+    if (saveRetrySleepForTests) return saveRetrySleepForTests(ms);
+    return (globalThis as { __mindwtrSkipSaveRetryWait?: unknown }).__mindwtrSkipSaveRetryWait === true ? Promise.resolve() : sleep(ms);
 };
 const isPersistentStoreError = (error: string | null | undefined): boolean => (
     typeof error === 'string' && error.startsWith(SAVE_QUEUE_OVERFLOW_ERROR_PREFIX)
@@ -121,7 +129,7 @@ const recordPersistenceFailure = (message: string) => {
             },
         });
     } catch {
-        // Ignore if the store is not initialized yet.
+
     }
 };
 
@@ -131,7 +139,7 @@ const clearPersistenceFailure = () => {
             useTaskStore.setState({ persistenceFailure: null });
         }
     } catch {
-        // Ignore if the store is not initialized yet.
+
     }
 };
 
@@ -164,7 +172,7 @@ const enforcePendingSaveCap = () => {
     try {
         useTaskStore.getState().setError(message);
     } catch {
-        // Ignore if the store is not initialized yet.
+
     }
     recordPersistenceFailure(message);
     const callbacks = dropped
@@ -175,7 +183,7 @@ const enforcePendingSaveCap = () => {
             try {
                 callback(message);
             } catch {
-                // Ignore callback failures so the queue can keep draining.
+
             }
         }
     }
@@ -196,7 +204,7 @@ const getDebouncedSaveCaller = (): string | undefined => {
         const stack = new Error().stack;
         if (!stack) return undefined;
         const lines = stack.split('\n').map((line) => line.trim());
-        // 0: Error, 1: getDebouncedSaveCaller, 2: debouncedSave, 3+: caller chain
+
         return lines[3] ?? lines[2];
     } catch {
         return undefined;
@@ -226,7 +234,7 @@ const scheduleErrorAutoClear = (error: string | null) => {
                 state.setError(null);
             }
         } catch {
-            // Ignore if the store is not initialized yet.
+
         }
     }, ERROR_AUTO_CLEAR_MS);
 };
@@ -244,6 +252,7 @@ export const resetForTests = () => {
         errorAutoClearTimer = null;
     }
     persistenceRetryInFlight = null;
+    resetArchiveRetentionSyncForTests();
 };
 
 type EntityCollectionConfig<T extends { id: string }> = {
@@ -379,7 +388,7 @@ const schedulePendingSaveFlush = () => {
             try {
                 useTaskStore.getState().setError(message);
             } catch {
-                // Ignore if store is not initialized yet
+
             }
         });
     }, SAVE_FLUSH_DELAY_MS);
@@ -389,9 +398,8 @@ const enqueuePendingSave = (
     data: AppData,
     onError?: (msg: string) => void,
     schedule = true,
-    // Immediate-save retries pass their own dispatch-time ordinal (reserved
-    // below) instead of drawing a fresh one — the version must reflect when
-    // the snapshot's data was captured, not when its failed write settled.
+
+
     explicitVersion?: number,
 ) => {
     if (explicitVersion === undefined) pendingVersion += 1;
@@ -414,20 +422,15 @@ const enqueuePendingSave = (
 };
 
 const trackImmediateSave = (save: Promise<void>, retrySnapshot?: AppData): Promise<void> => {
-    // Draw a real ordinal from the same counter debounced enqueues use, so
-    // concurrent immediate dispatches (which never enqueue on their own) are
-    // still ordered against each other and against debounced snapshots.
+
+
     pendingVersion += 1;
     const dispatchVersion = pendingVersion;
     let trackedSave: Promise<void>;
     trackedSave = save
         .catch((error) => {
-            // Enqueue the retry snapshot unless a strictly newer snapshot is
-            // already pending — cumulative store state means it already
-            // contains this mutation. Check the queue itself, not the shared
-            // counter: another concurrent immediate save may have reserved a
-            // later ordinal without having enqueued (or failed) yet, and
-            // skipping on that basis alone would drop this edit.
+
+
             if (retrySnapshot) {
                 const hasNewerPending = pendingSaves.some((item) => item.version > dispatchVersion);
                 if (!hasNewerPending) {
@@ -463,20 +466,12 @@ export const runWithImmediateSaveTracking = async <T>(operation: () => Promise<T
     }
 };
 
-/**
- * Save data with write coalescing.
- * Captures a snapshot immediately and serializes writes to avoid lost updates.
- * @param data Snapshot of data to save (must include ALL items including tombstones)
- * @param onError Callback for save failures
- */
+
 const debouncedSave = (data: AppData, onError?: (msg: string) => void) => {
     enqueuePendingSave(data, onError);
 };
 
-/**
- * Immediately save any pending debounced data.
- * Call this when the app goes to background or is about to be terminated.
- */
+
 export const flushPendingSave = async (): Promise<void> => {
     clearScheduledSaveTimer();
     markCoreStartupPhase('core.flush_pending_save.enter', {
@@ -548,7 +543,7 @@ export const flushPendingSave = async (): Promise<void> => {
                 try {
                     useTaskStore.getState().setError(message);
                 } catch {
-                    // Ignore if store is not initialized yet
+
                 }
             })
             .finally(() => {
@@ -573,7 +568,7 @@ export const flushPendingSave = async (): Promise<void> => {
             if (hasQueuedSaves) continue;
             const hasRetriableSaveQueued = pendingSaves.some((item) => item.version === targetVersion);
             if (hasRetriableSaveQueued) {
-                await sleep(getSaveRetryDelayMs(attempts + 1));
+                await waitBeforeSaveRetry(getSaveRetryDelayMs(attempts + 1));
                 continue;
             }
             const message = toSaveErrorMessage(saveError);
@@ -583,7 +578,7 @@ export const flushPendingSave = async (): Promise<void> => {
                     try {
                         callback(message);
                     } catch {
-                        // Ignore callback failures so terminal save errors still surface.
+
                     }
                 });
             }
@@ -624,72 +619,43 @@ const retryPendingPersistence = (): Promise<void> => {
     return retry;
 };
 
-const STORE_WRITE_ACTION_KEYS = [
-    'seedGettingStarted',
-    'addTask',
-    'addTasks',
-    'updateTask',
-    'deleteTask',
-    'restoreTask',
-    'restoreTasks',
-    'purgeTask',
-    'purgeTasks',
-    'purgeDeletedTasks',
-    'duplicateTask',
-    'promoteTaskToProject',
-    'convertChecklistToProject',
-    'undoChecklistToProject',
-    'resetTaskChecklist',
-    'moveTask',
-    'batchUpdateTasks',
-    'batchMoveTasks',
-    'batchDeleteTasks',
-    'reorderFocusedTasks',
-    'addProject',
-    'updateProject',
-    'deleteProject',
-    'restoreProject',
-    'purgeProject',
-    'purgeDeletedProjects',
-    'duplicateProject',
-    'toggleProjectFocus',
-    'convertProjectToSection',
-    'undoProjectToSection',
-    'addSection',
-    'updateSection',
-    'deleteSection',
-    'reorderSections',
-    'addArea',
-    'updateArea',
-    'deleteArea',
-    'restoreArea',
-    'reorderAreas',
-    'reorderProjects',
-    'reorderProjectTasks',
-    'reorderBoardTasks',
-    'addPerson',
-    'updatePerson',
-    'renamePerson',
-    'deletePerson',
-    'restorePerson',
-    'deleteTag',
-    'renameTag',
-    'deleteContext',
-    'renameContext',
-    'updateSettings',
-    'setArchiveRetentionDays',
-    'runArchiveRetention',
-    'persistSnapshot',
-] as const satisfies readonly (keyof TaskStore)[];
+
+export const STORE_NON_COMMAND_KEYS: ReadonlySet<string> = new Set([
+    'getDerivedState', 'getFocusStarAction', 'getFocusedCount', 'queryTasks',
+    'lockEditing', 'unlockEditing', 'setError', 'setHighlightTask',
+]);
+
+type FetchDataOptions = Parameters<TaskStore['fetchData']>[0];
+
+export const storeDataOf = (state: TaskStore) => [state._allTasks, state._allProjects, state._allSections, state._allAreas,
+    state._allPeople, state.settings, state.lastDataChangeAt] as const;
+export const sameStoreData = (left: readonly unknown[], right: readonly unknown[]): boolean =>
+    left.length === right.length && left.every((value, index) => value === right[index]);
+
+
+const preloadedLoadOptions = (options: FetchDataOptions): FetchDataOptions => {
+    if (!options?.preloadedData) return options;
+    const calledAgainst = storeDataOf(useTaskStore.getState());
+    const stillRelevant = options.isResultStillRelevant;
+    return { ...options, isResultStillRelevant: () => sameStoreData(storeDataOf(useTaskStore.getState()), calledAgainst)
+        && (stillRelevant?.() ?? true) };
+};
 
 const wrapStoreWriteActions = (actions: TaskStore): TaskStore => {
-    const wrapped = { ...actions };
-    for (const key of STORE_WRITE_ACTION_KEYS) {
-        const action = actions[key] as (...args: unknown[]) => Promise<unknown>;
-        (wrapped as unknown as Record<string, unknown>)[key] = (...args: unknown[]) =>
-            runAfterStoreWriteLock(() => action(...args));
+    const wrapped = { ...actions } as unknown as Record<string, unknown>;
+    for (const [key, value] of Object.entries(actions)) {
+        if (typeof value !== 'function' || STORE_NON_COMMAND_KEYS.has(key)) continue;
+        const action = value as (...args: unknown[]) => Promise<unknown>;
+
+
+        wrapped[key] = markStoreCommand(key === 'fetchData'
+            ? (options?: unknown) => {
+                const admitted = preloadedLoadOptions(options as FetchDataOptions);
+                return runStoreCommand(() => action(admitted));
+            }
+            : (...args: unknown[]) => runAfterStoreWriteLock(() => runStoreCommand(() => action(...args))));
     }
-    return wrapped;
+    return wrapped as unknown as TaskStore;
 };
 
 export const useTaskStore = createWithEqualityFn<TaskStore>()(subscribeWithSelector((rawSet, get, api) => {
@@ -713,7 +679,7 @@ export const useTaskStore = createWithEqualityFn<TaskStore>()(subscribeWithSelec
         lastDataChangeAt: 0,
         highlightTaskId: null,
         highlightTaskAt: null,
-        // Internal: full data including tombstones
+
         _allTasks: [],
         _allProjects: [],
         _allSections: [],
@@ -760,9 +726,8 @@ export const useTaskStore = createWithEqualityFn<TaskStore>()(subscribeWithSelec
 }));
 
 const originalSetState = useTaskStore.setState;
-// Zustand callers outside our action creators can still use setState directly.
-// Keep all external writes flowing through prepareStoreStateUpdate so derived maps,
-// tombstone-aware collections, and visible lists stay aligned.
+
+
 useTaskStore.setState = ((partial, replace) => {
     if (typeof partial === 'function') {
         originalSetState((state) => prepareStoreStateUpdate(state, partial(state as TaskStore) as Partial<TaskStore> | TaskStore), replace);

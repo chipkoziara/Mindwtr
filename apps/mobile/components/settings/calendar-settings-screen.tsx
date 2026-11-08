@@ -28,6 +28,7 @@ import {
     shallow,
     toggleCalendarAreaId,
     toggleCalendarFeedArea,
+    runStoreCommand,
     type ExternalCalendarSubscription,
     useTaskStore,
 } from '@mindwtr/core';
@@ -133,7 +134,7 @@ export function CalendarSettingsScreen() {
     const [isSystemCalendarLoading, setIsSystemCalendarLoading] = useState(false);
     const [systemCalendarOpen, setSystemCalendarOpen] = useState(false);
 
-    // Push-to-calendar state
+
     const [calendarPushEnabled, setCalendarPushEnabledState] = useState(false);
     const [calendarPushPermission, setCalendarPushPermission] = useState<'granted' | 'denied' | 'undetermined'>('undetermined');
     const [calendarPushTargetCalendarId, setCalendarPushTargetCalendarIdState] = useState<string | null>(null);
@@ -221,7 +222,7 @@ export function CalendarSettingsScreen() {
             await loadCalendarPushTargetState();
             showToast(calendarSettingsToasts(tr, t).pushColorUpdated(updated));
         } catch (error) {
-            // The device refused: nothing was stored, so picking the color again retries it.
+
             console.error(error);
             await loadCalendarPushTargetState();
             showToast(calendarSettingsToasts(tr, t).pushColorFailed());
@@ -232,8 +233,8 @@ export function CalendarSettingsScreen() {
         if (isDeletingMindwtrCalendar) return;
         setIsDeletingMindwtrCalendar(true);
         try {
-            // Disable push sync first so the calendar is not recreated on the next
-            // startup or task change.
+
+
             await setCalendarPushEnabled(false);
             setCalendarPushEnabledState(false);
             stopCalendarPushSync();
@@ -379,21 +380,30 @@ export function CalendarSettingsScreen() {
         await persistSystemCalendarState({ areaIdsByCalendar: { ...systemCalendarAreaIds, [calendarId]: next } });
     };
 
+
+    const writeCalendarFeeds = (edit: (feeds: ExternalCalendarSubscription[]) => ExternalCalendarSubscription[] | null) => (
+        runStoreCommand(async () => {
+            const next = edit(useTaskStore.getState().settings.externalCalendars ?? externalCalendars);
+            if (!next) return;
+            setExternalCalendars(next);
+            await saveExternalCalendars(next);
+            await updateSettings({ externalCalendars: next });
+        })
+    );
+
     const toggleCalendarArea = async (calendarId: string, areaId: string) => {
-        const next = toggleCalendarFeedArea(externalCalendars, calendarId, areaId);
-        setExternalCalendars(next);
-        await saveExternalCalendars(next);
-        await updateSettings({ externalCalendars: next });
+        await writeCalendarFeeds((feeds) => toggleCalendarFeedArea(feeds, calendarId, areaId));
     };
 
     const renderAreaSelector = (sourceId: string, selectedIds: string[], onToggle: (areaId: string) => void) => {
         const choice = buildCalendarAreaChoice(selectedIds, areas, t);
+        const expanded = expandedAreaSourceId === sourceId;
         return choice && <View style={{ marginTop: 8 }}>
-            <TouchableOpacity accessibilityRole="button" onPress={() => setExpandedAreaSourceId(expandedAreaSourceId === sourceId ? null : sourceId)}>
+            <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpandedAreaSourceId(expanded ? null : sourceId)}>
                 <Text style={[styles.settingDescription, { color: tc.tint }]}>{choice.label}</Text>
             </TouchableOpacity>
-            {expandedAreaSourceId === sourceId && choice.options.map((option) => (
-                <TouchableOpacity key={option.areaId} accessibilityRole="checkbox" accessibilityState={{ checked: option.checked }} onPress={() => onToggle(option.areaId)} style={{ paddingVertical: 7 }}>
+            {expanded && choice.options.map((option) => (
+                <TouchableOpacity key={option.areaId} accessibilityRole="checkbox" accessibilityState={{ checked: option.checked }} accessibilityLabel={option.accessibilityLabel} onPress={() => onToggle(option.areaId)} style={{ paddingVertical: 7 }}>
                     <Text style={[styles.settingDescription, { color: tc.text }]}>{option.label}</Text>
                 </TouchableOpacity>
             ))}
@@ -402,19 +412,18 @@ export function CalendarSettingsScreen() {
 
     const handleAddCalendar = async () => {
         if (!newCalendarUrl.trim()) return;
-        const next = addCalendarFeed(externalCalendars, {
-            id: generateUUID(),
-            name: newCalendarName,
-            url: newCalendarUrl,
-            defaultName: tr('nav.calendar'),
+        await writeCalendarFeeds((feeds) => {
+            const next = addCalendarFeed(feeds, {
+                id: generateUUID(),
+                name: newCalendarName,
+                url: newCalendarUrl,
+                defaultName: tr('nav.calendar'),
+            });
+            if (!next) return null;
+            setNewCalendarName('');
+            setNewCalendarUrl('');
+            return next;
         });
-        if (!next) return;
-
-        setExternalCalendars(next);
-        setNewCalendarName('');
-        setNewCalendarUrl('');
-        await saveExternalCalendars(next);
-        await updateSettings({ externalCalendars: next });
     };
 
     const handleChooseLocalCalendar = async () => {
@@ -427,19 +436,18 @@ export function CalendarSettingsScreen() {
             const asset = result.assets[0];
             if (!asset?.uri) return;
 
-            const next = addCalendarFile(externalCalendars, {
-                id: generateUUID(),
-                name: newCalendarName,
-                fileName: asset.name,
-                uri: asset.uri,
-                defaultName: tr('nav.calendar'),
+            await writeCalendarFeeds((feeds) => {
+                const next = addCalendarFile(feeds, {
+                    id: generateUUID(),
+                    name: newCalendarName,
+                    fileName: asset.name,
+                    uri: asset.uri,
+                    defaultName: tr('nav.calendar'),
+                });
+                setNewCalendarName('');
+                setNewCalendarUrl('');
+                return next;
             });
-
-            setExternalCalendars(next);
-            setNewCalendarName('');
-            setNewCalendarUrl('');
-            await saveExternalCalendars(next);
-            await updateSettings({ externalCalendars: next });
             showToast(calendarSettingsToasts(tr, t).localFileAdded());
         } catch (error) {
             console.error(error);
@@ -448,27 +456,17 @@ export function CalendarSettingsScreen() {
     };
 
     const handleToggleCalendar = async (id: string, enabled: boolean) => {
-        const next = setCalendarFeedEnabled(externalCalendars, id, enabled);
-        setExternalCalendars(next);
-        await saveExternalCalendars(next);
-        await updateSettings({ externalCalendars: next });
+        await writeCalendarFeeds((feeds) => setCalendarFeedEnabled(feeds, id, enabled));
     };
 
     const handleCalendarColorChange = async (id: string, color: string | undefined) => {
-        // `undefined` is the Auto swatch: drop the pick so the feed hint or
-        // the assigned default applies again (#974).
-        const next = setCalendarFeedColor(externalCalendars, id, color);
-        if (!next) return;
-        setExternalCalendars(next);
-        await saveExternalCalendars(next);
-        await updateSettings({ externalCalendars: next });
+
+
+        await writeCalendarFeeds((feeds) => setCalendarFeedColor(feeds, id, color));
     };
 
     const handleRemoveCalendar = async (id: string) => {
-        const next = removeCalendarFeed(externalCalendars, id);
-        setExternalCalendars(next);
-        await saveExternalCalendars(next);
-        await updateSettings({ externalCalendars: next });
+        await writeCalendarFeeds((feeds) => removeCalendarFeed(feeds, id));
     };
 
     const handleTestFetch = async () => {
@@ -503,7 +501,7 @@ export function CalendarSettingsScreen() {
         <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
             <SettingsTopBar title={t('settings.calendar')} />
             <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
-                {/* Push tasks to calendar */}
+                {                            }
                 <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginBottom: 16 }]}>
                     <CollapsibleSettingHeader
                         title={tr('settings.calendarMobile.pushTasksToCalendar')}

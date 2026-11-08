@@ -6,13 +6,14 @@ const mocks = vi.hoisted(() => ({
   activateWatchConnectivity: vi.fn(async () => undefined),
   addPendingWatchCaptureListener: vi.fn((_listener: () => void) => ({ remove: vi.fn() })),
   updateWatchApplicationContext: vi.fn(async (_context: unknown) => undefined),
-  subscribeStore: vi.fn(() => () => undefined),
+  subscribeStore: vi.fn((_listener: () => void) => () => undefined),
+  buildWidgetPayload: vi.fn(() => ({ sections: [] })),
+  state: { tasks: [], projects: [], sections: [], areas: [], people: [], settings: {} } as Record<string, unknown>,
 }));
 
 vi.mock('@mindwtr/core', async () => {
   const actual = await vi.importActual<typeof import('@mindwtr/core')>('@mindwtr/core');
-  const state = { tasks: [], projects: [], sections: [], areas: [], people: [], settings: {} };
-  return { ...actual, useTaskStore: { getState: () => state, subscribe: mocks.subscribeStore } };
+  return { ...actual, useTaskStore: { getState: () => mocks.state, subscribe: mocks.subscribeStore } };
 });
 vi.mock('react-native', async () => {
   const actual = await vi.importActual<typeof import('react-native')>('react-native');
@@ -28,8 +29,8 @@ vi.mock('@/lib/app-log', () => ({ logInfo: vi.fn(async () => undefined), logWarn
 vi.mock('@/lib/pomodoro-controller', () => ({
   mobilePomodoroController: { getSnapshot: () => ({}), subscribe: () => () => undefined },
 }));
-vi.mock('@/lib/focus-widget-filter', () => ({ getFocusWidgetFilter: () => undefined }));
-vi.mock('@/lib/widget-data', () => ({ buildWidgetPayload: () => ({ sections: [] }) }));
+vi.mock('@/lib/focus-widget-filter', () => ({ getFocusWidgetFilter: () => undefined, focusWidgetFilterKey: () => 'none' }));
+vi.mock('@/lib/widget-data', () => ({ buildWidgetPayload: mocks.buildWidgetPayload }));
 vi.mock('@/lib/watch-snapshot', () => ({
   buildWatchApplicationContext: () => ({ focus: [], pomodoro: { phase: 'focus', isRunning: false } }),
   watchPomodoroPublicationKey: () => 'idle',
@@ -48,9 +49,7 @@ function Harness({ canonicalDataReady }: { canonicalDataReady: boolean }) {
 describe('useRootLayoutWatch', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  // The Watch keeps the last Focus list it was sent, and its capture wake-up
-  // drains the queue. Neither may run on the startup snapshot. A wake-up
-  // missed before then is harmless: its capture waits as a queue file.
+
   it('does not publish to the Watch or listen for captures before canonical data', async () => {
     let tree!: renderer.ReactTestRenderer;
     await act(async () => { tree = renderer.create(<Harness canonicalDataReady={false} />); });
@@ -74,6 +73,60 @@ describe('useRootLayoutWatch', () => {
     await vi.waitFor(() => expect(mocks.updateWatchApplicationContext).toHaveBeenCalledTimes(2));
     expect(mocks.updateWatchApplicationContext).toHaveBeenNthCalledWith(2, firstContext);
     expect(onPendingCapture.mock.invocationCallOrder[0]).toBeLessThan(mocks.updateWatchApplicationContext.mock.invocationCallOrder[1]);
+    act(() => tree.unmount());
+  });
+
+
+  it('rebuilds the Watch context only when its data changes', async () => {
+    let tree!: renderer.ReactTestRenderer;
+    await act(async () => { tree = renderer.create(<Harness canonicalDataReady />); });
+    await vi.waitFor(() => expect(mocks.updateWatchApplicationContext).toHaveBeenCalledOnce());
+    expect(mocks.buildWidgetPayload).toHaveBeenCalledOnce();
+    const notify = mocks.subscribeStore.mock.calls[0][0];
+
+    act(() => notify());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+    expect(mocks.buildWidgetPayload).toHaveBeenCalledOnce();
+
+    mocks.state = { ...mocks.state, tasks: [] };
+    act(() => notify());
+    await vi.waitFor(() => expect(mocks.buildWidgetPayload).toHaveBeenCalledTimes(2));
+    act(() => tree.unmount());
+  });
+
+
+  it('rebuilds once a timed start later today has arrived', async () => {
+    mocks.state = { ...mocks.state, tasks: [{ id: 't1', startTime: new Date(Date.now() + 300).toISOString() }] };
+    let tree!: renderer.ReactTestRenderer;
+    await act(async () => { tree = renderer.create(<Harness canonicalDataReady />); });
+    await vi.waitFor(() => expect(mocks.buildWidgetPayload).toHaveBeenCalledOnce());
+    const notify = mocks.subscribeStore.mock.calls[0][0];
+
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+    act(() => notify());
+    await vi.waitFor(() => expect(mocks.buildWidgetPayload).toHaveBeenCalledTimes(2));
+    act(() => tree.unmount());
+  });
+
+
+  it('rebuilds once a timed review has come due', async () => {
+    mocks.state = {
+      ...mocks.state,
+      projects: [{ id: 'p1', title: 'Project', status: 'active', isSequential: true }],
+      tasks: [
+        { id: 'waiting', projectId: 'p1', status: 'waiting', reviewAt: new Date(Date.now() + 300).toISOString() },
+        { id: 'today', projectId: 'p1', status: 'next', dueDate: new Date().toISOString() },
+      ],
+    };
+    let tree!: renderer.ReactTestRenderer;
+    await act(async () => { tree = renderer.create(<Harness canonicalDataReady />); });
+    await vi.waitFor(() => expect(mocks.buildWidgetPayload).toHaveBeenCalledOnce());
+    const notify = mocks.subscribeStore.mock.calls[0][0];
+
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+    act(() => notify());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+    expect(mocks.buildWidgetPayload).toHaveBeenCalledTimes(2);
     act(() => tree.unmount());
   });
 });

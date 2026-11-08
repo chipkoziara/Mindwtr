@@ -28,6 +28,7 @@ import {
     allowedEnglishMirrorKeysByLocale,
     englishResidueWords,
     hasTranslatableEnglishText,
+    hasMixedEnglishText,
     isAllowedEnglishMirrorKey,
     isAllowedEnglishResidueKey,
     missingSlashCommandTokens,
@@ -36,12 +37,7 @@ import {
 import { i18nTemplateSlots } from './index';
 import { LOCALES, isEnglishResidueChecked, isMixedEnglishChecked, type Locale } from './i18n-locales';
 
-// The one hand-kept binding left in this file: LOCALES (i18n-locales.ts) describes each
-// locale's mode/translatedKeyFloor/nonLatin, but the concrete translation object still has to come
-// from a real static import — there's no way to turn a string key into an imported binding
-// without one. Every other roster this file used to hand-keep (fullParityLocales,
-// overrideLocales, nonLatinOverrideLocales, overrideLocaleCoverageFloors, shippedLocales) was
-// an independent list of the same locale set and is now derived from LOCALES below.
+
 const translationsByLocale: Record<Locale, Record<string, string>> = {
     zh: zhHans, 'zh-Hant': zhHant,
     ar: arOverrides, cs: csOverrides, da: daOverrides, de: deOverrides, es: esOverrides, fa: faOverrides, fr: frOverrides,
@@ -51,8 +47,8 @@ const translationsByLocale: Record<Locale, Record<string, string>> = {
 
 const englishKeyCount = Object.keys(en).length;
 const locales = Object.entries(LOCALES) as Array<[Locale, (typeof LOCALES)[Locale]]>;
-// Full parity is the 'all' commitment, not the load mode: da, fa, and sv load as 'overrides' but
-// are maintained at every key (see i18n-locales.ts).
+
+
 const fullParityLocales = locales.filter(([, descriptor]) => descriptor.translatedKeyFloor === 'all');
 const countFloorLocales = locales.filter(([, descriptor]) => typeof descriptor.translatedKeyFloor === 'number');
 const nonLatinOverrideLocales = locales.filter(([, descriptor]) => isMixedEnglishChecked(descriptor, englishKeyCount));
@@ -84,6 +80,12 @@ const pomodoroAlertSettingsKeys = [
 ] as const;
 
 describe('locale parity', () => {
+    it('declares the shared translations to the React Native iOS locale resolver', () => {
+        const config = JSON.parse(readFileSync(new URL('../../../../apps/mobile/app.json', import.meta.url), 'utf8'));
+        expect(config.expo.ios.infoPlist.CFBundleLocalizations.slice().sort())
+            .toEqual(SUPPORTED_LANGUAGES.map((code) => code === 'zh' ? 'zh-Hans' : code).sort());
+    });
+
     it('declares the shared translations to the native iOS locale resolver', () => {
         const plist = readFileSync(new URL('../../../../apps/ios-native/App/Info.plist', import.meta.url), 'utf8');
         const localizations = plist.match(/<key>CFBundleLocalizations<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1] ?? '';
@@ -123,8 +125,8 @@ describe('locale parity', () => {
     it.each(countFloorLocales)('keeps %s translated-key count from silently regressing', (lang, descriptor) => {
         const translatedKeys = Object.keys(translationsByLocale[lang]).length;
         const coverage = ((translatedKeys / englishKeyCount) * 100).toFixed(1);
-        // The floor is a count, not a percentage, so growing en.ts can never fail this — only
-        // deleting a translation can. The percentage is still worth seeing, so report it here.
+
+
         expect(
             translatedKeys,
             `${lang} translates ${translatedKeys} of ${englishKeyCount} English keys (${coverage}%); floor is ${descriptor.translatedKeyFloor}. Raise the floor in i18n-locales.ts when translations land; never lower it.`,
@@ -209,19 +211,7 @@ describe('locale parity', () => {
         expect(generatedKeys).toEqual([]);
     });
 
-    // A translation can be fluent, idiomatic, reviewed, and still silently broken if it drops
-    // an interpolation slot: `calendar.searchMatches` rendered as "Suchtreffer" instead of
-    // "{count} Treffer in dieser Ansicht" loses the number with nothing to show for it, and no
-    // other check here can see it — key presence passes, mixed-English passes, the mirrored-
-    // English check passes because the value genuinely is German. Compared as SETS, so an
-    // invented slot the English source does not have fails too: that one renders as literal
-    // "{{whatever}}" on screen, because formatI18nTemplate leaves unknown names untouched.
-    //
-    // Both brace styles count, via the same pattern formatI18nTemplate fills them with, since
-    // en.ts uses `{{count}}` for most keys and bare `{count}` for a handful.
-    //
-    // No allow-list: a slot is machinery, not prose. Word order around it is the translator's
-    // to choose, and the slot itself is never the untranslatable part.
+
     it.each(locales)('keeps interpolation slots intact in %s', (lang) => {
         const translations = translationsByLocale[lang];
         const mismatched = Object.keys(translations)
@@ -238,10 +228,7 @@ describe('locale parity', () => {
         expect(mismatched).toEqual([]);
     });
 
-    // The Latin-script half of the same problem. See englishResidueWords in locale-quality.ts
-    // for the signal and the measured false-positive check; in short, a value that still
-    // carries an English function word from its own English source is a substituted English
-    // sentence, not a translation. Reported with the offending words so the fix is obvious.
+
     it.each(latinOverrideLocales)('does not ship word-substituted English in %s', (lang) => {
         const translations = translationsByLocale[lang];
         const substituted = Object.keys(translations)
@@ -254,13 +241,11 @@ describe('locale parity', () => {
 
     it.each(nonLatinOverrideLocales)('does not ship mixed English fragments in %s', (lang) => {
         const translations = translationsByLocale[lang];
-        const mixedEnglish = Object.keys(translations).filter((key) => hasTranslatableEnglishText(translations[key]));
+        const mixedEnglish = Object.keys(translations).filter((key) => hasMixedEnglishText(lang, key, translations[key], en[key]));
         expect(mixedEnglish).toEqual([]);
     });
 
-    // Parser syntax is the same in every language, and the help copy is where users learn it.
-    // Ten locales kept listing the pre-`/* focus` token set after en.ts grew, and fr rewrote
-    // the self-hosted path — both invisible to every check above. See slashCommandTokens.
+
     it.each(locales)('keeps every slash command token from the English source in %s', (lang) => {
         const translations = translationsByLocale[lang];
         const dropped = Object.keys(translations)
@@ -271,8 +256,7 @@ describe('locale parity', () => {
         expect(dropped).toEqual([]);
     });
 
-    // A help string that quotes a button by its English label while the button's own key is
-    // translated points the user at a label that is not on screen. See quotedEnglishLabels.
+
     it.each(locales)('quotes button labels by their translated text in %s', (lang) => {
         const translations = translationsByLocale[lang];
         const stale = Object.keys(translations)

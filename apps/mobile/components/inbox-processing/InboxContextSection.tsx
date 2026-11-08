@@ -60,8 +60,8 @@ export function InboxContextSection({
     tagSuggestions: tagCopilotSuggestions,
   });
   const tokenPlaceholder = placeholder ?? t('inbox.addContextPlaceholder');
-  // When only one of the two is on screen, an unprefixed entry belongs to that
-  // one — otherwise the shared prefix rule would file a bare tag as a context.
+
+
   const addToken = () => addCustomContextMobile(addKind);
   const suggestedContextsLabel = `${t('copilot.suggested')} ${t('nav.contexts').toLowerCase()}`;
   const suggestedTagsLabel = `${t('copilot.suggested')} ${t('taskEdit.tagsLabel').toLowerCase()}`;
@@ -69,7 +69,9 @@ export function InboxContextSection({
   return (
     <View style={[styles.singleSection, { borderBottomColor: tc.border }]}>
       <Text style={[styles.stepQuestion, { color: tc.text }]}>
-        {showContextsField ? t('taskEdit.contextsLabel') : t('taskEdit.tagsLabel')}
+        {showContextsField && showTagsField
+          ? t('filters.contexts')
+          : showContextsField ? t('taskEdit.contextsLabel') : t('taskEdit.tagsLabel')}
         {showContextsField && showTagsField ? ` ${t('inbox.selectMultipleHint')}` : ''}
       </Text>
       {showContextsField && selectedContexts.length > 0 && (

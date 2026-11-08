@@ -1,24 +1,29 @@
+import { formatRecoverySnapshotLabel } from './recovery-snapshot-names';
 import { strToU8, zipSync } from 'fflate';
 import { bytesToBase64 } from './base64-bytes';
 import { createImportDiagnostics, formatImportDiagnostic } from './import-diagnostics';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_BACKUP_SOURCE_BYTES, serializeBackupData, validateBackupJson } from './backup-transfer';
-import { runSerializedSyncDocumentWriteOperation } from './data-transfer-transaction';
+import { runSerializedSyncDocumentOperation, runSerializedSyncDocumentWriteOperation } from './data-transfer-transaction';
 import { createMockArea, createMockProject, createMockSection } from './sync-test-utils';
 import { formatI18nTemplate, getTranslator } from './i18n';
+import { consoleLogger, setLogger, type LogPayload } from './logger';
 import { applyImportSource, parseImportSource } from './import-runner';
 import {
-    buildNativeBackupDocumentResult, buildNativeBackupSnapshotRestoreConfirmation, commitNativeBackupDocument,
-    inspectNativeBackupDocument, prepareNativeBackupDocument, readNativeBackupDocumentOutcome,
+    buildNativeBackupDocumentFailure, buildNativeBackupDocumentResult, buildNativeBackupNoUndoConfirmation, buildNativeBackupSnapshotRestoreConfirmation, commitNativeBackupDocument,
+    inspectNativeBackupDocument, nativeBackupDocumentWarningsHeld, prepareNativeBackupDocument, readNativeBackupDocumentOutcome,
     type NativeBackupDocumentPrepareInput, type NativeBackupOperationReference,
 } from './native-backup-document';
 import { loadNativeRequestReceipts, NativeReceiptSqliteAdapter, resetNativeRequestReceipts } from './native-request-receipts';
 import { openScratchSqlite } from './screen-parity.replay';
 import { SqliteAdapter, type SqliteClient } from './sqlite-adapter';
-import { resetForTests, setStorageAdapter, useTaskStore } from './store';
+import { flushPendingSave, resetForTests, setStorageAdapter, useTaskStore } from './store';
 import type { AppData, Task } from './types';
 
 const AT = '2026-10-04T12:00:00.000Z';
@@ -27,6 +32,10 @@ const NAME = 'data.2026-10-04T12-00-00.000.snapshot.json';
 const metadata = { fileName: 'owned.json', lastModified: Date.parse(AT), appVersion: '1.3.4' };
 const reference: NativeBackupOperationReference = { id: ID, sha256: 'a'.repeat(64), byteCount: 420 };
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+const stored = (warnings: readonly string[]) => createImportDiagnostics(warnings, 'warning')
+    .map((diagnostic) => `${diagnostic.code}:${typeof diagnostic.params.count === 'number' ? diagnostic.params.count : 1}`);
+const small = (reply: unknown) => { const json = JSON.stringify(reply); expect(json.length).toBeLessThan(4096); expect(json).not.toContain('AAAA'); };
 const task = (id: string, extra: Partial<Task> = {}): Task => ({ id, title: id, status: 'next', contexts: [], tags: [],
     createdAt: AT, updatedAt: AT, rev: 1, ...extra });
 const original: AppData = { tasks: [task('visible'), task('history', { status: 'done', completedAt: AT }),
@@ -91,7 +100,7 @@ describe('native immutable backup inspection and models', () => {
     });
     it('enforces actual UTF-8 bytes including multibyte and surrogate pairs', () => {
         const ascii = ' '.repeat(MAX_BACKUP_SOURCE_BYTES - 2) + '{}';
-        // At the exact cap parsing reaches ordinary JSON diagnostics, rather than size refusal.
+
         expect(inspectNativeBackupDocument(ascii, metadata, t).errorMessage).not.toBe(t('settings.backupDiagnostics.tooLarge', { maxSizeMb: 128 }));
         expect(inspectNativeBackupDocument('🦉'.repeat(MAX_BACKUP_SOURCE_BYTES / 4 + 1), metadata, t).errorMessage)
             .toBe(t('settings.backupDiagnostics.tooLarge', { maxSizeMb: 128 }));
@@ -100,12 +109,22 @@ describe('native immutable backup inspection and models', () => {
         const reply = { version: 1 as const, operation: 'merge' as const, snapshotName: NAME, added: 2, updated: 3 };
         expect(buildNativeBackupDocumentResult(reply, t)).toEqual({ title: t('settings.mergeBackup'),
             message: `${t('settings.mergeBackupSummary', { addedCount: 2, updatedCount: 3 })}\n${t('settings.backupMobile.recoverySnapshotSaved', { snapshotName: NAME })}`,
-            undoLabel: t('settings.undoImport'), doneLabel: t('common.done') });
+            undoLabel: t('settings.undoImport'), doneLabel: t('common.done'), durationMs: 5600 });
         const confirmation = buildNativeBackupSnapshotRestoreConfirmation(NAME, t);
         expect(confirmation.title).toBe(t('settings.undoImportConfirmTitle'));
         expect(confirmation.message).toContain('Anything you changed since is rolled back too');
         expect(buildNativeBackupDocumentResult({ ...reply, operation: 'restore', added: 0, updated: 0 }, t).message)
             .toBe(t('settings.backupMobile.recoverySnapshotRestored'));
+    });
+    it('asks RN\'s Recovery snapshots row question for a plain restore, with the same label', () => {
+        const undo = buildNativeBackupSnapshotRestoreConfirmation(NAME, t);
+        const restore = buildNativeBackupSnapshotRestoreConfirmation(NAME, t, false);
+        const label = formatRecoverySnapshotLabel(NAME);
+        expect(restore).toEqual({ title: t('settings.backupMobile.restoreRecoverySnapshot'),
+            message: t('settings.backupMobile.restoreSnapshotReplaceLocalData', { snapshotName: label }),
+            confirmLabel: t('markdown.referenceRestore'), cancelLabel: t('common.cancel') });
+        expect(undo.message).toBe(t('settings.undoImportConfirm', { snapshotName: label }));
+        expect(() => buildNativeBackupSnapshotRestoreConfirmation('data.bad.snapshot.json', t, false)).toThrow('INVALID_INPUT');
     });
 });
 
@@ -163,7 +182,7 @@ describe('native frozen backup plan over actual SQLite', () => {
         const before = await env.state(); resetNativeRequestReceipts();
         await loadNativeRequestReceipts(env.sql.client, { durableCommands: ['backupDocument'] });
         const cold = new NativeReceiptSqliteAdapter(env.client, { rejectConcurrentWrites: true });
-        await cold.ensureSchema(); // Native boot establishes schema before journal replay.
+        await cold.ensureSchema();
         setStorageAdapter(cold); env.writes.length = 0;
         expect(await commitNativeBackupDocument(cold, reference, prepared.planJSON, NAME)).toEqual(first);
         expect(env.writes).toEqual([]); expect(await env.state()).toEqual(before);
@@ -180,7 +199,7 @@ describe('native frozen backup plan over actual SQLite', () => {
         const env = await open(); const current = await env.adapter.getData();
         const prepared = await prepareNativeBackupDocument(env.adapter, input(serializeBackupData(current)));
         const plan = JSON.parse(prepared.planJSON);
-        // Exercise a frozen exact no-op independently of merge's tie-resolution counts.
+
         plan.data = clone(plan.expectedCurrent); plan.reply.added = 0; plan.reply.updated = 0;
         const noOpPlan = JSON.stringify(plan);
         const before = await env.adapter.getData();
@@ -222,7 +241,7 @@ describe('native frozen backup plan over actual SQLite', () => {
         expect(restored.recoveryJSON).toBeNull();
         const plan = JSON.parse(restored.planJSON);
         const expected = applyImportSource('backup', plan.expectedCurrent, parseImportSource('backup', { text: merged.recoveryJSON!, ...metadata }).data!).data;
-        // Restore revisions/timestamps are clock-derived; compare at a fixed clock below through final assertions.
+
         expect(plan.data.tasks.find((item: Task) => item.id === 'after-merge').deletedAt).toBeTruthy();
         expect(plan.data.tasks.find((item: Task) => item.id === later.tasks[0].id).rev).toBeGreaterThan(30);
         expect(plan.data.tasks.find((item: Task) => item.id === 'visible').title).toBe(expected.tasks.find((item) => item.id === 'visible')?.title);
@@ -288,7 +307,315 @@ const csvFile = (headers: string[], rows: string[][]) => [headers, ...rows].map(
 const csvInput = (text = 'Title,Project,Section,Area,Checklist,ID\n日本語 🦉,Launch,Now,Work,[x] First|[ ] Next,csv-task'): NativeBackupDocumentPrepareInput =>
     ({ ...input(), mode: 'csv', text: bytesToBase64(strToU8(text)), metadata: { ...metadata, fileName: 'owned.csv' } });
 
+describe('native backup commit replayed after process death (pass D1a, gate G-B1)', () => {
+
+
+    const due = (): AppData => ({ ...clone(original), tasks: [...clone(original).tasks,
+        task('scheduled', { status: 'inbox', startTime: new Date(Date.now() - 86_400_000).toISOString() })] });
+    const restart = async (adapter: NativeReceiptSqliteAdapter, recoveryLoad: boolean) => {
+        resetForTests();
+        setStorageAdapter(adapter);
+        await useTaskStore.getState().fetchData({ throwOnError: true, ...(recoveryLoad ? { recoveryLoad: true } : {}) });
+        await flushPendingSave();
+    };
+
+    it('crashes before the SQL commit with a due scheduled task: the recovery boot replays it onto the document it was prepared against', async () => {
+        const env = await open(due());
+        const prepared = await prepareNativeBackupDocument(env.adapter, input());
+        await restart(env.adapter, true);
+        expect(await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME)).toMatchObject({ operation: 'merge', snapshotName: NAME });
+        expect((await env.adapter.getData()).tasks.find((item) => item.id === 'new')).toBeDefined();
+    });
+
+    it('without the recovery boot the same replay is refused as stale: a normal load\'s maintenance changed the document first', async () => {
+        const env = await open(due());
+        const prepared = await prepareNativeBackupDocument(env.adapter, input());
+        await restart(env.adapter, false);
+        expect((await env.adapter.getData()).tasks.find((item) => item.id === 'scheduled')?.status).toBe('next');
+        await expect(commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME)).rejects.toThrow('STALE_REVISION:');
+    });
+});
+
+describe('an import whose Undo could not be admitted is refused before COMMIT (D1b review P1)', () => {
+    const MIB = 1024 * 1024;
+    const pageBytes = async (client: SqliteClient) => {
+        const [count] = await client.all<{ page_count: number }>('PRAGMA page_count');
+        const [size] = await client.all<{ page_size: number }>('PRAGMA page_size');
+        return count.page_count * size.page_size;
+    };
+
+    it('refuses at prepare when the source and the library together pass the limit, before parsing anything', async () => {
+        const env = await open(); const read = vi.spyOn(env.adapter, 'getData');
+        await expect(prepareNativeBackupDocument(env.adapter, { ...csvInput(), admission: { sourceBytes: 10, maxTransferBytes: 4096 } })).rejects.toThrow('TOO_LARGE:');
+        expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
+        await expect(prepareNativeBackupDocument(env.adapter, { ...csvInput(), admission: { sourceBytes: 10, maxTransferBytes: 12 * MIB } })).resolves.toMatchObject({ planJSON: expect.any(String) });
+    });
+
+    it('admits again inside the document lane: a write queued before it that grows the library past the limit is refused (D1c change 1)', async () => {
+        const env = await open();
+        const grown: AppData = { ...clone(original), tasks: [...clone(original).tasks,
+            ...Array.from({ length: 200 }, (_, index) => task(`grown-${index}`, { description: 'g'.repeat(2048) }))] };
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+
+        const queued = runSerializedSyncDocumentWriteOperation(async () => { await gate; await env.adapter.saveData(grown); });
+
+        const source = input(serializeBackupData(incoming), 'restore');
+        const sourceBytes = strToU8(source.text).length;
+        const maxTransferBytes = await env.adapter.libraryBytes() + sourceBytes + 64 * 1024;
+        const prepared = prepareNativeBackupDocument(env.adapter, { ...source, admission: { sourceBytes, maxTransferBytes } });
+        prepared.catch(() => undefined);
+        release(); await queued;
+        expect(await env.adapter.libraryBytes() + sourceBytes).toBeGreaterThan(maxTransferBytes);
+        await expect(prepared).rejects.toThrow('TOO_LARGE:');
+    });
+
+    it('a snapshot restore freezes the limit as its result library\'s bound: a restore whose library would pass it is refused, data and receipt rolled back (D1c change 1)', async () => {
+
+        const snapshotData: AppData = { ...clone(original), tasks: Array.from({ length: 300 }, (_, index) =>
+            task(`snapshot-${index}`, { title: `alpha beta gamma ${index}`, description: Array.from({ length: 120 }, (_, word) => `w${index}x${word}`).join(' ') })) };
+        const text = serializeBackupData(snapshotData);
+        const sourceBytes = strToU8(text).length;
+        const env = await open();
+        const maxTransferBytes = sourceBytes + await env.adapter.libraryBytes();
+        const prepared = await prepareNativeBackupDocument(env.adapter, { ...input(text, 'restore'), admission: { sourceBytes, maxTransferBytes } });
+        expect(prepared.recoveryJSON).toBeNull();
+        expect(JSON.parse(prepared.planJSON).maxLibraryBytes).toBe(maxTransferBytes);
+        const before = await env.state();
+        await expect(commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME)).rejects.toThrow('TOO_LARGE:');
+        expect(await env.state()).toEqual(before);
+
+        const roomy = await open();
+        const fits = await prepareNativeBackupDocument(roomy.adapter, { ...input(text, 'restore'), admission: { sourceBytes, maxTransferBytes: 512 * MIB } });
+        await expect(commitNativeBackupDocument(roomy.adapter, reference, fits.planJSON, NAME)).resolves.toMatchObject({ operation: 'restore' });
+        expect(await roomy.adapter.libraryBytes()).toBeGreaterThan(maxTransferBytes);
+    });
+
+    it('runs the 60 000-row CSV whose library would pass 12 MiB without Undo, as RN runs it (large-library pass b)', async () => {
+        const rows = Array.from({ length: 60_000 }, (_, index) => `Task ${index}`);
+        const text = `Title\n${rows.join('\n')}\n`;
+        expect(text.length).toBeLessThan(MIB);
+        const source = { ...csvInput(text), admission: { sourceBytes: text.length, maxTransferBytes: 12 * MIB } };
+        const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, source);
+
+        expect(prepared).toMatchObject({ undo: false });
+        expect(prepared.recoveryJSON).toEqual(expect.any(String));
+        const plan = JSON.parse(prepared.planJSON);
+        expect(plan.reply).not.toHaveProperty('undo');
+        expect(plan).not.toHaveProperty('maxLibraryBytes');
+        expect(plan.undoLibraryBytes).toBe(12 * MIB - strToU8(prepared.recoveryJSON!).length);
+        const reply = await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        expect(reply).toMatchObject({ operation: 'csv', undo: false });
+        expect((await env.state()).tasks).toHaveLength(original.tasks.length + 60_000);
+        expect(await env.adapter.libraryBytes()).toBeGreaterThan(12 * MIB - strToU8(prepared.recoveryJSON!).length);
+
+        const model = buildNativeBackupDocumentResult(reply, t);
+        expect(model.undoLabel).toBe('');
+        expect(model.message).toContain(t('settings.backupMobile.undoUnavailableResult'));
+        expect(await readNativeBackupDocumentOutcome(env.adapter, reference, prepared.planJSON, NAME)).toMatchObject({ undo: false });
+
+        const roomy = await open(); const fits = await prepareNativeBackupDocument(roomy.adapter, { ...source, admission: { sourceBytes: text.length, maxTransferBytes: 512 * MIB } });
+        expect(fits).toMatchObject({ undo: true });
+        expect(JSON.parse(fits.planJSON).undoLibraryBytes).toBe(512 * MIB - strToU8(fits.recoveryJSON!).length);
+        const kept = await commitNativeBackupDocument(roomy.adapter, reference, fits.planJSON, NAME);
+        expect(kept).not.toHaveProperty('undo');
+        expect(buildNativeBackupDocumentResult(kept, t).undoLabel).toBe(t('settings.undoImport'));
+    }, 120_000);
+
+    it('keeps Undo for L1\'s restore, which the admission before pass b kept: 3 MiB of emoji rows over 3 MiB at 15 MiB (large-library pass b)', async () => {
+        const emoji = (prefix: string): AppData => {
+            const row = (index: number) => task(`${prefix}${index} 🦉`, { description: 'aé🦉日本語 '.repeat(40) });
+            const per = strToU8(JSON.stringify(row(0), null, 2)).length + 8;
+            return { ...clone(original), tasks: Array.from({ length: Math.round(3 * MIB / per) }, (_, index) => row(index)) };
+        };
+        const env = await open();
+        const first = await prepareNativeBackupDocument(env.adapter, input(serializeBackupData(emoji('a')), 'replace'));
+        await commitNativeBackupDocument(env.adapter, reference, first.planJSON, NAME);
+        const text = serializeBackupData(emoji('b'));
+        const second = { id: '22222222-2222-4222-8222-222222222222', sha256: 'b'.repeat(64), byteCount: 420 };
+        const prepared = await prepareNativeBackupDocument(env.adapter, { ...input(text, 'replace'), requestId: second.id,
+            admission: { sourceBytes: strToU8(text).length, maxTransferBytes: 15 * MIB } });
+        expect(prepared).toMatchObject({ undo: true });
+        const reply = await commitNativeBackupDocument(env.adapter, second, prepared.planJSON, NAME);
+        expect(reply).not.toHaveProperty('undo');
+
+        expect(strToU8(prepared.recoveryJSON!).length + await env.adapter.libraryBytes()).toBeLessThanOrEqual(15 * MIB);
+    }, 120_000);
+
+    it('a question asked on the estimate still keeps Undo when the real bytes fit, and a recovery snapshot past the limit alone never has Undo (large-library pass b)', async () => {
+        const text = serializeBackupData(incoming);
+        const sourceBytes = strToU8(text).length;
+        const probe = await prepareNativeBackupDocument((await open()).adapter, { ...input(text, 'merge'), admission: { sourceBytes, maxTransferBytes: 512 * MIB } });
+        const recoveryBytes = strToU8(probe.recoveryJSON!).length;
+
+        const tight = async (maxTransferBytes: number) => {
+            const env = await open();
+            const pages = vi.spyOn(env.adapter, 'libraryBytes').mockResolvedValue(0);
+            const prepared = await prepareNativeBackupDocument(env.adapter, { ...input(text, 'merge'), admission: { sourceBytes, maxTransferBytes } });
+            pages.mockRestore();
+            return { env, prepared, plan: JSON.parse(prepared.planJSON) };
+        };
+
+        const asked = await tight(recoveryBytes + 1);
+        expect(asked.prepared).toMatchObject({ undo: false });
+        expect(asked.plan.undoLibraryBytes).toBe(1);
+        expect(asked.plan.reply).not.toHaveProperty('undo');
+        const kept = await commitNativeBackupDocument(asked.env.adapter, reference, JSON.stringify({ ...asked.plan, undoLibraryBytes: 512 * MIB }), NAME);
+        expect(kept).not.toHaveProperty('undo');
+        expect(buildNativeBackupDocumentResult(kept, t).undoLabel).toBe(t('settings.undoImport'));
+
+        const over = await tight(recoveryBytes - 1);
+        expect(over.prepared).toMatchObject({ undo: false });
+        expect(over.plan).not.toHaveProperty('undoLibraryBytes');
+        expect(over.plan.reply.undo).toBe(false);
+        await expect(commitNativeBackupDocument(over.env.adapter, reference, over.prepared.planJSON, NAME)).resolves.toMatchObject({ undo: false });
+    });
+
+    it('a library that ends larger than the estimate still lands, and its result says Undo is not available (large-library pass b)', async () => {
+        const env = await open();
+        const text = serializeBackupData(incoming);
+        const prepared = await prepareNativeBackupDocument(env.adapter, { ...input(text, 'merge'), admission: { sourceBytes: strToU8(text).length, maxTransferBytes: 512 * MIB } });
+        expect(prepared).toMatchObject({ undo: true });
+
+        const plan = JSON.parse(prepared.planJSON);
+        plan.undoLibraryBytes = 1;
+        const planJSON = JSON.stringify(plan);
+        const reply = await commitNativeBackupDocument(env.adapter, reference, planJSON, NAME);
+        expect(reply).toMatchObject({ operation: 'merge', undo: false });
+        expect((await env.state()).tasks.map((item) => item.id)).toEqual(expect.arrayContaining(incoming.tasks.map((item) => item.id)));
+        const model = buildNativeBackupDocumentResult(reply, t);
+        expect(model.undoLabel).toBe('');
+        expect(model.message).toContain(t('settings.backupMobile.undoUnavailableResult'));
+        expect(await readNativeBackupDocumentOutcome(env.adapter, reference, planJSON, NAME)).toMatchObject({ undo: false });
+    });
+
+    it('an old plan\'s undo bound still refuses, a stored reply never drops a planned undo: false, and only false is a reply\'s undo', async () => {
+        const env = await open();
+        const text = serializeBackupData(incoming);
+        const prepared = await prepareNativeBackupDocument(env.adapter, { ...input(text, 'merge'), admission: { sourceBytes: strToU8(text).length, maxTransferBytes: 512 * MIB } });
+
+        const { undoLibraryBytes: _room, ...legacy } = JSON.parse(prepared.planJSON);
+        const before = await env.state();
+        await expect(commitNativeBackupDocument(env.adapter, reference, JSON.stringify({ ...legacy, maxLibraryBytes: 1 }), NAME))
+            .rejects.toThrow('TOO_LARGE: The imported library would be too large to undo');
+        expect(await env.state()).toEqual(before);
+        await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        const planned = JSON.parse(prepared.planJSON);
+        await expect(readNativeBackupDocumentOutcome(env.adapter, reference, JSON.stringify({ ...planned, reply: { ...planned.reply, undo: false } }), NAME))
+            .rejects.toThrow('SAVE_FAILED:');
+        expect(() => buildNativeBackupDocumentResult({ ...planned.reply, undo: true }, t)).toThrow('INVALID_INPUT:');
+        expect(() => buildNativeBackupDocumentResult({ version: 1, operation: 'restore', snapshotName: NAME, added: 0, updated: 0, undo: false }, t)).toThrow('INVALID_INPUT:');
+    });
+
+    it('the question before an operation without Undo uses its own words', () => {
+        expect(buildNativeBackupNoUndoConfirmation(t)).toEqual({ title: t('settings.backupMobile.undoUnavailableTitle'),
+            message: t('settings.backupMobile.undoUnavailableConfirm'), confirmLabel: t('settings.backupMobile.undoUnavailableContinue'),
+            cancelLabel: t('common.cancel') });
+    });
+
+    it('counts the receipt: data that fits and a receipt that crosses the limit are both rolled back', async () => {
+        const reply = { blob: 'r'.repeat(40_000) };
+        const payload = JSON.stringify(['backupDocument', 'merge', ID, 'a'.repeat(64)]);
+        const save = async (env: Awaited<ReturnType<typeof open>>, maxLibraryBytes: number) => {
+            const current = await env.adapter.getData();
+            return env.adapter.saveDocumentWithReceipt({ requestId: ID, payload, expectedCurrent: current,
+                data: { ...clone(current), tasks: [...clone(current).tasks, task('added')] }, reply, maxLibraryBytes });
+        };
+
+        const dry = await open(); let atInsert = 0; let atCommit = 0;
+        dry.hooks.run = async (statement) => {
+            if (statement.startsWith('INSERT INTO native_request_receipts')) atInsert = await pageBytes(dry.sql.client);
+            if (statement === 'COMMIT') atCommit = await pageBytes(dry.sql.client);
+        };
+        await save(dry, 512 * MIB);
+        expect(atCommit).toBeGreaterThan(atInsert);
+        const env = await open(); const before = await env.state();
+        await expect(save(env, atInsert)).rejects.toThrow('Document library exceeds the undo limit');
+        expect(await env.state()).toEqual(before);
+        const exact = await open();
+        await expect(save(exact, atCommit)).resolves.toMatchObject({ replayed: false });
+        expect(await exact.adapter.libraryBytes()).toBe(atCommit);
+    });
+});
+
+describe('a restore keeps this device\'s App Lock (D1a review 2, P1)', () => {
+    const locked = (): AppData => ({ ...clone(original), settings: { ...clone(original).settings, security: { mobileAppLockEnabled: true } } });
+    it.each([
+        ['replace', { mobileAppLockEnabled: false }],
+        ['replace', undefined],
+        ['restore', undefined],
+    ] as const)('%s with the backup\'s lock %o: the enabled lock survives the commit and a restart', async (operation, incomingLock) => {
+        const env = await open(locked());
+        const backup = clone(incoming); backup.settings = { ...backup.settings, ...(incomingLock ? { security: incomingLock } : {}) };
+        const prepared = await prepareNativeBackupDocument(env.adapter, input(serializeBackupData(backup), operation));
+        expect(JSON.parse(prepared.planJSON).data.settings.security).toEqual({ mobileAppLockEnabled: true });
+        await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        resetForTests(); setStorageAdapter(env.adapter);
+        await useTaskStore.getState().fetchData({ throwOnError: true });
+        await flushPendingSave();
+        expect(useTaskStore.getState().settings.security?.mobileAppLockEnabled).toBe(true);
+    });
+    it('a device without App Lock does not take it from the backup', async () => {
+        const env = await open();
+        const backup = clone(incoming); backup.settings = { ...backup.settings, security: { mobileAppLockEnabled: true } };
+        const prepared = await prepareNativeBackupDocument(env.adapter, input(serializeBackupData(backup), 'replace'));
+        expect(JSON.parse(prepared.planJSON).data.settings.security).toBeUndefined();
+    });
+});
+
+describe('native backup artifacts never hold a legacy AI key (D1a review P2-5)', () => {
+
+    const SENTINEL = 'sk-legacy-sentinel-5f2c9e';
+    it.each(['merge', 'replace'] as const)('%s: the plan, the recovery snapshot and the reply hold no key; the commit is not stale and drops it', async (operation) => {
+        const env = await open();
+        await env.sql.client.run("UPDATE settings SET data = json_set(data, '$.ai', json_object('enabled', 1, 'apiKey', ?)) WHERE id = 1", [SENTINEL]);
+        expect(JSON.stringify(await env.state())).toContain(SENTINEL);
+        const prepared = await prepareNativeBackupDocument(env.adapter, input(undefined, operation));
+        expect(prepared.planJSON).not.toContain(SENTINEL);
+        expect(prepared.recoveryJSON).not.toContain(SENTINEL);
+        const reply = await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        expect(JSON.stringify(reply)).not.toContain(SENTINEL);
+        expect(JSON.stringify(await env.state())).not.toContain(SENTINEL);
+    });
+    it.each(['merge', 'replace'] as const)('%s: a key inside the picked backup never reaches the plan or the saved settings', async (operation) => {
+        const env = await open();
+        const backup = clone(incoming); backup.settings = { ...backup.settings, ai: { enabled: true, apiKey: SENTINEL } as AppData['settings']['ai'] };
+        const text = JSON.stringify({ ...JSON.parse(serializeBackupData(backup)), settings: backup.settings });
+        expect(text).toContain(SENTINEL);
+        const prepared = await prepareNativeBackupDocument(env.adapter, input(text, operation));
+        expect(prepared.planJSON).not.toContain(SENTINEL);
+        expect(prepared.recoveryJSON).not.toContain(SENTINEL);
+        await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        expect(JSON.stringify(await env.state())).not.toContain(SENTINEL);
+    });
+});
+
 describe('native immutable Mindwtr CSV and ZIP import', () => {
+    it('retains safe localized CSV locations through persisted plans, commit and receipt replay', async () => {
+        const env = await open();
+        const source = csvInput('Title,Due Date,private-header\nprivate-title,private-date,private-cell');
+        const preview = inspectNativeBackupDocument(source.text, source.metadata, t, 'csv');
+        expect(preview.summary).toContain('row 1, column 3');
+        expect(preview.summary).toContain('row 2, column 2');
+        const prepared = await prepareNativeBackupDocument(env.adapter, source);
+        const plan = JSON.parse(prepared.planJSON);
+        expect(plan.reply.result.warnings).toEqual([
+            'unknown-columns:1 [csv-locations=0:1:3; omitted=0]',
+            'unmapped-date:1 [csv-locations=0:2:2; omitted=0]',
+        ]);
+        const reply = await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        resetNativeRequestReceipts();
+        await loadNativeRequestReceipts(env.sql.client, { durableCommands: ['backupDocument'] });
+        const replay = await readNativeBackupDocumentOutcome(env.adapter, reference, prepared.planJSON, NAME);
+        expect(replay).toEqual(reply);
+        const model = buildNativeBackupDocumentResult(replay!, t);
+        expect(model.message).toContain('1 unknown column(s) were ignored.');
+        expect(model.message).toContain('row 1, column 3');
+        expect(model.message).toContain('row 2, column 2');
+        expect(model.message).not.toContain('needed an adjustment');
+        expect(JSON.stringify([plan.reply, reply, replay, model])).not.toContain('private-');
+    });
+
     it.each([
         [1, '1 task was skipped because it was imported earlier and then deleted here; deletions are kept on re-import.'],
         [2, '2 tasks were skipped because they were imported earlier and then deleted here; deletions are kept on re-import.'],
@@ -350,17 +677,17 @@ describe('native immutable Mindwtr CSV and ZIP import', () => {
         const preview = inspectNativeBackupDocument(source.text, source.metadata, t, 'csv');
         for (const diagnostic of createImportDiagnostics(parsed.preview!.warnings, 'warning')) expect(preview.summary).toContain(formatImportDiagnostic(diagnostic, t));
         const prepared = await prepareNativeBackupDocument(env.adapter, source); const reply = JSON.parse(prepared.planJSON).reply;
-        expect(reply.result.warnings).toEqual(parsed.parsedData!.warnings);
+        expect(reply.result.warnings).toEqual(stored(parsed.parsedData!.warnings));
         const model = buildNativeBackupDocumentResult(reply, t); expect(model.title).toBe(t('settings.backupMobile.importComplete')); expect(model.undoLabel).toBe(t('settings.undoImport'));
         expect(model.message).toContain(t('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: 1 })); expect(model.message).toContain(NAME);
-        for (const diagnostic of createImportDiagnostics(reply.result.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
+        for (const diagnostic of createImportDiagnostics(parsed.parsedData!.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
     });
     it.each(['VGl0bGUs\n', 'VGl0bGUs_', 'TR==', 'TWF=', 'TQ=', '====', 'VGl0=bGU'])('rejects noncanonical binary transport %s before any adapter read/write', async (text) => {
         const env = await open(); const read = vi.spyOn(env.adapter, 'getData');
         await expect(prepareNativeBackupDocument(env.adapter, { ...csvInput(), text })).rejects.toThrow('INVALID_INPUT:');
         expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
     });
-    // Real 16 MiB boundary fixtures need headroom under coverage instrumentation.
+
     it('bounds decoded bytes before allocating and preserves the shared 8 MiB text limit inside the 16 MiB transport', async () => {
         const env = await open(); const read = vi.spyOn(env.adapter, 'getData');
         const tooLarge = 'A'.repeat(4 * Math.ceil((16 * 1024 * 1024 + 1) / 3));
@@ -370,11 +697,11 @@ describe('native immutable Mindwtr CSV and ZIP import', () => {
         const preview = inspectNativeBackupDocument(exactLimit, csvInput().metadata, t, 'csv'); expect(preview.valid).toBe(false); expect(preview.errorMessage).toBe(formatImportDiagnostic(parseImportSource('mindwtr-csv', { bytes: new Uint8Array(16 * 1024 * 1024), fileName: 'owned.csv' }).diagnostics.find((item) => item.severity === 'error')!, t));
         expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
     }, 15_000);
-    it('refuses complete over-64KiB warnings before returning a plan, with no discarded warnings or document writes', async () => {
-        const env = await open(); const read = vi.spyOn(env.adapter, 'getData');
+    it('stores a warning that once passed 64 KiB as its code: the reply stays small and the rule\'s text is gone', async () => {
+        const env = await open();
         const source = csvInput(csvFile(['Title','Recurrence'], [['Large warning', 'invalid rule ' + '私'.repeat(23_000)]]));
-        await expect(prepareNativeBackupDocument(env.adapter, source)).rejects.toThrow('CSV import result exceeds 64 KiB');
-        expect(read).toHaveBeenCalledTimes(1); expect(env.writes).toEqual([]);
+        const reply = JSON.parse((await prepareNativeBackupDocument(env.adapter, source)).planJSON).reply;
+        expect(reply.result.warnings).toContain('unsupported-recurrence:1'); expect(JSON.stringify(reply)).not.toContain('私'); expect(env.writes).toEqual([]);
     });
     it.each(['data','negative','fraction','extra','warning','overflow'] as const)('rejects malformed frozen CSV result %s before receipt operations', async (fault) => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, csvInput()); const plan = JSON.parse(prepared.planJSON);
@@ -396,6 +723,127 @@ describe('native immutable Mindwtr CSV and ZIP import', () => {
     it('refuses unsupported source format', () => expect(() => inspectNativeBackupDocument('', metadata, t, 'other' as 'csv')).toThrow('INVALID_INPUT:'));
 });
 
+
+describe('an import\'s stored warnings hold codes and counts, never the file\'s words (D1b review P2)', () => {
+    const S1 = 'TOKEN=sentinel-one-4be1'; const S2 = 'Sentinel Two 9c0d'; const S3 = 'sentinel-three-77aa'; const S4 = 'sentinel-four-d5e2';
+    const lines: LogPayload[] = [];
+    afterEach(() => { setLogger(consoleLogger); lines.length = 0; });
+    const swept = (text: string) => [S1, S2, S3, S4].filter((sentinel) => text.includes(sentinel));
+
+    it('an unsupported rule, a renamed project and archive entry names reach no plan reply, receipt or log line', async () => {
+        setLogger((payload) => { lines.push(payload); });
+        const base = clone(original); base.projects = [{ ...createMockProject('existing-project', AT), title: S2 }];
+        const env = await open(base);
+        const csv = csvFile(['Title', 'Project', 'Recurrence'], [['Rule task', S2, S1]]);
+        const archive = zipSync({ 'tasks.csv': strToU8(csv), [`${S3}.zip`]: zipSync({ 'inner.csv': strToU8('Title\nx') }) });
+        const source = { ...csvInput(), text: bytesToBase64(archive), metadata: { ...metadata, fileName: 'export.zip' } };
+        const prepared = await prepareNativeBackupDocument(env.adapter, source);
+        const reply = JSON.parse(prepared.planJSON).reply;
+        expect(reply.result.warnings.every((warning: string) => /^[a-z-]+:\d+$/u.test(warning))).toBe(true);
+        expect(reply.result.warnings).toContain('unsupported-recurrence:1');
+        expect(swept(JSON.stringify(reply))).toEqual([]);
+        await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        const receipts = await env.sql.client.all<{ reply: string; method: string }>('SELECT reply, method FROM native_request_receipts');
+        expect(swept(JSON.stringify(receipts))).toEqual([]);
+
+        const library = JSON.stringify(await env.sql.client.all('SELECT * FROM tasks')) + JSON.stringify(await env.sql.client.all('SELECT * FROM projects'));
+        expect(swept(library)).toEqual([S2]);
+
+        const live = buildNativeBackupDocumentResult(reply, t);
+        expect(live.message).toContain(S2);
+        expect(nativeBackupDocumentWarningsHeld()).toBe(false);
+
+        expect(swept(buildNativeBackupDocumentResult(reply, t).message)).toEqual([]);
+        expect(swept(JSON.stringify(lines))).toEqual([]);
+    });
+
+    it('an oversized archive entry is refused without its name in the preview, the parse result, the refusal or a log line', async () => {
+        setLogger((payload) => { lines.push(payload); });
+        const env = await open();
+        const archive = zipSync({ [`${S4}.csv`]: new Uint8Array(9 * 1024 * 1024).fill(65) }, { level: 9 });
+        const source = { ...csvInput(), text: bytesToBase64(archive), metadata: { ...metadata, fileName: 'export.zip' } };
+        const preview = inspectNativeBackupDocument(source.text, source.metadata, t, 'csv');
+        expect(preview.valid).toBe(false);
+        expect(swept(JSON.stringify(preview))).toEqual([]);
+        expect(swept(JSON.stringify(parseImportSource('mindwtr-csv', { bytes: archive, fileName: 'export.zip' })))).toEqual([]);
+        await expect(prepareNativeBackupDocument(env.adapter, source)).rejects.toThrow(expect.objectContaining({ message: expect.not.stringContaining(S4) }));
+        expect(swept(JSON.stringify(lines))).toEqual([]);
+    });
+
+
+    const LEGACY = [`Imported project "${S2}" was renamed to "${S2} (Todoist)" to avoid a title conflict.`, `Unsupported Recurrence rules: ${S1}.`];
+    const legacyPlan = async (env: Awaited<ReturnType<typeof open>>) => {
+        const plan = JSON.parse((await prepareNativeBackupDocument(env.adapter, todoistInput())).planJSON);
+        plan.reply.result.warnings = LEGACY;
+        return plan;
+    };
+    it('commits an older plan\'s sentences as codes and counts: the receipt and the reply name nothing', async () => {
+        setLogger((payload) => { lines.push(payload); });
+        const env = await open(); const plan = await legacyPlan(env);
+        const reply = await commitNativeBackupDocument(env.adapter, reference, JSON.stringify(plan), NAME);
+        expect((reply as { result: { warnings: string[] } }).result.warnings).toEqual(['renamed-container:1', 'unsupported-recurrence:1']);
+        expect(swept(JSON.stringify(reply))).toEqual([]);
+        expect(swept(JSON.stringify(await env.sql.client.all('SELECT reply FROM native_request_receipts')))).toEqual([]);
+        expect(swept(JSON.stringify(lines))).toEqual([]);
+    });
+    it('answers an older receipt\'s sentences as codes and counts, and formats a cold older reply without names', async () => {
+        const env = await open(); const plan = await legacyPlan(env);
+        const stored = { ...plan.reply, result: { ...plan.reply.result, warnings: LEGACY } };
+        await env.sql.client.run('INSERT INTO native_request_receipts (request_id, method, reply, saved_at) VALUES (?, ?, ?, ?)',
+            [ID, JSON.stringify(['backupDocument', 'todoist', ID, reference.sha256]), JSON.stringify(stored), new Date().toISOString()]);
+        const replayed = await commitNativeBackupDocument(env.adapter, reference, JSON.stringify(plan), NAME);
+        expect(swept(JSON.stringify(replayed))).toEqual([]);
+        const outcome = await readNativeBackupDocumentOutcome(env.adapter, reference, JSON.stringify(plan), NAME);
+        expect(swept(JSON.stringify(outcome))).toEqual([]);
+
+        expect(nativeBackupDocumentWarningsHeld()).toBe(false);
+        const cold = buildNativeBackupDocumentResult(stored, t);
+        expect(swept(cold.message)).toEqual([]);
+        expect(cold.message).toContain(t('settings.importDiagnostics.adjustedRecords', { count: 1 }));
+    });
+
+    it('ten refused commits in a row leave no warning names behind, and neither does a failed prepare', async () => {
+        const base = clone(original); base.projects = [{ ...createMockProject('existing-project', AT), title: 'Launch' }];
+        const env = await open(base);
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            const prepared = await prepareNativeBackupDocument(env.adapter, todoistInput());
+            expect(nativeBackupDocumentWarningsHeld()).toBe(true);
+            const later = await env.adapter.getData(); later.tasks[0].title = `Edit ${attempt}`; later.tasks[0].rev! += 1; await env.adapter.saveData(later);
+            await expect(commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME)).rejects.toThrow('STALE_REVISION:');
+            expect(nativeBackupDocumentWarningsHeld()).toBe(false);
+        }
+        await prepareNativeBackupDocument(env.adapter, todoistInput());
+        await expect(prepareNativeBackupDocument(env.adapter, { ...todoistInput(), text: '' })).rejects.toThrow('INVALID_INPUT:');
+        expect(nativeBackupDocumentWarningsHeld()).toBe(false);
+    });
+});
+
+describe('RN\'s failure toast for a Data operation that did not land (D1b)', () => {
+    const de = (key: string, params?: Record<string, number | string>) => formatI18nTemplate(getTranslator('de')(key), params ?? {});
+    it('titles an import "Import failed" and words it through RN\'s formatThrownImportError, with no code prefix', () => {
+        const failure = buildNativeBackupDocumentFailure('todoist', 'INVALID_INPUT: Invalid backup document input', de, 12);
+        expect(failure.title).toBe(de('settings.backupMobile.importFailed'));
+        expect(failure.message).toBe(formatImportDiagnostic(createImportDiagnostics(['Invalid backup document input'], 'error')[0], de));
+        expect(failure.message).not.toMatch(/^(Error|INVALID_INPUT)/u);
+    });
+    it('gives a size refusal core\'s limit text: an import\'s, or a backup\'s with the host limit', () => {
+        expect(buildNativeBackupDocumentFailure('csv', 'TOO_LARGE: The imported library would be too large to undo', de, 12).message).toBe(de('settings.importDiagnostics.limitExceeded'));
+        expect(buildNativeBackupDocumentFailure('omnifocus', 'TOO_LARGE', de, 12).message).toBe(de('settings.importDiagnostics.limitExceeded'));
+        expect(buildNativeBackupDocumentFailure('merge', 'TOO_LARGE', de, 12)).toEqual({ title: de('settings.mergeBackupFailed'), message: de('settings.backupDiagnostics.tooLarge', { maxSizeMb: 12 }) });
+    });
+    it('keeps a backup\'s own words without their code, as D1a showed them', () => {
+        expect(buildNativeBackupDocumentFailure('replace', 'STALE_REVISION: Local data changed after backup preparation', de, 12))
+            .toEqual({ title: de('settings.backupMobile.restoreFailed'), message: 'Local data changed after backup preparation' });
+        expect(buildNativeBackupDocumentFailure('restore', 'unresolved', de, 12).message).toBe('unresolved');
+    });
+    it('lets the operation\'s warning names go', async () => {
+        const base = clone(original); base.projects = [{ ...createMockProject('existing-project', AT), title: 'Launch' }];
+        const env = await open(base); await prepareNativeBackupDocument(env.adapter, todoistInput());
+        expect(nativeBackupDocumentWarningsHeld()).toBe(true);
+        buildNativeBackupDocumentFailure('todoist', 'INVALID_INPUT: Backup operation files do not match', de, 12);
+        expect(nativeBackupDocumentWarningsHeld()).toBe(false);
+    });
+});
 
 describe('native selected JSON backup replacement', () => {
     it('previews immutable JSON with RN replacement effect, counts, warnings and destructive-action words; cancellation writes nothing', async () => {
@@ -428,7 +876,8 @@ describe('native selected JSON backup replacement', () => {
             expect(plan.expectedCurrent.tasks.some((item: Task) => item.id === 'latest-before-replace')).toBe(true);
             const recovery = validateBackupJson(prepared.recoveryJSON!).data!; expect(recovery.tasks).toEqual(plan.expectedCurrent.tasks);
             expect(recovery.settings.theme).toBe('light'); expect(plan.data.settings).toMatchObject({ theme: 'dark', language: 'ar', gtd: { focusTaskLimit: 1 }, syncPreferences: { gtd: false }, pendingRemoteWriteAt: AT });
-            expect(plan.data.settings.security).toBeUndefined(); expect(plan.data.settings.syncPreferencesUpdatedAt.preferences > '2099-01-01T00:00:00.000Z').toBe(true);
+
+            expect(plan.data.settings.security).toEqual({ mobileAppLockEnabled: true }); expect(plan.data.settings.syncPreferencesUpdatedAt.preferences > '2099-01-01T00:00:00.000Z').toBe(true);
             const restored = plan.data.tasks.find((item: Task) => item.id === 'visible'); expect(restored.title).toBe('日本語 🦉'); expect(restored.deletedAt).toBeUndefined(); expect(restored.rev).toBeGreaterThan(99);
             for (const [field, localId] of [['tasks','latest-before-replace'],['projects','local-project'],['sections','local-section'],['areas','local-area'],['people','local-person']]) {
                 expect(plan.data[field].find((item: { id: string }) => item.id === localId).deletedAt).toBe(AT);
@@ -442,7 +891,7 @@ describe('native selected JSON backup replacement', () => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, input(undefined, 'replace'));
         const reply = await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
         expect(buildNativeBackupDocumentResult(reply, t)).toEqual({ title: t('settings.backupMobile.restoreComplete'),
-            message: t('settings.backupMobile.backupRestoredWithSnapshot', { snapshotName: NAME }), undoLabel: t('settings.undoImport'), doneLabel: t('common.done') });
+            message: t('settings.backupMobile.backupRestoredWithSnapshot', { snapshotName: NAME }), undoLabel: t('settings.undoImport'), doneLabel: t('common.done'), durationMs: 5000 });
         const later = await env.adapter.getData(); later.tasks.push(task('after-replace', { rev: 30 })); later.tasks.find((item) => item.id === 'visible')!.title = 'After replacement'; await env.adapter.saveData(later);
         const undoId = '22222222-2222-4222-8222-222222222222';
         const undo = await prepareNativeBackupDocument(env.adapter, { ...input(prepared.recoveryJSON!, 'restore'), requestId: undoId });
@@ -522,10 +971,10 @@ describe('native Todoist CSV and ZIP prepared import', () => {
     it('localizes every actual execution warning and RN counts/checklist/snapshot/Undo result', async () => {
         const base = clone(original); base.projects = [{ ...createMockProject('existing-project', AT), title: 'Launch' }]; const env = await open(base);
         const prepared = await prepareNativeBackupDocument(env.adapter, todoistInput()); const reply = JSON.parse(prepared.planJSON).reply;
-        expect(reply.result.warnings).toHaveLength(1); expect(reply.result.warnings[0]).toContain('was renamed');
+        expect(reply.result.warnings).toEqual(['renamed-container:1']);
         const model = buildNativeBackupDocumentResult(reply, t); expect(model.title).toBe(t('settings.backupMobile.importComplete')); expect(model.undoLabel).toBe(t('settings.undoImport'));
         expect(model.message).toContain(t('settings.backupMobile.importedTodoistTasksIntoProjects', { taskCount: 2, projectCount: 1 })); expect(model.message).toContain(t('settings.backupMobile.subtasksBecameChecklistItems', { subtaskCount: 1 })); expect(model.message).toContain(NAME);
-        for (const diagnostic of createImportDiagnostics(reply.result.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
+        expect(model.message).toContain(t('settings.importDiagnostics.renamedContainer', { from: 'Launch', to: 'Launch (Todoist)' }));
     });
     it('Todoist Undo restores the exact pre-import snapshot and tombstones later local edits without another recovery', async () => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, todoistInput()); await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
@@ -541,7 +990,7 @@ describe('native Todoist CSV and ZIP prepared import', () => {
     it.each(['TR==','TWF=','TQ=','====','VGl0bGUs\n','VGl0bGUs_'])('Todoist rejects noncanonical base64 %s before adapter operations', async (text) => {
         const env = await open(); const read = vi.spyOn(env.adapter, 'getData'); await expect(prepareNativeBackupDocument(env.adapter, { ...todoistInput(), text })).rejects.toThrow('INVALID_INPUT:'); expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
     });
-    // Real 16 MiB boundary fixtures need headroom under coverage instrumentation.
+
     it('Todoist bounds decoded bytes before allocation and retains shared8MiB text and ZIP entry/expanded limits', async () => {
         const env = await open(); const read = vi.spyOn(env.adapter, 'getData');
         await expect(prepareNativeBackupDocument(env.adapter, { ...todoistInput(), text: 'A'.repeat(4 * Math.ceil((16 * 1024 * 1024 + 1) / 3)) })).rejects.toThrow('Todoist source exceeds 16 MiB');
@@ -550,11 +999,11 @@ describe('native Todoist CSV and ZIP prepared import', () => {
         const largeZip = bytesToBase64(zipSync({ 'large.csv': new Uint8Array(8 * 1024 * 1024 + 1) })); expect(inspectNativeBackupDocument(largeZip, todoistInput().metadata, t, 'todoist').errorMessage).toBe(t('settings.importDiagnostics.limitExceeded'));
         expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
     }, 15_000);
-    it('refuses oversized complete Todoist execution warnings before returning a plan or journal', async () => {
+    it('stores 40 renamed Todoist projects as codes: no name reaches the reply, which stays small', async () => {
         const base = clone(original); const files: Record<string, Uint8Array> = {};
         for (let index = 0; index < 40; index += 1) { const name = `Project${index}-${'A'.repeat(1000)}`; base.projects.push({ ...createMockProject(`existing-${index}`, AT), title: name }); files[`${name}.csv`] = strToU8('TYPE,CONTENT\ntask,Imported'); }
         const env = await open(base); const source = { ...todoistInput(), text: bytesToBase64(zipSync(files)), metadata: { ...metadata, fileName: 'Todoist.zip' } };
-        await expect(prepareNativeBackupDocument(env.adapter, source)).rejects.toThrow('Todoist import result exceeds 64 KiB'); expect(env.writes).toEqual([]);
+        small(JSON.parse((await prepareNativeBackupDocument(env.adapter, source)).planJSON).reply); expect(env.writes).toEqual([]);
     });
     it.each(['extra','data','csv-count','negative','fraction','missing','warning','overflow'] as const)('rejects malformed Todoist result %s at every reply boundary before adapter writes', async (fault) => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, todoistInput()); const plan = JSON.parse(prepared.planJSON);
@@ -638,10 +1087,10 @@ describe('native TickTick CSV and ZIP prepared import', () => {
     });
     it('uses shared execution warnings and RN task/project/area/checklist/snapshot/Undo result', async () => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, ticktickInput()); const reply = JSON.parse(prepared.planJSON).reply;
-        const parsed = parseImportSource('ticktick', { bytes: strToU8(ticktickCsv), fileName: ticktickInput().metadata.fileName }); expect(reply.result.warnings).toEqual(parsed.parsedData!.warnings);
+        const parsed = parseImportSource('ticktick', { bytes: strToU8(ticktickCsv), fileName: ticktickInput().metadata.fileName }); expect(reply.result.warnings).toEqual(stored(parsed.parsedData!.warnings));
         const model = buildNativeBackupDocumentResult(reply, t); expect(model.title).toBe(t('settings.backupMobile.importComplete')); expect(model.undoLabel).toBe(t('settings.undoImport'));
         expect(model.message).toContain(t('settings.backupMobile.importedTaskProjectAreaCounts', { taskCount: 2, projectCount: 1, areaCount: 1 })); expect(model.message).toContain(t('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: 3 })); expect(model.message).toContain(NAME);
-        for (const diagnostic of createImportDiagnostics(reply.result.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
+        for (const diagnostic of createImportDiagnostics(parsed.parsedData!.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
     });
     it('TickTick Undo restores exact pre-import snapshot and tombstones later edits with no second recovery', async () => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, ticktickInput()); await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
@@ -661,10 +1110,10 @@ describe('native TickTick CSV and ZIP prepared import', () => {
         const exact = 'A'.repeat(4 * Math.ceil(16 * 1024 * 1024 / 3) - 2) + '=='; await expect(prepareNativeBackupDocument(env.adapter, { ...ticktickInput(), text: exact })).rejects.toThrow('INVALID_INPUT: Invalid backup document input'); expect(inspectNativeBackupDocument(exact, ticktickInput().metadata, t, 'ticktick').errorMessage).toBe(t('settings.importDiagnostics.limitExceeded'));
         const zip = bytesToBase64(zipSync({ 'too-large.csv': new Uint8Array(8 * 1024 * 1024 + 1) })); expect(inspectNativeBackupDocument(zip, ticktickInput().metadata, t, 'ticktick').errorMessage).toBe(t('settings.importDiagnostics.limitExceeded')); expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
     }, 15_000);
-    it('refuses complete over64KiB TickTick execution warnings before returning a plan', async () => {
+    it('stores 40 renamed TickTick projects as codes: no name reaches the reply, which stays small', async () => {
         const base = clone(original); const rows: string[][] = [];
         for (let index = 0; index < 40; index += 1) { const name = `Project${index}-${'A'.repeat(1000)}`; base.projects.push({ ...createMockProject(`existing-${index}`, AT), title: name }); rows.push(['',name,'Imported',...new Array(13).fill(''),String(index),'']); }
-        const env = await open(base); await expect(prepareNativeBackupDocument(env.adapter, ticktickInput(csvFile(ticktickHeaders, rows)))).rejects.toThrow('TickTick import result exceeds 64 KiB'); expect(env.writes).toEqual([]);
+        const env = await open(base); small(JSON.parse((await prepareNativeBackupDocument(env.adapter, ticktickInput(csvFile(ticktickHeaders, rows)))).planJSON).reply); expect(env.writes).toEqual([]);
     });
     it.each(['extra','data','standalone','missing-area','negative','fraction','unsafe','warning','overflow'] as const)('refuses malformed TickTick result %s at every boundary before writes', async (fault) => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, ticktickInput()); const plan = JSON.parse(prepared.planJSON);
@@ -713,7 +1162,7 @@ describe('native DGT JSON and ZIP prepared import', () => {
         expect(preview.summary).toContain(t('settings.backupMobile.checklistItemsWillBePreserved', { checklistItemCount: 2 })); expect(preview.summary).toContain(t('settings.backupMobile.tasksWillStayOutsideProjects', { taskCount: 6 }));
         expect(preview.summary).toContain('• Work / Archived launch: 1'); expect(preview.summary).not.toContain(t('settings.backupMobile.importedTasksStayInInboxSoYouCanProcessThem'));
         for (const diagnostic of createImportDiagnostics(parsed.preview!.warnings, 'warning')) expect(preview.summary).toContain(formatImportDiagnostic(diagnostic, t));
-        // Later provider bytes have no effect on this accepted preview or owned source.
+
         const other = inspectNativeBackupDocument(dgtInput('{}').text, source.metadata, t, 'dgt'); expect(other.valid).toBe(false); expect(preview.valid).toBe(true);
         expect(env.writes).toEqual([]); expect(await env.state()).toEqual(before);
     });
@@ -740,7 +1189,7 @@ describe('native DGT JSON and ZIP prepared import', () => {
         for (const title of ['Legacy active','Unsupported status','Orphan child']) expect(plan.data.tasks.find((item: Task) => item.title === title).status).toBe('inbox'); expect(plan.data.tasks.find((item: Task) => item.title === 'Legacy active').description).toContain('Original DGT repeat: Last day of every month');
         expect(plan.data.people).toEqual(plan.expectedCurrent.people); for (const id of ['reference','hidden','history']) expect(plan.data.tasks.find((item: Task) => item.id === id).status).toBe(base.tasks.find((item) => item.id === id)!.status);
         const parsed = parseImportSource('dgt', { bytes: strToU8(dgtJson), fileName: source.metadata.fileName }); const oracle = applyImportSource('dgt', plan.expectedCurrent, parsed.parsedData!);
-        expect(plan.data.tasks.map((item: Task) => item.id)).toEqual(oracle.data.tasks.map((item) => item.id)); expect(plan.reply.result.warnings).toEqual(oracle.result.warnings);
+        expect(plan.data.tasks.map((item: Task) => item.id)).toEqual(oracle.data.tasks.map((item) => item.id)); expect(plan.reply.result.warnings).toEqual(stored(oracle.result.warnings));
         const first = await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME); const packing = plan.data.tasks.find((item: Task) => item.title === 'Packing list'); expect((await env.adapter.getData()).tasks.find((item) => item.id === packing.id)?.checklist).toEqual(packing.checklist);
         const later = await env.adapter.getData(); const changed = later.tasks.find((item) => item.id === imported.id)!; changed.title = 'Later DGT edit'; changed.rev! += 1; await env.adapter.saveData(later); const committed = await env.state();
         resetNativeRequestReceipts(); await loadNativeRequestReceipts(env.sql.client, { durableCommands: ['backupDocument'] }); const cold = new NativeReceiptSqliteAdapter(env.client, { rejectConcurrentWrites: true }); await cold.ensureSchema(); setStorageAdapter(cold); env.writes.length = 0;
@@ -762,9 +1211,9 @@ describe('native DGT JSON and ZIP prepared import', () => {
     });
     it('retains complete shared warnings and RN result counts/snapshot/Undo', async () => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, dgtInput()); const reply = JSON.parse(prepared.planJSON).reply;
-        const parsed = parseImportSource('dgt', { bytes: strToU8(dgtJson), fileName: dgtInput().metadata.fileName }); expect(reply.result.warnings).toEqual(parsed.parsedData!.warnings);
+        const parsed = parseImportSource('dgt', { bytes: strToU8(dgtJson), fileName: dgtInput().metadata.fileName }); expect(reply.result.warnings).toEqual(stored(parsed.parsedData!.warnings));
         const model = buildNativeBackupDocumentResult(reply, t); expect(model.title).toBe(t('settings.backupMobile.importComplete')); expect(model.undoLabel).toBe(t('settings.undoImport')); expect(model.message).toContain(t('settings.backupMobile.importedTaskProjectAreaCounts', { taskCount: 8, projectCount: 2, areaCount: 2 })); expect(model.message).toContain(t('settings.backupMobile.checklistItemsPreserved', { checklistItemCount: 2 })); expect(model.message).toContain(NAME);
-        for (const diagnostic of createImportDiagnostics(reply.result.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
+        for (const diagnostic of createImportDiagnostics(parsed.parsedData!.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
     });
     it('DGT Undo restores exact pre-import snapshot and tombstones later edits without a second recovery', async () => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, dgtInput()); await commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
@@ -778,7 +1227,7 @@ describe('native DGT JSON and ZIP prepared import', () => {
     });
     it('ZIP uses first valid shared DGT JSON, retaining skipped-entry warnings', async () => {
         const env = await open(); const zip = zipSync({ 'bad.json': strToU8('{bad'), 'first.json': strToU8(dgtJson), 'second.json': strToU8(JSON.stringify({ TASK: [{ ID: 999, TITLE: 'Must not import' }] })), 'readme.txt': strToU8('ignored') });
-        const prepared = await prepareNativeBackupDocument(env.adapter, { ...dgtInput(), text: bytesToBase64(zip), metadata: { ...metadata, fileName: 'DGT.zip' } }); const plan = JSON.parse(prepared.planJSON); expect(plan.data.tasks.some((item: Task) => item.title === 'Must not import')).toBe(false); expect(plan.reply.result.warnings).toContain('1 DGT JSON file could not be parsed and was skipped.'); expect(plan.reply.result.warnings).toContain('1 non-JSON file inside the DGT archive was skipped.'); expect(env.writes).toEqual([]);
+        const prepared = await prepareNativeBackupDocument(env.adapter, { ...dgtInput(), text: bytesToBase64(zip), metadata: { ...metadata, fileName: 'DGT.zip' } }); const plan = JSON.parse(prepared.planJSON); expect(plan.data.tasks.some((item: Task) => item.title === 'Must not import')).toBe(false); expect(plan.reply.result.warnings).toEqual(expect.arrayContaining(stored(['1 DGT JSON file could not be parsed and was skipped.', '1 non-JSON file inside the DGT archive was skipped.']))); expect(env.writes).toEqual([]);
     });
     it.each(['TR==','TWF=','TQ=','====','eyJUQVNL\n','eyJUQVNL_'])('DGT rejects noncanonical binary transport %s before adapter access', async (text) => {
         const env = await open(); const read = vi.spyOn(env.adapter, 'getData'); await expect(prepareNativeBackupDocument(env.adapter, { ...dgtInput(), text })).rejects.toThrow('INVALID_INPUT:'); expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
@@ -788,10 +1237,10 @@ describe('native DGT JSON and ZIP prepared import', () => {
         const exact = 'A'.repeat(4 * Math.ceil(16 * 1024 * 1024 / 3) - 2) + '=='; await expect(prepareNativeBackupDocument(env.adapter, { ...dgtInput(), text: exact })).rejects.toThrow('INVALID_INPUT: Invalid backup document input'); expect(inspectNativeBackupDocument(exact, dgtInput().metadata, t, 'dgt').errorMessage).toBe(t('settings.importDiagnostics.limitExceeded'));
         const zip = bytesToBase64(zipSync({ 'too-large.json': new Uint8Array(8 * 1024 * 1024 + 1) })); expect(inspectNativeBackupDocument(zip, dgtInput().metadata, t, 'dgt').errorMessage).toBe(t('settings.importDiagnostics.limitExceeded')); expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
     }, 15_000);
-    it('refuses actual complete over64KiB DGT execution warnings before returning a plan', async () => {
+    it('stores 40 renamed DGT projects as codes: no name reaches the reply, which stays small', async () => {
         const base = clone(original); const TASK = [];
         for (let index = 1; index <= 40; index += 1) { const name = `Project${index}-${'A'.repeat(1000)}`; base.projects.push({ ...createMockProject(`existing-${index}`, AT), title: name }); TASK.push({ ID: index, TITLE: name, TYPE: 1 }); }
-        const env = await open(base); await expect(prepareNativeBackupDocument(env.adapter, dgtInput(JSON.stringify({ TASK })))).rejects.toThrow('DGT import result exceeds 64 KiB'); expect(env.writes).toEqual([]);
+        const env = await open(base); small(JSON.parse((await prepareNativeBackupDocument(env.adapter, dgtInput(JSON.stringify({ TASK })))).planJSON).reply); expect(env.writes).toEqual([]);
     });
     it.each(['extra','data','standalone','missing-area','negative','fraction','unsafe','warning','overflow','mode'] as const)('refuses malformed DGT result %s at every boundary before writes', async (fault) => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, dgtInput()); const plan = JSON.parse(prepared.planJSON);
@@ -866,7 +1315,7 @@ describe('native OmniFocus CSV/JSON/ZIP prepared import', () => {
         inspectNativeBackupDocument(source.text, source.metadata, t, 'omnifocus'); const latest = await env.adapter.getData(); latest.tasks.push(task('latest-omni')); await env.adapter.saveData(latest); env.writes.length = 0; const before = await env.state();
         const prepared = await prepareNativeBackupDocument(env.adapter, source); const plan = JSON.parse(prepared.planJSON); expect(env.writes).toEqual([]); expect(await env.state()).toEqual(before); expect(plan.expectedCurrent.tasks.some((item: Task) => item.id === 'latest-omni')).toBe(true); expect(validateBackupJson(prepared.recoveryJSON!).valid).toBe(true);
         const parsed = parseImportSource('omnifocus', { bytes, fileName: source.metadata.fileName }); const counts = parsed.preview!; const oracle = applyImportSource('omnifocus', plan.expectedCurrent, parsed.parsedData!);
-        expect(plan.reply.result).toMatchObject({ importedAreaCount: counts.areaCount, importedChecklistItemCount: counts.checklistItemCount, importedProjectCount: counts.projectCount, importedSectionCount: 0, importedStandaloneTaskCount: counts.standaloneTaskCount, importedTaskCount: counts.taskCount, warnings: oracle.result.warnings }); expect(Object.keys(plan.reply)).toHaveLength(4); expect(Object.keys(plan.reply.result)).toHaveLength(7); expect(plan.reply.result).not.toHaveProperty('data');
+        expect(plan.reply.result).toMatchObject({ importedAreaCount: counts.areaCount, importedChecklistItemCount: counts.checklistItemCount, importedProjectCount: counts.projectCount, importedSectionCount: 0, importedStandaloneTaskCount: counts.standaloneTaskCount, importedTaskCount: counts.taskCount, warnings: stored(oracle.result.warnings) }); expect(Object.keys(plan.reply)).toHaveLength(4); expect(Object.keys(plan.reply.result)).toHaveLength(7); expect(plan.reply.result).not.toHaveProperty('data');
         const imported = plan.data.tasks.find((item: Task) => item.title === 'Plan sprint'); expect(imported).toMatchObject({ status: 'inbox', priority: 'high', tags: ['#ops'], startTime: '2026-06-17', dueDate: '2026-06-19' }); expect(imported.description).toContain('Plan details'); expect(imported.description).toContain('Planned date in OmniFocus: 2026-06-18'); expect(imported.projectId).toBeTruthy();
         const project = plan.data.projects.find((item: { title: string }) => item.title === 'Test project'); expect(project).toMatchObject({ status: 'someday', startDate: '2026-06-10', dueDate: '2026-06-20' });
         if (kind === 'csv') { expect(imported.contexts).toEqual(['@Errands']); expect(imported.description).toContain('Estimated duration in OmniFocus: 45m'); expect(project.supportNotes).toContain('Project support 日本語 🦉'); expect(project.tagIds).toEqual(['#work']); expect(plan.data.projects.find((item: { title: string }) => item.title === 'Archived project').status).toBe('archived'); expect(plan.data.tasks.find((item: Task) => item.title === 'Someday').status).toBe('someday'); }
@@ -893,7 +1342,8 @@ describe('native OmniFocus CSV/JSON/ZIP prepared import', () => {
         const env = await open(); const { source } = omniSource(kind); const reply = JSON.parse((await prepareNativeBackupDocument(env.adapter, source)).planJSON).reply; const result = reply.result;
         const model = buildNativeBackupDocumentResult(reply, t); expect(model.title).toBe(t('settings.backupMobile.importComplete')); expect(model.undoLabel).toBe(t('settings.undoImport')); expect(model.message).toContain(t('settings.backupMobile.importedTaskProjectCounts', { taskCount: result.importedTaskCount, projectCount: result.importedProjectCount }));
         if (result.importedAreaCount) expect(model.message).toContain(t('settings.backupMobile.omnifocusAreasCreated', { areaCount: result.importedAreaCount })); if (result.importedChecklistItemCount) expect(model.message).toContain(t('settings.backupMobile.nestedTasksBecameChecklistItems', { taskCount: result.importedChecklistItemCount })); expect(model.message).toContain(t('settings.backupMobile.tasksStayedOutsideProjects', { taskCount: result.importedStandaloneTaskCount })); expect(model.message).toContain(NAME);
-        for (const diagnostic of createImportDiagnostics(result.warnings, 'warning')) expect(model.message).toContain(formatImportDiagnostic(diagnostic, t));
+
+        for (const token of result.warnings as string[]) { const [code, count] = token.split(':'); expect(model.message).toContain(formatImportDiagnostic({ code: code as 'adjusted-records', params: { count: Number(count) }, severity: 'warning' }, t)); }
     });
     it('accepts shared UTF16LE CSV bytes through unchanged binary transport', async () => {
         const bytes = new Uint8Array(2 + omniCsv.length * 2); bytes[0] = 0xff; bytes[1] = 0xfe; for (let index = 0; index < omniCsv.length; index += 1) { bytes[2 + index * 2] = omniCsv.charCodeAt(index) & 0xff; bytes[3 + index * 2] = omniCsv.charCodeAt(index) >> 8; }
@@ -916,9 +1366,9 @@ describe('native OmniFocus CSV/JSON/ZIP prepared import', () => {
         const exact = 'A'.repeat(4 * Math.ceil(16 * 1024 * 1024 / 3) - 2) + '=='; await expect(prepareNativeBackupDocument(env.adapter, { ...omniInput(), text: exact })).rejects.toThrow('INVALID_INPUT: Invalid backup document input'); expect(inspectNativeBackupDocument(exact, omniInput().metadata, t, 'omnifocus').errorMessage).toBe(t('settings.importDiagnostics.limitExceeded'));
         const zip = bytesToBase64(zipSync({ 'too-large.json': new Uint8Array(8 * 1024 * 1024 + 1) })); expect(inspectNativeBackupDocument(zip, omniInput().metadata, t, 'omnifocus').errorMessage).toBe(t('settings.importDiagnostics.limitExceeded')); expect(read).not.toHaveBeenCalled(); expect(env.writes).toEqual([]);
     }, 15_000);
-    it('refuses actual complete over64KiB OmniFocus execution warnings before returning a plan', async () => {
+    it('stores 40 renamed OmniFocus projects as codes: no name reaches the reply, which stays small', async () => {
         const base = clone(original); const rows: string[][] = []; for (let index = 0; index < 40; index += 1) { const name = `Project${index}-${'A'.repeat(1000)}`; base.projects.push({ ...createMockProject(`existing-${index}`, AT), title: name }); rows.push(['Project', name]); }
-        const env = await open(base); await expect(prepareNativeBackupDocument(env.adapter, omniInput(csvFile(['Type','Name'], rows)))).rejects.toThrow('OmniFocus import result exceeds 64 KiB'); expect(env.writes).toEqual([]);
+        const env = await open(base); small(JSON.parse((await prepareNativeBackupDocument(env.adapter, omniInput(csvFile(['Type','Name'], rows)))).planJSON).reply); expect(env.writes).toEqual([]);
     });
     it.each(['extra','data','missing-standalone','negative','fraction','unsafe','warning','overflow','mode'] as const)('refuses malformed OmniFocus result %s at every boundary before writes', async (fault) => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, omniInput()); const plan = JSON.parse(prepared.planJSON);
@@ -931,5 +1381,175 @@ describe('native OmniFocus CSV/JSON/ZIP prepared import', () => {
     });
     it('refuses stale OmniFocus frozen plan after intervening durable change without writes', async () => {
         const env = await open(); const prepared = await prepareNativeBackupDocument(env.adapter, omniInput()); const later = await env.adapter.getData(); later.tasks[0].title = 'Changed after OmniFocus'; later.tasks[0].rev! += 1; await env.adapter.saveData(later); const before = await env.state(); env.writes.length = 0; await expect(commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME)).rejects.toThrow('STALE_REVISION:'); expect(env.writes).toEqual([]); expect(await env.state()).toEqual(before);
+    });
+});
+
+
+describe('native backup prepare output stays byte-identical (D1c parity fixture)', () => {
+    const FIXTURE = new URL('./native-backup-plan-parity.fixtures.json', import.meta.url);
+    const digest = (text: string | null) => text === null ? null
+        : { bytes: strToU8(text).length, sha256: createHash('sha256').update(text, 'utf8').digest('hex') };
+    const cases: [string, () => NativeBackupDocumentPrepareInput][] = [
+        ['merge', () => input()], ['replace', () => input(undefined, 'replace')], ['restore', () => input(undefined, 'restore')],
+        ['csv', () => csvInput()], ['todoist', () => todoistInput()], ['ticktick', () => ticktickInput()],
+        ['dgt', () => dgtInput()], ['omnifocus', () => omniInput()],
+    ];
+    it('gives every mode the frozen plan and recovery bytes', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const outputs: Record<string, unknown> = {};
+        try {
+            for (const [mode, make] of cases) {
+                vi.setSystemTime(new Date(AT));
+
+                let next = 0;
+                vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() =>
+                    `00000000-0000-4000-8000-${String(next++).padStart(12, '0')}` as ReturnType<typeof crypto.randomUUID>);
+                const env = await open();
+                const prepared = await prepareNativeBackupDocument(env.adapter, make());
+                outputs[mode] = { plan: digest(prepared.planJSON), recovery: digest(prepared.recoveryJSON) };
+            }
+        } finally { vi.useRealTimers(); }
+        if (process.env.MINDWTR_WRITE_PLAN_FIXTURE === '1') writeFileSync(FIXTURE, `${JSON.stringify(outputs, null, 2)}\n`);
+        expect(existsSync(FIXTURE)).toBe(true);
+        expect(outputs).toEqual(JSON.parse(readFileSync(FIXTURE, 'utf8')));
+    }, 60_000);
+    it('no import policy changes the library it applies to: every mode prepares the same plan from a deep-frozen read', async () => {
+        const deepFreeze = <T,>(value: T): T => {
+            if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); Object.values(value).forEach(deepFreeze); }
+            return value;
+        };
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+            for (const [mode, make] of cases) {
+                const seeds = () => { let next = 0; vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() =>
+                    `00000000-0000-4000-8000-${String(next++).padStart(12, '0')}` as ReturnType<typeof crypto.randomUUID>); };
+                vi.setSystemTime(new Date(AT)); seeds();
+                const plain = await prepareNativeBackupDocument((await open()).adapter, make());
+                vi.setSystemTime(new Date(AT)); seeds();
+                const env = await open(); const read = env.adapter.getData.bind(env.adapter);
+                vi.spyOn(env.adapter, 'getData').mockImplementation(async (options) => deepFreeze(await read(options)));
+                await expect(prepareNativeBackupDocument(env.adapter, make()), mode).resolves.toEqual(plain);
+            }
+        } finally { vi.useRealTimers(); }
+    }, 120_000);
+    it.each([false, true])('a sink receives the same recovery text and plan bytes, in parts (admission %s)', async (admitted) => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+            for (const [, make] of cases) {
+                const source = make();
+                const withAdmission = admitted ? { ...source, admission: { sourceBytes: 1, maxTransferBytes: 512 * 1024 * 1024 } } : source;
+                const seeds = () => { let next = 0; vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() =>
+                    `00000000-0000-4000-8000-${String(next++).padStart(12, '0')}` as ReturnType<typeof crypto.randomUUID>); };
+                vi.setSystemTime(new Date(AT)); seeds();
+                const whole = await prepareNativeBackupDocument((await open()).adapter, clone(withAdmission));
+                vi.setSystemTime(new Date(AT)); seeds();
+                const recovery: string[] = []; const parts: string[] = [];
+                const written = await prepareNativeBackupDocument((await open()).adapter, clone(withAdmission),
+                    { recovery: (text) => recovery.push(text), plan: (part) => parts.push(part) });
+                expect(written).toEqual({ written: true, recovery: whole.recoveryJSON !== null, ...('undo' in whole ? { undo: whole.undo } : {}) });
+                expect(recovery).toEqual(whole.recoveryJSON === null ? [] : [whole.recoveryJSON]);
+                expect(parts.length).toBeGreaterThan(2);
+                expect(parts.join('')).toBe(whole.planJSON);
+                expect(JSON.stringify(JSON.parse(whole.planJSON))).toBe(whole.planJSON);
+
+                const plan = JSON.parse(whole.planJSON);
+                expect('maxLibraryBytes' in plan || 'undoLibraryBytes' in plan).toBe(admitted);
+            }
+        } finally { vi.useRealTimers(); }
+    }, 120_000);
+});
+
+
+describe('native backup prepare and commit let their documents go (D1c)', () => {
+    setFlagsFromString('--expose_gc');
+    const gc = runInNewContext('gc') as () => void;
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    it('a sink takes the source text once parsed; without a sink the input is untouched', async () => {
+        const handed = input(); const kept = input();
+        await prepareNativeBackupDocument((await open()).adapter, handed, { recovery: () => undefined, plan: () => undefined });
+        expect(handed.text).toBe('');
+        await prepareNativeBackupDocument((await open()).adapter, kept);
+        expect(kept.text).toBe(input().text);
+    });
+
+    it('a sink\'s own failure is the answer, word for word', async () => {
+        const refusal = new Error('TOO_LARGE: The prepared plan exceeds the transfer limit');
+        await expect(prepareNativeBackupDocument((await open()).adapter, input(), { recovery: () => undefined, plan: () => { throw refusal; } }))
+            .rejects.toBe(refusal);
+        await expect(prepareNativeBackupDocument((await open()).adapter, input(), { recovery: () => { throw refusal; }, plan: () => undefined }))
+            .rejects.toBe(refusal);
+    });
+
+    it('a plan source is read once, and the plan, its baseline and the stale check\'s read are gone before the reload', async () => {
+        const env = await open();
+        const prepared = await prepareNativeBackupDocument(env.adapter, input());
+        const source = { taken: 0, take() { this.taken += 1; return prepared.planJSON; } };
+        const refs: Record<string, WeakRef<object>> = {};
+        const save = env.adapter.saveDocumentWithReceipt.bind(env.adapter);
+
+        env.adapter.saveDocumentWithReceipt = async (document) => {
+            refs.expected = new WeakRef(document.expectedCurrent); refs.data = new WeakRef(document.data);
+            return save(document);
+        };
+
+
+        const reader = env.adapter as unknown as { getDataNow: SqliteAdapter['getData'] };
+        const read = reader.getDataNow.bind(env.adapter);
+        let reads = 0; let alive: Record<string, boolean> | null = null;
+        reader.getDataNow = async (options) => {
+            reads += 1;
+            if (reads === 2) {
+
+                await settle(); gc(); await settle(); gc();
+                alive = Object.fromEntries(Object.entries(refs).map(([name, ref]) => [name, ref.deref() !== undefined]));
+            }
+            const data = await read(options);
+            if (reads === 1) refs.current = new WeakRef(data);
+            return data;
+        };
+
+        let writing: Record<string, boolean> | null = null;
+        env.hooks.run = async (statement) => {
+            if (statement !== 'COMMIT' || writing) return;
+            await settle(); gc(); await settle(); gc();
+            writing = Object.fromEntries(Object.entries(refs).map(([name, ref]) => [name, ref.deref() !== undefined]));
+        };
+        await commitNativeBackupDocument(env.adapter, reference, source, NAME);
+        expect(source.taken).toBe(1);
+        expect(writing).toEqual({ expected: false, data: true, current: false });
+        expect(alive).toEqual({ expected: false, data: false, current: false });
+    });
+});
+
+
+describe('a sync cycle waits behind a native backup commit and its reload (D1c, sync write gate)', () => {
+    it('starts only after the commit reloaded the store', async () => {
+        const env = await open();
+        const prepared = await prepareNativeBackupDocument(env.adapter, input());
+        const events: string[] = [];
+
+        const reader = env.adapter as unknown as { getDataNow: SqliteAdapter['getData'] };
+        const read = reader.getDataNow.bind(env.adapter);
+        let reads = 0;
+        let reloadStarted!: () => void;
+        const reloading = new Promise<void>((resolve) => { reloadStarted = resolve; });
+        reader.getDataNow = async (options) => {
+            reads += 1;
+            if (reads === 2) {
+                events.push('reload');
+                reloadStarted();
+                await new Promise((resolve) => setTimeout(resolve, 50));
+                const data = await read(options);
+                events.push('reloaded');
+                return data;
+            }
+            return read(options);
+        };
+        const commit = commitNativeBackupDocument(env.adapter, reference, prepared.planJSON, NAME);
+        await reloading;
+        const sync = runSerializedSyncDocumentOperation(async () => { events.push('sync'); });
+        await Promise.all([commit, sync]);
+        expect(events).toEqual(['reload', 'reloaded', 'sync']);
     });
 });

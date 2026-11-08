@@ -1,7 +1,6 @@
-// Generic "Mindwtr CSV" importer for users migrating from apps with no dedicated importer.
-// Structural template: ticktick-import.ts (parse -> {parsedData, preview, errors, warnings}).
-// Apply delegates to the shared import-apply.ts seam, which also creates this importer's
-// Sections (the only ImportSource caller that supplies any).
+
+
+
 import { safeParseDate } from './date';
 import { MINDWTR_CSV_FLUID_RECURRENCE_TOKEN, MINDWTR_CSV_KNOWN_COLUMNS } from './mindwtr-csv-columns';
 import { applyImport, type ImportExecutionResult, type ImportParseResult } from './import-apply';
@@ -57,8 +56,10 @@ type MindwtrCsvWarningCounters = {
     sectionWithoutProject: number;
     unclosedQuotedFiles: number;
     unknownColumns: number;
+    unknownColumnLocations: string[];
     unknownStatuses: number;
     unparsedDates: number;
+    unparsedDateLocations: string[];
     unsupportedRecurrenceRules: number;
     unsupportedRecurrenceSamples: string[];
 };
@@ -154,8 +155,10 @@ const createWarningCounters = (): MindwtrCsvWarningCounters => ({
     sectionWithoutProject: 0,
     unclosedQuotedFiles: 0,
     unknownColumns: 0,
+    unknownColumnLocations: [],
     unknownStatuses: 0,
     unparsedDates: 0,
+    unparsedDateLocations: [],
     unsupportedRecurrenceRules: 0,
     unsupportedRecurrenceSamples: [],
 });
@@ -163,6 +166,7 @@ const createWarningCounters = (): MindwtrCsvWarningCounters => ({
 const buildWarnings = (counters: MindwtrCsvWarningCounters): string[] => {
     const warnings: string[] = [];
     appendWarning(warnings, counters.unknownColumns, '1 unknown column was ignored.', '{count} unknown columns were ignored.');
+    appendLocationDetails(warnings, counters.unknownColumns, counters.unknownColumnLocations);
     appendWarning(warnings, counters.unknownStatuses, '1 task status could not be mapped and was imported to Inbox.', '{count} task statuses could not be mapped and were imported to Inbox.');
     appendWarning(warnings, counters.sectionWithoutProject, '1 Section was ignored because its row had no Project.', '{count} Sections were ignored because their rows had no Project.');
     appendWarning(warnings, counters.unsupportedRecurrenceRules, '1 Recurrence rule could not be understood; that task was imported without recurrence.', '{count} Recurrence rules could not be understood; those tasks were imported without recurrence.');
@@ -170,6 +174,7 @@ const buildWarnings = (counters: MindwtrCsvWarningCounters): string[] => {
         warnings.push(`Unsupported Recurrence rules: ${counters.unsupportedRecurrenceSamples.join('; ')}.`);
     }
     appendWarning(warnings, counters.unparsedDates, '1 date value could not be parsed and was skipped.', '{count} date values could not be parsed and were skipped.');
+    appendLocationDetails(warnings, counters.unparsedDates, counters.unparsedDateLocations);
     appendWarning(warnings, counters.duplicateIds, '1 row had an ID that duplicated an earlier row in this import and was dropped.', '{count} rows had an ID that duplicated an earlier row in this import and were dropped.');
     appendWarning(warnings, counters.emptyTitleRows, '1 row with an empty title was skipped.', '{count} rows with empty titles were skipped.');
     appendWarning(warnings, counters.nonCsvEntries, '1 non-CSV file inside the ZIP was skipped.', '{count} non-CSV files inside the ZIP were skipped.');
@@ -179,8 +184,7 @@ const buildWarnings = (counters: MindwtrCsvWarningCounters): string[] => {
     return warnings;
 };
 
-// Tab is checked locally (the shared detectDelimiter never needs it); comma vs semicolon
-// delegates to that shared heuristic instead of duplicating it.
+
 const detectMindwtrCsvDelimiter = (text: string): string => {
     const firstLine = sanitizeCsvText(text).split(/\r?\n/u).find((line) => line.trim().length > 0);
     if (firstLine) {
@@ -192,18 +196,30 @@ const detectMindwtrCsvDelimiter = (text: string): string => {
     return detectDelimiter(text);
 };
 
-const countUnknownColumns = (headerRow: string[], counters: MindwtrCsvWarningCounters): void => {
-    headerRow.forEach((cell) => {
+const WARNING_LOCATION_LIMIT = 5;
+
+
+const appendLocationDetails = (warnings: string[], count: number, locations: string[]): void => {
+    if (locations.length > 0) {
+        warnings[warnings.length - 1] += ` [csv-locations=${locations.join(',')}; omitted=${count - locations.length}]`;
+    }
+};
+
+const countUnknownColumns = (headerRow: string[], counters: MindwtrCsvWarningCounters, source: MindwtrCsvRowSource): void => {
+    headerRow.forEach((cell, columnIndex) => {
         const normalized = normalizeHeaderCell(cell);
-        if (normalized && !KNOWN_COLUMNS.has(normalized)) counters.unknownColumns += 1;
+        if (normalized && !KNOWN_COLUMNS.has(normalized)) {
+            counters.unknownColumns += 1;
+            if (counters.unknownColumnLocations.length < WARNING_LOCATION_LIMIT) {
+                counters.unknownColumnLocations.push(`${source.csvEntryIndex ?? 0}:1:${columnIndex + 1}`);
+            }
+        }
     });
 };
 
 const normalizeSourceKey = (value: string): string => value.trim().toLowerCase();
 
-// Source keys are tuples, not display paths. Escaping each component before joining keeps
-// `['work:north', 'ops']` distinct from `['work', 'north:ops']` while preserving the IDs
-// produced for the overwhelmingly common delimiter-free names.
+
 const encodeSourceKeyTuple = (...components: string[]): string => (
     components.map((component) => encodeURIComponent(component)).join(':')
 );
@@ -285,9 +301,8 @@ const CHECKLIST_ITEM_PATTERN = /^\[([ xX])\]\s*(.*)$/u;
 const parseChecklist = (value: string, archiveBudget: ImportArchiveBudget): ChecklistItem[] => {
     if (!value.trim()) return [];
     const itemCount = assertImportChecklistItemCount(value);
-    // Charge the archive-wide allowance while the checklist is still one
-    // string. A rejected archive must not first allocate split strings, UUIDs,
-    // and checklist objects that it is guaranteed to discard.
+
+
     archiveBudget.consumeChecklistItems(itemCount);
     return value.replace(/\r/gu, '\n').split(/\n|\|/u)
         .map((line) => line.trim())
@@ -314,15 +329,7 @@ const resolveStatus = (
     return 'inbox';
 };
 
-// Mirrors the date-only/datetime split omnifocus-import.ts's normalizeMappedDate already
-// established: a date-only value never gains an implicit midnight/time component, and a
-// datetime with no explicit offset keeps its literal wall-clock digits instead of shifting
-// through UTC. Used for startTime/dueDate/reviewAt only — NOT for entity timestamps, which
-// must be a real instant (see normalizeEntityTimestamp below).
-// SQL exports (the main source feeding this importer) write timestamps like
-// "2026-02-21 22:44:00.6390000 +00:00": fractional seconds beyond milliseconds and a
-// space before the offset, neither of which safeParseDate accepts. Normalize both away
-// here rather than loosening the app-wide parser.
+
 const normalizeSqlTimestampShape = (value: string): string => value
     .replace(/(\.\d{3})\d+/u, '$1')
     .replace(/ (Z|[+-]\d{2}:?\d{2})$/iu, '$1');
@@ -377,46 +384,44 @@ const parseCsvDateValue = (value: string): string | undefined => {
     return /\d{1,2}:\d{2}/u.test(trimmed) ? formatLocalDateTime(parsed) : formatLocalDate(parsed);
 };
 
-// Entity timestamps (createdAt, and completedAt which feeds updatedAt via applyImport's
-// fallback) must be a real, unambiguous instant. A bare "2026-08-01" written verbatim into
-// storage reads back as UTC midnight in some readers (sync.ts's `new Date(...)`) and local
-// midnight in others (safeParseDate) — one string, two different instants. Normalizing through
-// safeParseDate + toISOString here, once, means every reader agrees forever after.
+
 const normalizeEntityTimestamp = (value: string): string | undefined => {
     const normalized = normalizeSqlTimestampShape(value.trim());
     if (!hasValidCalendarComponents(normalized)) return undefined;
     return safeParseDate(normalized)?.toISOString();
 };
 
-// SQL exports render missing values as the literal string NULL; treating those cells as
-// empty keeps them from becoming task titles, tags, or contexts named "NULL".
+
 const readCell = (row: string[], headerIndex: Map<string, number>, key: string): string => {
     const value = getCell(row, headerIndex, key);
     return /^null$/iu.test(value) ? '' : value;
 };
 
-const parseDateCell = (raw: string, counters: MindwtrCsvWarningCounters): string | undefined => {
+const recordUnparsedDate = (counters: MindwtrCsvWarningCounters, location: string): void => {
+    counters.unparsedDates += 1;
+    if (counters.unparsedDateLocations.length < WARNING_LOCATION_LIMIT) counters.unparsedDateLocations.push(location);
+};
+
+const parseDateCell = (raw: string, counters: MindwtrCsvWarningCounters, location: string): string | undefined => {
     const value = parseCsvDateValue(raw);
-    if (!value && raw.trim()) counters.unparsedDates += 1;
+    if (!value && raw.trim()) recordUnparsedDate(counters, location);
     return value;
 };
 
-const parseTimestampCell = (raw: string, counters: MindwtrCsvWarningCounters): string | undefined => {
+const parseTimestampCell = (raw: string, counters: MindwtrCsvWarningCounters, location: string): string | undefined => {
     const value = normalizeEntityTimestamp(raw);
-    if (!value && raw.trim()) counters.unparsedDates += 1;
+    if (!value && raw.trim()) recordUnparsedDate(counters, location);
     return value;
 };
 
 type MindwtrCsvRowSource = {
+    csvEntryIndex?: number;
     documentFingerprint: string;
     kind: 'standalone-file' | 'zip-entry';
     name: string;
 };
 
-// Everything the Mindwtr recurrence model can act on. A rule carrying anything else
-// (BYSETPOS, BYMONTH, a frequency below daily) would import as the nearest rule the model
-// CAN express — "second Tuesday" silently becoming "every Tuesday" — so the row is named in
-// a warning and its task is imported without recurrence instead.
+
 const SUPPORTED_RRULE_KEYS = new Set(['FREQ', 'INTERVAL', 'BYDAY', 'BYMONTHDAY', 'COUNT', 'UNTIL', 'WKST']);
 const UNSUPPORTED_RECURRENCE_SAMPLE_LIMIT = 3;
 
@@ -456,7 +461,8 @@ const parseMindwtrCsvRows = (
     archiveBudget: ImportArchiveBudget,
 ): ParsedMindwtrCsvImportData => {
     const delimiter = detectMindwtrCsvDelimiter(csvText);
-    const { rows, hasUnclosedQuote } = parseCsvRows(sanitizeCsvText(csvText), delimiter, undefined, archiveBudget);
+    const recordNumbers: number[] = [];
+    const { rows, hasUnclosedQuote } = parseCsvRows(sanitizeCsvText(csvText), delimiter, undefined, archiveBudget, recordNumbers);
     if (hasUnclosedQuote) counters.unclosedQuotedFiles += 1;
     if (rows.length === 0) {
         return { areas: [], projects: [], sections: [], tasks: [], warnings: [] };
@@ -466,7 +472,7 @@ const parseMindwtrCsvRows = (
     if (!headerIndex.has('TITLE')) {
         throw new Error('Mindwtr CSV is missing the required column: Title');
     }
-    countUnknownColumns(rows[0] || [], counters);
+    countUnknownColumns(rows[0] || [], counters, source);
 
     const areasByKey = new Map<string, ParsedMindwtrCsvArea>();
     const projectsByKey = new Map<string, ParsedMindwtrCsvProject>();
@@ -525,8 +531,11 @@ const parseMindwtrCsvRows = (
             });
         }
 
-        const completedAt = parseTimestampCell(readCell(row, headerIndex, 'COMPLETED AT'), counters);
-        const cancelledAt = parseTimestampCell(readCell(row, headerIndex, 'CANCELLED AT'), counters);
+        const rowNumber = rowIndex + 1;
+        const recordNumber = recordNumbers[rowIndex] - recordNumbers[0] + 1;
+        const dateLocation = (column: string): string => `${source.csvEntryIndex ?? 0}:${recordNumber}:${(headerIndex.get(column) ?? 0) + 1}`;
+        const completedAt = parseTimestampCell(readCell(row, headerIndex, 'COMPLETED AT'), counters, dateLocation('COMPLETED AT'));
+        const cancelledAt = parseTimestampCell(readCell(row, headerIndex, 'CANCELLED AT'), counters, dateLocation('CANCELLED AT'));
         const status = resolveStatus(
             readCell(row, headerIndex, 'STATUS'),
             Boolean(projectSourceKey),
@@ -535,7 +544,6 @@ const parseMindwtrCsvRows = (
             counters,
         );
         const idColumn = readCell(row, headerIndex, 'ID').trim();
-        const rowNumber = rowIndex + 1;
         const sourceIdentityKind = idColumn ? 'explicit-id' : 'row-fallback';
         const sourceId = idColumn || `${source.kind === 'zip-entry' ? `${source.name}:` : ''}row-${rowNumber}`;
         const sourceKey = idColumn
@@ -555,18 +563,18 @@ const parseMindwtrCsvRows = (
             checklist: parseChecklist(readCell(row, headerIndex, 'CHECKLIST'), archiveBudget),
             completedAt,
             contexts: parseContexts(readCell(row, headerIndex, 'CONTEXTS')),
-            createdAt: parseTimestampCell(readCell(row, headerIndex, 'CREATED AT'), counters),
+            createdAt: parseTimestampCell(readCell(row, headerIndex, 'CREATED AT'), counters, dateLocation('CREATED AT')),
             description: readCell(row, headerIndex, 'DESCRIPTION').trim() || undefined,
-            dueDate: parseDateCell(readCell(row, headerIndex, 'DUE DATE'), counters),
+            dueDate: parseDateCell(readCell(row, headerIndex, 'DUE DATE'), counters, dateLocation('DUE DATE')),
             energyLevel: parseEnergy(readCell(row, headerIndex, 'ENERGY')),
             location: readCell(row, headerIndex, 'LOCATION').trim() || undefined,
-            // Falls back to row index like TickTick's own ORDER column handling; ties after
-            // sorting keep CSV row order because Array#sort is a stable sort.
+
+
             order: toNumber(readCell(row, headerIndex, 'ORDER'), rowIndex),
             priority: parsePriority(readCell(row, headerIndex, 'PRIORITY')),
             projectSourceKey,
             recurrence: parseRecurrenceCell(readCell(row, headerIndex, 'RECURRENCE'), counters, rowNumber, source),
-            reviewAt: parseDateCell(readCell(row, headerIndex, 'REVIEW DATE'), counters),
+            reviewAt: parseDateCell(readCell(row, headerIndex, 'REVIEW DATE'), counters, dateLocation('REVIEW DATE')),
             sectionSourceKey,
             sourceId,
             sourceIdentityKind,
@@ -574,7 +582,7 @@ const parseMindwtrCsvRows = (
             ...(!idColumn ? {
                 compatibilitySourceKeys: [rowTaskSourceKeyFor(source.kind, source.name, rowNumber)],
             } : {}),
-            startTime: parseDateCell(readCell(row, headerIndex, 'START DATE'), counters),
+            startTime: parseDateCell(readCell(row, headerIndex, 'START DATE'), counters, dateLocation('START DATE')),
             status,
             tags: parseTags(readCell(row, headerIndex, 'TAGS')),
             title,
@@ -609,7 +617,8 @@ const mergeParsedData = (target: ParsedMindwtrCsvImportData, source: ParsedMindw
         sectionKeys.add(section.sourceKey);
         target.sections.push(section);
     });
-    target.tasks.push(...source.tasks);
+
+    source.tasks.forEach((task) => target.tasks.push(task));
 };
 
 const dropDuplicateTasksAndUnusedContainers = (
@@ -700,6 +709,7 @@ export const parseMindwtrCsvImportSource = (input: MindwtrCsvFileInput): Mindwtr
                 : generateDeterministicUUID(source.entries.map(({ entryName, entryBytes }) => (
                     `${normalizeArchiveEntryIdentity(entryName)}:${fingerprintImportBytes(entryBytes)}`
                 )).sort().join('|'));
+            let csvEntryIndex = 0;
             source.entries.forEach(({ entryName, entryBytes }) => {
                 const lowerName = entryName.toLowerCase();
                 if (!entryName || entryName.endsWith('/')) return;
@@ -711,8 +721,10 @@ export const parseMindwtrCsvImportSource = (input: MindwtrCsvFileInput): Mindwtr
                     counters.nonCsvEntries += 1;
                     return;
                 }
+                csvEntryIndex += 1;
                 try {
                     parseOneCsv(decodeTextBytes(entryBytes), {
+                        csvEntryIndex,
                         documentFingerprint,
                         kind: 'zip-entry',
                         name: entryName,
@@ -739,13 +751,10 @@ export const parseMindwtrCsvImportSource = (input: MindwtrCsvFileInput): Mindwtr
         };
     }
 
-    // Preview and apply share this global task identity, so every duplicate warning corresponds
-    // to a row apply will actually drop. Containers referenced only by a dropped row must not
-    // inflate the preview or create empty Area/Project/Section records during apply.
+
     dropDuplicateTasksAndUnusedContainers(parsedData, counters);
 
-    // Stable sort: groups each task's manual Order within its own project/area bucket while
-    // preserving original row order as the tiebreak (Array#sort is required to be stable).
+
     parsedData.tasks.sort((left, right) => {
         const bucketCompare = bucketKeyForTask(left).localeCompare(bucketKeyForTask(right));
         return bucketCompare !== 0 ? bucketCompare : left.order - right.order;
@@ -763,16 +772,14 @@ export const parseMindwtrCsvImportSource = (input: MindwtrCsvFileInput): Mindwtr
     };
 };
 
-// Delegates entity creation (rev/revBy stamping, tombstone-aware deterministic id dedupe,
-// per-bucket order allocation, and now Section creation) entirely to the shared seam.
+
 export const applyMindwtrCsvImport = (
     currentData: AppData,
     parsedData: ParsedMindwtrCsvImportData,
     options: { now?: Date | string } = {}
 ): MindwtrCsvImportExecutionResult => {
-    // Before area scoping, deterministic project/section/task IDs used only the
-    // project name. Reuse those IDs when one project name has an unambiguous
-    // owner so upgrading does not turn a routine re-import into duplicates.
+
+
     const legacyProjectSourceKeyByScopedKey = new Map<string, string>();
     parsedData.projects.forEach((project) => {
         if (!project.areaSourceKey) return;
@@ -799,8 +806,8 @@ export const applyMindwtrCsvImport = (
         if (project && project.sourceKey !== projectSourceKeyFor(project.areaSourceKey, project.name)) {
             return `${task.projectSourceKey}:${task.sourceId}`;
         }
-        // The stable ID (or ZIP-qualified row fallback) owns task identity; moving containers
-        // in a corrected export must not manufacture a second task.
+
+
         return legacyCanonicalTaskSourceKeyFor(task.sourceId);
     };
     const tasksForImport = parsedData.tasks.map((task) => ({
@@ -830,10 +837,8 @@ export const applyMindwtrCsvImport = (
             areaSourceKey,
             colonProjectSourceKey,
             projectSourceKey,
-            // Precomputed once per project (not once per row × project) so the
-            // per-row historical-id scan below only appends the row's sourceId
-            // instead of rebuilding these via encodeSourceKeyTuple's
-            // array-spread/map/join on every (row, project) pair (BUG-12).
+
+
             tuplePrefix: `${encodeSourceKeyTuple(...(areaSourceKey ? [areaSourceKey] : []), projectSourceKey)}:`,
             colonPrefix: `${colonProjectSourceKey}:`,
             plainPrefix: `${projectSourceKey}:`,
@@ -850,10 +855,7 @@ export const applyMindwtrCsvImport = (
         resolvedIds.area.set(area.sourceKey, createMindwtrCsvImportId('area', area.sourceKey));
     });
 
-    // The immediately preceding importer used raw colon-joined scoped paths. Prefer a current
-    // escaped-tuple ID, but recognize that predecessor only when the stored parent ownership
-    // proves which tuple it represented. Two previously-colliding paths can therefore reuse at
-    // most one old entity; the other receives its new injective ID.
+
     parsedData.projects.forEach((project) => {
         const scopedId = createMindwtrCsvImportId('project', project.sourceKey);
         if (currentProjectById.has(scopedId)) {
@@ -952,15 +954,10 @@ export const applyMindwtrCsvImport = (
         && task.createdAt === task.updatedAt
     );
 
-    // Older task IDs embedded their container path. Reuse an owned candidate unchanged; when a
-    // single importer-generated candidate proves that the CSV container was previously collapsed
-    // or moved, preserve the task and repair only its container references after creation.
+
     tasksForImport.forEach((task) => {
-        // An `ID` column holding a live task's own id IS the identity — that is what Mindwtr's
-        // own CSV export writes, so a round trip resolves back onto those same tasks rather than
-        // minting derived ids and duplicating them (D1). `import-apply.ts` then SKIPS every id
-        // that already exists, so a round trip is a no-op, not an update: CSV edits are not
-        // applied. Only non-explicit identities fall through to the derived-id chain below.
+
+
         if (task.sourceIdentityKind === 'explicit-id' && currentTaskById.has(task.sourceId)) {
             resolvedIds.task.set(task.sourceKey, task.sourceId);
             return;

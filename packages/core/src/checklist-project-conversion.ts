@@ -1,4 +1,4 @@
-import type { Task, Project } from './types';
+import type { Task, Project, NotificationSettings } from './types';
 import type { TaskStore } from './store-types';
 import { buildNewProject } from './store-projects/project-actions';
 import { buildNewTask } from './task-creation';
@@ -6,6 +6,7 @@ import { createProjectOrderReserver, ensureDeviceId, nextRevision, persist, getN
 import { taskEditValuesEqual as same } from './json-value-equality';
 import { generateUUID } from './uuid';
 import { logInfo } from './logger';
+import { shouldSendTaskReminders } from './task-reminder-policy';
 
 type State = Pick<TaskStore, '_allTasks' | '_allProjects' | '_allSections' | '_allAreas' | 'settings'>;
 export type ChecklistProjectConversion = {
@@ -13,13 +14,13 @@ export type ChecklistProjectConversion = {
     deviceIdBefore?: string; deviceId: string;
 };
 
-/** These task-only commitments cannot be transferred to a project safely. */
-export function checklistProjectBlockReason(task: Partial<Task>): string | null {
+
+export function checklistProjectBlockReason(task: Partial<Task>, settings: Pick<NotificationSettings, 'taskReminderDefault'> = {}): string | null {
     if (!task.checklist?.length || task.checklist.some(item => !item.title.trim())) return 'task.expandChecklistInvalid';
     if (task.deletedAt || task.purgedAt || task.cancelledAt || task.archivedAt
         || (task.status && !['inbox', 'next', 'done'].includes(task.status))) return 'task.expandChecklistInactive';
-    if (task.recurrence || task.relativeStartOffset || task.repeatReminderMinutes || task.reviewAt?.includes('T')
-        || (!task.suppressMindwtrReminders && [task.startTime, task.dueDate].some(value => value?.includes('T'))))
+    if (task.recurrence || task.relativeStartOffset || task.repeatReminderMinutes || task.dueReminderLeadMinutes || task.startReminderLeadMinutes || task.reviewAt?.includes('T')
+        || (shouldSendTaskReminders(task, settings) && [task.startTime, task.dueDate].some(value => value?.includes('T'))))
         return 'task.expandChecklistSchedule';
     if (task.assignedTo || task.location || task.timeEstimate || task.timeSpentMinutes)
         return 'task.expandChecklistMetadata';
@@ -29,7 +30,7 @@ export function checklistProjectBlockReason(task: Partial<Task>): string | null 
 export function prepareChecklistProjectConversion(state: State, source: Task, title: string,
     ids = { project: generateUUID(), tasks: source.checklist?.map(() => generateUUID()) ?? [] },
     now = new Date().toISOString(), deviceId?: string): { success: true; command: ChecklistProjectConversion } | { success: false; error: string } {
-    const blocked = checklistProjectBlockReason(source);
+    const blocked = checklistProjectBlockReason(source, state.settings);
     if (blocked) return { success: false, error: blocked };
     if (!title.trim()) return { success: false, error: 'common.validationRequired' };
     if (ids.tasks.length !== source.checklist!.length
@@ -58,7 +59,7 @@ export function prepareChecklistProjectConversion(state: State, source: Task, ti
             state: { ...state, _allProjects: [...state._allProjects, project] }, tasks: [],
             focusedCount: 0, focusTaskLimit: 0, projectOrderReserver: reserve });
         if (!built.ok) return { success: false, error: built.error };
-        // Keep the shared creation-time completion fallback for checked items.
+
         tasks.push(built.task);
     }
     const retired = { ...source, deletedAt: now, updatedAt: now, rev: nextRevision(source.rev), revBy: device.deviceId };
@@ -78,7 +79,7 @@ const retiredChecklistTask = (task: Task, now: string, deviceId: Task['revBy']):
     deletedAt: now, updatedAt: now, rev: nextRevision(task.rev), revBy: deviceId,
 });
 
-/** One snapshot write, with a frozen identity for save retries and conservative Undo. */
+
 export function createChecklistProjectConversionActions({ set, get, debouncedSave, flushPendingSave }: Context):
     Pick<TaskStore, 'convertChecklistToProject' | 'undoChecklistToProject'> {
     const footprint = (state: State, command: ChecklistProjectConversion, undone = false) => {
@@ -111,7 +112,7 @@ export function createChecklistProjectConversionActions({ set, get, debouncedSav
                     { project: command.project.id, tasks: command.tasks.map(task => task.id) }, command.project.createdAt, command.deviceId);
                 if (!planned.success || !same(planned.command, command)) return state;
             } else {
-                // Restoring must not put the source back in a deleted container.
+
                 if (command.source.projectId && !state._allProjects.some(row => row.id === command.source.projectId
                     && !row.deletedAt && !row.purgedAt && row.status !== 'archived')) return state;
                 if (command.source.sectionId && !state._allSections.some(row => row.id === command.source.sectionId && row.projectId === command.source.projectId && !row.deletedAt)) return state;

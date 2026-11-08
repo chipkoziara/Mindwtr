@@ -119,9 +119,10 @@ export const clearGlobalSearchActiveChip = (filters: GlobalSearchFilterState, ke
     return filters;
 };
 
+
 export const shouldRequestGlobalSearchFts = (query: string): boolean => query.length > 0
     && !/\b\w+:/i.test(query)
-    && !parseSearchQuery(query).clauses.some((clause) => clause.terms.some((term) => term.field !== null));
+    && !parseSearchQuery(query).clauses.some((clause) => clause.terms.some((term) => term.field !== null || term.negated));
 
 export const fetchGlobalSearchAdapterResults = async (
     query: string,

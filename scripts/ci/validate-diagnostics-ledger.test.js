@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 const root = path.resolve(import.meta.dir, "../..");
@@ -10,22 +12,25 @@ const sourceExtension = /\.(?:[cm]?[jt]sx?|rs|swift|kt|kts|java)$/;
 
 async function collectSources(directory) {
   const sources = [];
-  const entries = (await readdir(directory, { withFileTypes: true }))
-    .sort((left, right) => left.name.localeCompare(right.name));
-  for (const entry of entries) {
-    const filename = path.join(directory, entry.name);
-    if (entry.isDirectory() && !skippedDirectories.has(entry.name)) {
-      sources.push(...await collectSources(filename));
-    } else if (entry.isFile() && sourceExtension.test(entry.name)
-      && !/\.(?:test|spec)\.[^.]+$/.test(entry.name)) {
-      const source = await readFile(filename, "utf8");
-      sources.push({ file: path.relative(root, filename), source });
+
+  const filenames = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+    { cwd: directory, encoding: "utf8" }).split("\0").filter(Boolean).sort();
+  for (const filename of filenames) {
+    if (filename.split("/").some((part) => skippedDirectories.has(part))) continue;
+    if (sourceExtension.test(filename) && !/\.(?:test|spec)\.[^.]+$/.test(filename)) {
+      const absolute = path.join(directory, filename);
+      try {
+        const source = await readFile(absolute, "utf8");
+        sources.push({ file: path.relative(root, absolute), source });
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
     }
   }
   return sources;
 }
 
-function collectCodeSlugs({ file, source }) {
+function collectCodeSlugs({ file, source, formatterSources = [] }) {
   const constants = new Map([...source.matchAll(
     /\bconst\s+([\w$]+)\s*(?::\s*string\s*)?=\s*(['"])([^'"\r\n]*)\2/g,
   )].map((match) => [match[1], match[3]]));
@@ -36,18 +41,20 @@ function collectCodeSlugs({ file, source }) {
     const slug = match[2] ?? constants.get(match[3]);
     if (slug !== undefined) sites.push({ file, slug });
   }
-  // A conditional value (`releaseCheck: queued ? 'a' : 'b'`) emits either literal.
+
   for (const match of source.matchAll(
-    /\breleaseCheck\s*:\s*[^,{}?\r\n]+\?\s*(['"])([^'"\r\n]*)\1\s*:\s*(['"])([^'"\r\n]*)\3/g,
+    /\breleaseCheck\s*:\s*([^,{};]+\?[^,{};]+)/g,
   )) {
-    sites.push({ file, slug: match[2] }, { file, slug: match[4] });
+    for (const arm of match[1].matchAll(/[?:]\s*(['"])([^'"\r\n]*)\1/g)) {
+      sites.push({ file, slug: arm[2] });
+    }
   }
-  // Native Rust diagnostics put the field inside a log message rather than
-  // a JavaScript object. Only count log macros, not unused string constants.
+
+
   if (file.endsWith(".rs")) {
     const messages = [
       ...Array.from(source.matchAll(/\blog::(?:info|warn)!\(\s*"((?:\\[\s\S]|[^"\\])*)"/g), (match) => match[1]),
-      // A formatted message immediately logged, then reused for the Diagnostics file.
+
       ...Array.from(source.matchAll(/\blet\s+(\w+)\s*=\s*format!\(\s*"((?:\\[\s\S]|[^"\\])*)"\s*\);\s*log::(?:info|warn)!\(\s*"\{\1\}"\s*\)/g), (match) => match[2]),
     ];
     for (const message of messages) {
@@ -56,9 +63,8 @@ function collectCodeSlugs({ file, source }) {
       }
     }
   }
-  // Native Android diagnostics likewise put the field in the first string of
-  // an android.util.Log info/warn call, or of CoreHost.logLine (core's log, so
-  // Settings > Diagnostics); unused string constants do not count.
+
+
   if (file.endsWith(".kt")) {
     for (const message of source.matchAll(/(?:\bLog\.(?:i|w)\([^,()]+,|\.logLine\()\s*"((?:\\[\s\S]|[^"\\])*)"/g)) {
       for (const match of message[1].matchAll(/\breleaseCheck=([\w./-]+)/g)) {
@@ -66,8 +72,8 @@ function collectCodeSlugs({ file, source }) {
       }
     }
   }
-  // Native Swift diagnostics use NSLog or forward a literal JSON context to
-  // the shared Diagnostics logLine bridge; unused string constants do not count.
+
+
   if (file.endsWith(".swift")) {
     for (const message of source.matchAll(/\bNSLog\(\s*"((?:\\[\s\S]|[^"\\])*)"/g)) {
       for (const match of message[1].matchAll(/\breleaseCheck=([\w./-]+)/g)) {
@@ -80,15 +86,81 @@ function collectCodeSlugs({ file, source }) {
       try {
         const context = JSON.parse(call[2]);
         if (typeof context?.releaseCheck === "string") sites.push({ file, slug: context.releaseCheck });
-      } catch { /* Invalid JSON cannot supply a Diagnostics context. */ }
+      } catch {                                                         }
     }
-    // Dynamic scalar fields use a flat Swift dictionary encoded at the call site.
+    for (const call of source.matchAll(
+      /\binvoke\(\s*"logLine"\s*,\s*arguments:\s*\[\s*"(?:\\[\s\S]|[^"\\])*"\s*,\s*(?:(#+)"([\s\S]*?)"\1|("(?:\\[\s\S]|[^"\\])*"))\s*,?\s*\]\s*\)/g,
+    )) {
+      try {
+        const context = JSON.parse(call[2] ?? JSON.parse(call[3]));
+        if (typeof context?.releaseCheck === "string") sites.push({ file, slug: context.releaseCheck });
+      } catch { }
+    }
+    for (const call of source.matchAll(
+      /\bguard\s+let\s+(\w+)\s*=\s*(\w+)\.payload\([^{}]*\)\s*else\s*\{\s*return\s*\}\s*let\s+(\w+)\s*=\s*host\s+Task\s*\{\s*_\s*=\s*try\?\s*await\s+\3\?\.call\(\s*"logLine"\s*,\s*argumentsJSON:\s*json\(\s*\[\s*\2\.message\s*,\s*json\(\s*\1\s*\)\s*\]\s*\)\s*\)/g,
+    )) {
+      const type = call[2];
+      const definitions = formatterSources.filter((entry) => entry.file.endsWith(".swift")
+        && new RegExp(`\\bpublic\\s+enum\\s+${type}\\s*\\{`).test(entry.source));
+      if (definitions.length !== 1) continue;
+      const definition = definitions[0].source;
+      const tag = definition.match(/\bpublic\s+static\s+let\s+releaseCheck\s*=\s*"([^"\\\r\n]*)"/)?.[1];
+      const message = /\bpublic\s+static\s+let\s+message\s*=\s*"[^"\\\r\n]*"/.test(definition);
+      const payload = definition.match(/\bpublic\s+static\s+func\s+payload\b[\s\S]*?(?=\n    public static func|$)/)?.[0] ?? "";
+      const returned = /\bvar\s+(\w+)\s*:\s*\[String:\s*Any\]\s*=\s*\[\s*"releaseCheck"\s*:\s*releaseCheck\s*,[^\]]*\][\s\S]*?\breturn\s+\1\b/.test(payload);
+      if (tag !== undefined && message && returned) sites.push({ file, slug: tag });
+    }
+    for (const call of source.matchAll(
+      /\bcall\(\s*"logLine"\s*,\s*argumentsJSON:\s*(?:self\.)?json\(\s*\[\s*([A-Za-z_]\w*)\s*\?\s*"(?:\\[\s\S]|[^"\\])*"\s*:\s*"(?:\\[\s\S]|[^"\\])*"\s*,\s*\1\s*\?\s*(#+)"([\s\S]*?)"\2\s*:\s*(#+)"([\s\S]*?)"\4\s*,?\s*\]\s*\)\s*\)/g,
+    )) {
+      for (const raw of [call[3], call[5]]) {
+        try {
+          const context = JSON.parse(raw);
+          if (typeof context?.releaseCheck === "string") sites.push({ file, slug: context.releaseCheck });
+        } catch {                                                         }
+      }
+    }
+
     for (const call of source.matchAll(
       /\bcall\(\s*"logLine"\s*,\s*argumentsJSON:\s*(?:self\.)?json\(\s*\[\s*"(?:\\[\s\S]|[^"\\])*"\s*,\s*try\s+(?:self\.)?json\(\s*\[((?:"(?:\\[\s\S]|[^"\\])*"|[^"[\]])*)\]\s*\)\s*,?\s*\]\s*\)\s*\)/g,
     )) {
       for (const field of call[1].matchAll(/"releaseCheck"\s*:\s*("(?:\\[\s\S]|[^"\\])*")/g)) {
         try { sites.push({ file, slug: JSON.parse(field[1]) }); }
-        catch { /* Interpolated or unsupported Swift strings are not resolved literals. */ }
+        catch {                                                                            }
+      }
+    }
+    for (const call of source.matchAll(
+      /\bvar\s+(\w+)\s*:\s*\[String:\s*Any\]\s*=\s*\[((?:"(?:\\[\s\S]|[^"\\])*"|[^"[\]])*)\][\s\S]{0,400}?\bif\s+let\s+(\w+)\s*=\s*try\?\s*(?:Self|self)\.ownedJSON\(\s*\1\s*\)\s*\{[^{}]*?\binvoke\(\s*"logLine"\s*,\s*arguments:\s*\[[^[\]]*,\s*\3\s*\]\s*\)/g,
+    )) {
+      for (const field of call[2].matchAll(/"releaseCheck"\s*:\s*("(?:\\[\s\S]|[^"\\])*")/g)) {
+        try { sites.push({ file, slug: JSON.parse(field[1]) }); }
+        catch { }
+      }
+    }
+    for (const call of source.matchAll(
+      /\blet\s+(\w+)\s*=\s*try\?\s*(?:Self|self)\.ownedJSON\(\s*\[((?:"(?:\\[\s\S]|[^"\\])*"|[^"[\]])*)\]\s*\)\s*\{[^{}]*?\binvoke\(\s*"logLine"\s*,\s*arguments:\s*\[[^[\]]*,\s*\1\s*\]\s*\)/g,
+    )) {
+      for (const field of call[2].matchAll(/"releaseCheck"\s*:\s*("(?:\\[\s\S]|[^"\\])*")/g)) {
+        try { sites.push({ file, slug: JSON.parse(field[1]) }); }
+        catch {                                                                            }
+      }
+    }
+    for (const call of source.matchAll(
+      /\blet\s+(\w+)\s*=\s*try\?\s*(?:self\.)?json\(\s*\[\s*"(?:\\[\s\S]|[^"\\])*"\s*,\s*try\s+(?:self\.)?json\(\s*\[((?:"(?:\\[\s\S]|[^"\\])*"|[^"[\]])*)\]\s*\)\s*,?\s*\]\s*\)\s*else\s*\{\s*return\s*\}\s*Task\s*\{\s*_\s*=\s*try\?\s*await\s+\w+\.call\(\s*"logLine"\s*,\s*argumentsJSON:\s*\1\s*\)/g,
+    )) {
+      for (const field of call[2].matchAll(/"releaseCheck"\s*:\s*("(?:\\[\s\S]|[^"\\])*")/g)) {
+        try { sites.push({ file, slug: JSON.parse(field[1]) }); }
+        catch {}
+      }
+    }
+  }
+
+  if (/\.[cm]?[jt]sx?$/.test(file)) {
+    for (const table of source.matchAll(
+      /\bconst\s+(\w+)\s*(?::[^=;]+)?=\s*\{([^{}]*)\};\s*const\s+(\w+)\s*=\s*\1\[event\.message\];[^;]*?\bevent\.context\.releaseCheck\s*!==\s*\3\[0\][^;]*;\s*log\.info\(\s*event\.message\b/g,
+    )) {
+      for (const entry of table[2].matchAll(/(['"])[^'"\r\n]*\1\s*:\s*\[\s*(['"])([^'"\r\n]*)\2/g)) {
+        sites.push({ file, slug: entry[3] });
       }
     }
   }
@@ -117,7 +189,7 @@ const sources = (await Promise.all([
   collectSources(path.join(root, "apps")),
   collectSources(path.join(root, "scripts")),
 ])).flat();
-const codeSites = sources.flatMap(collectCodeSlugs);
+const codeSites = sources.flatMap((entry) => collectCodeSlugs({ ...entry, formatterSources: sources }));
 function findUnemittedSlugs(slugs, sites) {
   const emittedSlugs = new Set(sites.map(({ slug }) => slug));
   return slugs.filter((slug) => !emittedSlugs.has(slug));
@@ -129,6 +201,36 @@ const ledger = parseLedger(ledgerSource);
 const topVersion = ledgerSource.match(/^## (v\d+\.\d+\.\d+)\b/m)?.[1];
 
 describe("release diagnostics ledger", () => {
+  it("ignores generated assets while scanning tracked and new source files", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "diagnostics-sources-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: directory });
+      await writeFile(path.join(directory, ".gitignore"), "assets/\n");
+      await mkdir(path.join(directory, "assets"));
+      await writeFile(path.join(directory, "assets/core-host.js"), "releaseCheck: 'v1.3.7/stale'");
+      await writeFile(path.join(directory, "tracked.ts"), "releaseCheck: 'v1.3.7/tracked'");
+      await writeFile(path.join(directory, "deleted.ts"), "releaseCheck: 'v1.3.7/deleted'");
+      execFileSync("git", ["add", "tracked.ts", "deleted.ts"], { cwd: directory });
+      await rm(path.join(directory, "deleted.ts"));
+      await writeFile(path.join(directory, "new.ts"), "releaseCheck: 'v1.3.7/new'");
+      expect((await collectSources(directory)).flatMap(collectCodeSlugs).map(({ slug }) => slug))
+        .toEqual(["v1.3.7/new", "v1.3.7/tracked"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves conditional releaseCheck values across line breaks", () => {
+    const file = "packages/core/src/store-projects/project-to-section-actions.ts";
+    expect(collectCodeSlugs({ file, source: `
+      logInfo('converted', { context: { releaseCheck: command.source.before.isSequential
+        ? 'v1.3.7/sequential-project-to-section' : 'v1.3.4/project-to-section' } });
+    ` })).toEqual([
+      { file, slug: "v1.3.7/sequential-project-to-section" },
+      { file, slug: "v1.3.4/project-to-section" },
+    ]);
+  });
+
   it("resolves constant-valued releaseCheck sites in the same source file", () => {
     const file = "apps/example.ts";
     expect(collectCodeSlugs({ file, source: `
@@ -141,6 +243,20 @@ describe("release diagnostics ledger", () => {
       { file, slug: "v1.2.8/constant-check" },
       { file, slug: "v1.2.8/typed-check" },
       { file, slug: "v1.2.8/literal-check" },
+    ]);
+  });
+
+  it("resolves nested releaseCheck arms without conditions or adjacent fields", () => {
+    const file = "apps/Example.ts";
+    expect(collectCodeSlugs({ file, source: `
+      logInfo('confirmed', { context: {
+        releaseCheck: source === 'project' ? 'v1.3.8/project' : source === 'inbox' ? 'v1.3.8/inbox' : 'v1.3.8/reference',
+        outcome: changed ? 'unrelated-success' : 'unrelated-noop'
+      } });
+    ` })).toEqual([
+      { file, slug: "v1.3.8/project" },
+      { file, slug: "v1.3.8/inbox" },
+      { file, slug: "v1.3.8/reference" },
     ]);
   });
 
@@ -233,6 +349,77 @@ describe("release diagnostics ledger", () => {
     ` })).toEqual([]);
   });
 
+  it("resolves only literal Swift Engine logLine contexts", () => {
+    const file = "apps/ios-native/Sources/MindwtrNativeCore/Example.swift";
+    const source = String.raw`
+      _ = try? invoke("logLine", arguments: ["Raw diagnostic", #"{"releaseCheck":"v1.3.8/raw-engine","outcome":"confirmed"}"#])
+      _ = try? invoke("logLine", arguments: ["Escaped diagnostic", "{\"releaseCheck\":\"v1.3.8/escaped-engine\"}"])
+      let unused = #"{"releaseCheck":"v1.3.8/unused-engine"}"#
+      _ = try? invoke("other", arguments: ["Other call", #"{"releaseCheck":"v1.3.8/other-engine"}"#])
+      _ = try? invoke("logLine", arguments: ["Variable context", unused])
+      _ = try? invoke("logLine", arguments: ["Malformed context", #"{"releaseCheck":"v1.3.8/malformed-engine",}"#])
+      _ = try? invoke("logLine", arguments: ["Numeric field", "{\"releaseCheck\":123}"])
+      _ = try? invoke("logLine", arguments: ["Interpolated context", "{\"releaseCheck\":\"\(slug)\"}"])
+      _ = try? invoke("logLine", arguments: ["Concatenated context", "{\"releaseCheck\":\"v1.3.8/partial-engine\"}" + suffix])
+    `;
+    expect(collectCodeSlugs({ file, source })).toEqual([
+      { file, slug: "v1.3.8/raw-engine" },
+      { file, slug: "v1.3.8/escaped-engine" },
+    ]);
+    expect(collectCodeSlugs({ file: "apps/Example.ts", source })).toEqual([]);
+  });
+
+  it("resolves the actual shared Board geometry formatter only through its logLine emission", () => {
+    const file = "apps/ios-native/App/CoreModel.swift";
+    const source = sources.find((entry) => entry.file === file).source;
+    const start = source.indexOf("    func logBoardDragGeometry(");
+    const end = source.indexOf("    @discardableResult\n    func orderBoardCard(", start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const emission = source.slice(start, end);
+    const formatter = sources.find((entry) => entry.file.endsWith("/NativeBoardDragGeometry.swift"));
+    const resolve = (text, formatterSources = [formatter]) => collectCodeSlugs({ file, source: text, formatterSources });
+    expect(resolve(emission)).toEqual([{ file, slug: "v1.3.9/ios-board-drag-geometry" }]);
+    for (const text of [
+      emission.replace('call("logLine"', 'call("other"'),
+      emission.replace("NativeBoardDragGeometry.message", "Other.message"),
+      emission.replace("json(value)", "json(otherValue)"),
+      emission.slice(0, emission.indexOf("        let diagnosticHost")),
+    ]) expect(resolve(text)).toEqual([]);
+    expect(resolve(formatter.source)).toEqual([]);
+    expect(resolve(emission, [])).toEqual([]);
+    expect(resolve(emission, [formatter, formatter])).toEqual([]);
+    expect(resolve(emission, [{ ...formatter, source: formatter.source.replace(
+      '"releaseCheck": releaseCheck', '"unrelated": releaseCheck',
+    ) }])).toEqual([]);
+  });
+
+  it("resolves both actual Board inline Swift message/context branches", () => {
+    const file = "apps/ios-native/App/CoreModel.swift";
+    const source = sources.find((entry) => entry.file === file).source;
+    const start = source.indexOf('let fromDone = capture.status == "done"');
+    const end = source.indexOf("await runBoardAction(request)", start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    expect(collectCodeSlugs({ file, source: source.slice(start, end) })).toEqual([
+      { file, slug: "v1.3.7/ios-board-done-cross-drop" },
+      { file, slug: "v1.3.7/ios-board-cross-column-drag" },
+    ]);
+  });
+
+  it("rejects unused, non-logLine, mismatched and malformed conditional Swift contexts", () => {
+    const file = "apps/ios-native/App/Example.swift";
+    const branches = `fromDone ? "Done" : "Move",
+      fromDone ? #"{"releaseCheck":"v1.3.7/conditional-done"}"# : #"{"releaseCheck":"v1.3.7/conditional-move"}"#`;
+    for (const source of [
+      `let unused = json([${branches}])`,
+      `host.call("other", argumentsJSON: json([${branches}]))`,
+      `host.call("logLine", argumentsJSON: json([${branches.replace('fromDone ? #', 'other ? #')}]))`,
+      `host.call("logLine", argumentsJSON: json([${branches.replaceAll('"}', '",}')}]))`,
+      'host.call("logLine", argumentsJSON: json([fromDone ? "Done" : "Move", fromDone ? #"{"releaseCheck":1}"# : #"{"releaseCheck":null}"#]))',
+    ]) expect(collectCodeSlugs({ file, source })).toEqual([]);
+    expect(collectCodeSlugs({ file: "apps/Example.ts",
+      source: `host.call("logLine", argumentsJSON: json([${branches}]))` })).toEqual([]);
+  });
+
   it("resolves Swift dictionary contexts only when immediately encoded into logLine", () => {
     const file = "apps/ios-native/App/CoreModel.swift";
     expect(collectCodeSlugs({ file, source: `
@@ -258,6 +445,34 @@ describe("release diagnostics ledger", () => {
     ]);
   });
 
+  it("resolves Swift ownedJSON contexts only when their if-let body forwards them to logLine", () => {
+    const file = "apps/ios-native/Sources/MindwtrNativeCore/CoreHost.swift";
+    expect(collectCodeSlugs({ file, source: `
+      let unused = try? Self.ownedJSON(["releaseCheck": "v1.3.7/unused-owned"])
+      if let context = try? Self.ownedJSON(["releaseCheck": "v1.3.7/other-bridge"]) {
+          _ = try? invoke("other", arguments: ["Not a diagnostic", context])
+      }
+      if let context = try? Self.ownedJSON(["releaseCheck": "v1.3.7/other-name"]) {
+          _ = try? invoke("logLine", arguments: ["Wrong context", diagnostic])
+      }
+      if let context = try? Self.ownedJSON(["releaseCheck": "v1.3.7/outside-block"]) {
+          record(context)
+      }
+      _ = try? invoke("logLine", arguments: ["After the block", context])
+      if let raw = args.first as? String,
+         let context = try? Self.ownedJSON(["releaseCheck": "v1.3.7/owned-undo", "kind": kind, "outcome": "persisted"]) {
+          _ = try? invoke("logLine", arguments: ["Native undo persisted", context])
+      }
+      if let context = try? Self.ownedJSON(["releaseCheck": "v1.3.7/owned-message", "outcome": "confirmed"]) {
+          let message = ready ? "Ready" : "Pending"
+          _ = try? invoke("logLine", arguments: [message, context])
+      }
+    ` })).toEqual([
+      { file, slug: "v1.3.7/owned-undo" },
+      { file, slug: "v1.3.7/owned-message" },
+    ]);
+  });
+
   it("resolves a Rust formatted message immediately forwarded to a log macro", () => {
     const file = "apps/desktop/src-tauri/src/example.rs";
     expect(collectCodeSlugs({ file, source: `
@@ -267,6 +482,35 @@ describe("release diagnostics ledger", () => {
       let other = format!("Different extra.releaseCheck=v1.3.3/different");
       log::warn!("{unrelated}");
     ` })).toEqual([{ file, slug: "v1.3.3/formatted" }]);
+  });
+
+  it("resolves a Swift guard-bound logLine context only when its Task forwards that line", () => {
+    const file = "apps/ios-native/App/CoreModel.swift";
+    const source = sources.find((entry) => entry.file === file).source;
+    const start = source.indexOf("badge.report = { [weak self] publication in");
+    const end = source.indexOf("appIconBadgeStore = badge", start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const emission = source.slice(start, end);
+    expect(collectCodeSlugs({ file, source: emission })).toEqual([{ file, slug: "v1.3.9/ios-due-badge" }]);
+    for (const text of [
+      emission.replace('call("logLine"', 'call("other"'),
+      emission.replace("argumentsJSON: line)", "argumentsJSON: other)"),
+    ]) expect(collectCodeSlugs({ file, source: text })).toEqual([]);
+  });
+
+  it("resolves a message-keyed TypeScript table only when its checked entry is logged", () => {
+    const file = "apps/android-native/bundle/host-file-sync.ts";
+    const source = sources.find((entry) => entry.file === file).source;
+    expect(collectCodeSlugs({ file, source }).map(({ slug }) => slug)).toEqual([
+      "v1.3.9/ios-file-sync-read-owner",
+      "v1.3.9/ios-file-sync-created-write",
+      "v1.3.9/ios-file-sync-publication-primitives",
+      "v1.3.9/ios-file-sync-publication-primitives",
+    ]);
+    for (const text of [
+      source.replace("event.context.releaseCheck !== fields[0]", "event.context.kind !== fields[0]"),
+      source.replace("log.info(event.message", "log.warn(event.message"),
+    ]) expect(collectCodeSlugs({ file, source: text })).toEqual([]);
   });
 
   it("uses version-prefixed slugs at every code site", () => {

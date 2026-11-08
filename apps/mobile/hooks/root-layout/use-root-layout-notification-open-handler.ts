@@ -1,77 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { AppState, Platform } from 'react-native';
-import { flushPendingSave, runWithImmediateSaveTracking, useTaskStore } from '@mindwtr/core';
+import { useTaskStore } from '@mindwtr/core';
 import {
     getReminderCompletionBlocker,
     REMINDER_COMPLETE_UPDATE,
     resolveNotificationOpenRoute,
 } from '@mindwtr/core/mobile-notification-open';
 
-import { logInfo, logWarn } from '@/lib/app-log';
+import { logInfo } from '@/lib/app-log';
+import { replayNotificationCompletions } from '@/lib/notification-completion-drain';
 import { setNotificationOpenHandler } from '@/lib/notification-service';
-import { acknowledgeNotificationCompletion, peekPendingNotificationCompletions, consumePendingNotificationOpenPayload } from '@/modules/notification-open-intents';
+import { consumePendingNotificationOpenPayload } from '@/modules/notification-open-intents';
 
-// Outcome evidence for #1028: a received action that changes nothing must say
-// why, or the log can't separate a lost tap from a deliberately ignored one.
+
 const logNotificationOutcome = (message: string, extra: Record<string, string>) => {
     void logInfo(`[Local Notifications] ${message}`, { scope: 'notifications', extra });
 };
 
-// One replay owner across hook remounts; native receipts remain the durable owner.
-let completionReplay: Promise<void> | null = null;
-let replayRequested = false;
-const replayNotificationCompletions = (): Promise<void> => {
-    replayRequested = true;
-    if (completionReplay) return completionReplay;
-    completionReplay = (async () => {
-        do {
-            replayRequested = false;
-            try {
-                const completions = await peekPendingNotificationCompletions();
-                for (const completion of completions) {
-                    try {
-                        if (!completion.actionId || !completion.taskId) throw new Error('Invalid completion receipt');
-                        logNotificationOutcome('Done action stored', {
-                            releaseCheck: 'v1.3.5/reminder-done-durable', outcome: 'stored',
-                        });
-                        const state = useTaskStore.getState();
-                        const task = state._tasksById?.get(completion.taskId) ?? state.tasks?.find((item) => item.id === completion.taskId);
-                        const blocker = getReminderCompletionBlocker(task);
-                        if (!blocker) {
-                            const { result } = await runWithImmediateSaveTracking(() => state.updateTask(completion.taskId!, { ...REMINDER_COMPLETE_UPDATE }));
-                            if (!result.success) throw new Error('Completion update failed');
-                        } else {
-                            // A previous failed save may already have changed memory (including recurrence).
-                            // Save that snapshot again without reapplying completion or generating another instance.
-                            await state.persistSnapshot();
-                        }
-                        await flushPendingSave();
-                        await acknowledgeNotificationCompletion(completion.actionId);
-                        logNotificationOutcome('Done action saved and acknowledged', {
-                            releaseCheck: 'v1.3.5/reminder-done-durable',
-                            outcome: blocker || 'completed',
-                        });
-                    } catch {
-                        void logWarn('[Local Notifications] Done action retained for retry', {
-                            scope: 'notifications', extra: { releaseCheck: 'v1.3.5/reminder-done-durable', outcome: 'retained' },
-                        });
-                        // Retry only on another receipt, readiness change, or foreground; no failure loop.
-                        replayRequested = false;
-                        return;
-                    }
-                }
-            } catch {
-                void logWarn('[Local Notifications] Done queue retained for retry', {
-                    scope: 'notifications', extra: { releaseCheck: 'v1.3.5/reminder-done-durable', outcome: 'unreadable' },
-                });
-                replayRequested = false;
-                return;
-            }
-        } while (replayRequested);
-    })().finally(() => { completionReplay = null; });
-    return completionReplay;
+
+const logIosReminderAction = (stage: string, action = 'complete', reason = '') => {
+    if (Platform.OS !== 'ios') return;
+    void logInfo('[Local Notifications] iOS reminder action progress', {
+        scope: 'notifications',
+        extra: { releaseCheck: 'v1.3.7/ios-reminder-actions', stage, action, reason,
+            appState: AppState.currentState || 'unknown' },
+    });
 };
+
 
 type RouterLike = {
     push: (...args: any[]) => void;
@@ -111,7 +67,7 @@ export function useRootLayoutNotificationOpenHandler({
         context?: string;
         kind?: string;
     }) => {
-        // Which screen or action a tap means is core's (mobile-notification-open.ts).
+
         const route = resolveNotificationOpenRoute(payload, {
             now: () => Date.now(),
             nextTaskOpenSequence: () => {
@@ -129,6 +85,7 @@ export function useRootLayoutNotificationOpenHandler({
                 }
                 const { taskId, actionKey } = route;
                 if (handledCompleteActionsRef.current.has(actionKey)) {
+                    logIosReminderAction('duplicate');
                     logNotificationOutcome('Complete action ignored as duplicate', { taskId });
                     return;
                 }
@@ -138,11 +95,16 @@ export function useRootLayoutNotificationOpenHandler({
                 const task = state._tasksById?.get(taskId) ?? state.tasks?.find((item) => item.id === taskId);
                 const blocker = getReminderCompletionBlocker(task);
                 if (blocker) {
+                    logIosReminderAction('blocked', 'complete', blocker);
                     logNotificationOutcome('Complete action dropped', { taskId, reason: blocker });
                     return;
                 }
                 logNotificationOutcome('Complete action applied', { taskId });
-                state.updateTask(taskId, { ...REMINDER_COMPLETE_UPDATE }).catch(() => undefined);
+                logIosReminderAction('update-started');
+                state.updateTask(taskId, { ...REMINDER_COMPLETE_UPDATE }).then(
+                    () => logIosReminderAction('update-returned'),
+                    () => logIosReminderAction('update-failed'),
+                );
                 return;
             }
             case 'review':
@@ -181,6 +143,11 @@ export function useRootLayoutNotificationOpenHandler({
         context?: string;
         kind?: string;
     }) => {
+        const rawAction = String(payload?.actionIdentifier || 'open').trim().toLowerCase();
+        const action = ['complete', 'complete_action'].includes(rawAction) ? 'complete'
+            : ['dismiss', 'dismiss_action'].includes(rawAction) ? 'dismiss'
+                : ['snooze', 'snooze_action'].includes(rawAction) ? 'snooze' : 'open';
+        logIosReminderAction(canNavigate ? 'received-ready' : 'received-deferred', action);
         if (!canNavigate) {
             logNotificationOutcome('Notification action deferred until app is ready', {
                 action: payload?.actionIdentifier || 'open',
@@ -195,8 +162,8 @@ export function useRootLayoutNotificationOpenHandler({
     useEffect(() => {
         if (disabled) return;
         setNotificationOpenHandler(handleNotificationOpen);
-        // Read the cold-start payload only once it can be acted on. Until then
-        // native storage keeps it, so a kill during a slow data load loses nothing.
+
+
         if (canNavigate) {
             void consumePendingNotificationOpenPayload().then((payload) => {
                 if (!payload) return;

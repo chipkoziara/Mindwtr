@@ -22,6 +22,7 @@ describe('app.config APP_VARIANT', () => {
     const config = await loadConfig();
     expect(config.name).toBe('Mindwtr');
     expect(config.ios?.infoPlist?.CFBundleSpokenName).toBe('Mind Water');
+    expect(config.ios?.infoPlist?.CFBundleLocalizations).toEqual(appJson.expo.ios.infoPlist.CFBundleLocalizations);
     expect(config.ios?.infoPlist?.INAlternativeAppNames).toEqual([{
       INAlternativeAppName: 'Mind Water',
       INAlternativeAppNamePronunciationHint: 'mind water',
@@ -69,6 +70,9 @@ describe('app.config APP_VARIANT', () => {
     expect(config.name).toBe('Mindwtr Benchmark');
     expect(config.android?.package).toBe('tech.dongdongbh.mindwtr.benchmark');
     expect(config.scheme).toBe('mindwtr-benchmark');
+
+    const urlTypes = (config.ios?.infoPlist?.CFBundleURLTypes ?? []) as { CFBundleURLSchemes?: string[] }[];
+    expect(urlTypes.find((type) => type.CFBundleURLSchemes)?.CFBundleURLSchemes).toContain('mindwtr-benchmark');
     expect(config.platforms).toEqual(['android']);
     expect(config.extra?.analyticsHeartbeatUrl).toBe('');
     expect(widgetLabels(config)).toEqual(['Mindwtr Benchmark']);

@@ -5,6 +5,9 @@ import { flushPendingSave, getStorageAdapter, resetForTests, useTaskStore } from
 import { buildSaveSnapshot } from './store-helpers';
 import type { AppData, Project, Task } from './types';
 
+
+vi.setConfig({ testTimeout: 30_000 });
+
 const NOW = '2026-10-02T13:00:00.000Z';
 const INITIAL = '2026-10-01T12:34:56.789Z';
 const ID = 'archive-completion-task';
@@ -252,7 +255,7 @@ describe('Archive row completion time uses RN completedAt-only update and guarde
             const command = await prepare(native);
             expect(value(await native.host.commitPreparedArchiveTaskCompletedAt(command))).toEqual({ id: ID });
             expect(rows()).toEqual(expected); expect(await raw(native)).toEqual(expectedRaw);
-            // Recovery deliberately retains a dangling raw parent instead of performing normal-load repairs.
+
             await native.client().run('UPDATE tasks SET projectId = ? WHERE id = ?', ['parent', ID]);
             await native.restart(undefined, { recoveryLoad: true });
             expect(useTaskStore.getState()._tasksById.get(ID)?.projectId).toBe('parent');

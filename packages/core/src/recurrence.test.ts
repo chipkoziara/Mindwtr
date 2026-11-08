@@ -39,10 +39,7 @@ type LocalApiRecurrenceParityCase = {
     expected: Record<string, unknown> | null;
 };
 
-// The fixture file also carries `kind: 'action'` cases (complete/archive/restore
-// write-path parity, asserted by local-api-action-parity.test.ts) alongside these
-// recurrence-only cases; the recurrence-only ones predate the `kind` field, so its
-// absence means 'recurrence'.
+
 const localApiRecurrenceParityCases = (JSON.parse(
     readFileSync(new URL('./recurrence-local-api-parity.fixtures.json', import.meta.url), 'utf8')
 ) as Array<LocalApiRecurrenceParityCase & { kind?: string }>).filter(
@@ -51,11 +48,8 @@ const localApiRecurrenceParityCases = (JSON.parse(
 
 const toLocalApiRecurrenceParitySnapshot = (task: Task | null): Record<string, unknown> | null => {
     if (!task) return null;
-    // Full-task equality except `id`: createNextRecurringTask mints a fresh
-    // random id independently of the Rust engine under test in
-    // local_api.rs's own parity test, making it the one legitimately
-    // platform/run-variant field (mirrored there by the same exclusion in
-    // comparable_local_api_recurring_task).
+
+
     const { id: _id, ...rest } = task;
     return rest;
 };
@@ -110,8 +104,7 @@ describe('recurrence', () => {
         expect(label).toBe('Weekly · after completion · Repeat every 2 week(s) · After 4 occurrence(s)');
     });
 
-    // #1082: a counted series shows how far along it is once there is progress
-    // to show; a fresh one stays on the plain form.
+
     it('shows count progress once occurrences have been completed', () => {
         expect(formatRecurrenceLabel({
             recurrence: { rule: 'daily', rrule: 'FREQ=DAILY;COUNT=10', completedOccurrences: 6 },
@@ -264,22 +257,20 @@ describe('recurrence', () => {
             status: 'done',
             tags: [],
             contexts: [],
-            dueDate: '2025-01-06T10:00:00.000Z', // Monday
+            dueDate: '2025-01-06T10:00:00.000Z',
             recurrence: { rule: 'weekly', byDay: ['MO', 'WE'], strategy: 'strict' },
             createdAt: '2025-01-01T00:00:00.000Z',
             updatedAt: '2025-01-01T00:00:00.000Z',
         };
 
         const next = createNextRecurringTask(task, '2025-01-06T12:00:00.000Z', 'done');
-        expect(next?.dueDate).toBe('2025-01-08T10:00:00.000Z'); // Wednesday
+        expect(next?.dueDate).toBe('2025-01-08T10:00:00.000Z');
         expect(next?.status).toBe('next');
     });
 
     it('keeps a legacy single anchorDay off the start date when it came from the due day', () => {
-        // Pre-per-field-anchor recurrences carry only anchorDay, derived from
-        // the due day. Crediting it to the start field advanced an Aug 14
-        // start as a day-15 monthly rule: the first day-15 after Aug 14 is
-        // Aug 15, so the next copy started a day later in the SAME month.
+
+
         const task: Task = {
             id: 't-legacy-anchor',
             title: 'Pay rent',
@@ -296,14 +287,14 @@ describe('recurrence', () => {
         const next = createNextRecurringTask(task, '2026-08-14T18:00:00.000Z', 'done');
         expect(next?.startTime).toBe('2026-09-14');
         expect(next?.dueDate).toBe('2026-09-15');
-        // The next copy's per-field anchors must record each field's own day,
-        // so the series stays correct from here on.
+
+
         expect(next?.recurrence).toMatchObject({ startAnchorDay: 14, dueAnchorDay: 15 });
     });
 
     it('keeps the legacy anchorDay authoritative for the field it was derived from', () => {
-        // Due Jan 31 clamps to Feb 28; the global anchor is what returns the
-        // series to the 31st in March — the owner field must keep it.
+
+
         const task: Task = {
             id: 't-legacy-anchor-owner',
             title: 'Invoice',
@@ -449,6 +440,8 @@ describe('recurrence', () => {
             relativeStartOffset: { amount: -1, unit: 'day' },
             dueDate: '2025-01-10T09:00:00.000Z',
             repeatReminderMinutes: 30,
+            dueReminderLeadMinutes: 1440,
+            startReminderLeadMinutes: 15,
             recurrence: { rule: 'weekly', strategy: 'strict' },
             createdAt: '2025-01-01T00:00:00.000Z',
             updatedAt: '2025-01-01T00:00:00.000Z',
@@ -459,6 +452,8 @@ describe('recurrence', () => {
         expect(next?.taskMode).toBe('list');
         expect(next?.relativeStartOffset).toEqual({ amount: -1, unit: 'day' });
         expect(next?.repeatReminderMinutes).toBe(30);
+        expect(next?.dueReminderLeadMinutes).toBe(1440);
+        expect(next?.startReminderLeadMinutes).toBe(15);
         expect(next?.startTime).toBe('2025-01-16T09:00:00.000Z');
         expect(next?.dueDate).toBe('2025-01-17T09:00:00.000Z');
         expect(next?.checklist).toHaveLength(1);
@@ -611,8 +606,7 @@ describe('recurrence', () => {
             updatedAt: '2026-07-01T00:00:00.000Z',
         };
 
-        // Completed Tue 2026-07-14: the next Sunday lands in the 2nd week after
-        // completion (Jul 26), not the Sunday of the completion week (Jul 19).
+
         const next = createNextRecurringTask(task, '2026-07-14T10:00:00.000Z', 'done');
         expect(next?.dueDate).toBe('2026-07-26');
 
@@ -641,7 +635,7 @@ describe('recurrence', () => {
             updatedAt: '2026-07-01T00:00:00.000Z',
         };
 
-        // Completed on a Sunday: the next occurrence is exactly two weeks out.
+
         const next = createNextRecurringTask(task, '2026-07-19T10:00:00.000Z', 'done');
         expect(next?.dueDate).toBe('2026-08-02');
     });
@@ -664,8 +658,7 @@ describe('recurrence', () => {
             updatedAt: '2026-07-01T00:00:00.000Z',
         };
 
-        // Completed 2026-07-14: the next 15th lands in the 2nd month after
-        // completion (Aug 15), not the following day (Jul 15).
+
         const next = createNextRecurringTask(task, '2026-07-14T10:00:00.000Z', 'done');
         expect(next?.dueDate).toBe('2026-08-15');
     });
@@ -687,9 +680,7 @@ describe('recurrence', () => {
             updatedAt: '2026-07-01T00:00:00.000Z',
         };
 
-        // Completed Tue 2026-07-14 (July's 2nd Tuesday): August's 2nd Tuesday
-        // (Aug 11) falls before the shifted base (Aug 14), so the next match is
-        // September's 2nd Tuesday.
+
         const next = createNextRecurringTask(task, '2026-07-14T10:00:00.000Z', 'done');
         expect(next?.dueDate).toBe('2026-09-08');
     });
@@ -771,9 +762,7 @@ describe('recurrence', () => {
         expect(next?.dueDate).toBeUndefined();
     });
 
-    // RFC 5545 BYMONTHDAY=-1: "last day of the month" — the end-of-month rule
-    // that needs no 31st-anchor ritual (Discord ask). The matrix below walks
-    // strict/fluid × short/long months × interval × date-only.
+
     it('advances a strict last-day-of-month rule through short and long months', () => {
         const task: Task = {
             id: 'lastday-1',
@@ -810,7 +799,7 @@ describe('recurrence', () => {
             updatedAt: '2026-08-01T00:00:00.000Z',
         };
 
-        // Completed mid-September: the next last-day after Sep 15 is Sep 30.
+
         const next = createNextRecurringTask(task, '2026-09-15T09:00:00.000Z', 'done');
         expect(next?.dueDate).toBe('2026-09-30');
     });
@@ -832,8 +821,7 @@ describe('recurrence', () => {
         expect(next?.dueDate).toBe('2026-10-31');
     });
 
-    // BYMONTHDAY lists (#1078): the engine picks the earliest remaining day in
-    // each candidate month and skips months where none of the days exist.
+
     it('walks a strict multi-day month rule through both of its days', () => {
         const task: Task = {
             id: 'multiday-1',
@@ -865,9 +853,7 @@ describe('recurrence', () => {
             updatedAt: '2026-06-01T00:00:00.000Z',
         };
 
-        // Completed on the 10th: the next listed day after that is the 16th.
-        // Fluid rules search from the completion instant, so the regenerated
-        // datetime carries that instant's clock rather than the old 09:00.
+
         expect(createNextRecurringTask(task, '2026-06-10T12:00:00.000Z', 'done')?.dueDate)
             .toBe('2026-06-16T12:00:00.000Z');
     });
@@ -907,7 +893,7 @@ describe('recurrence', () => {
             updatedAt: '2026-06-01T00:00:00.000Z',
         };
 
-        // Nothing left in June after the 16th, so the interval carries it to August's 1st.
+
         expect(createNextRecurringTask(task, '2026-06-16T10:00:00.000Z', 'done')?.dueDate).toBe('2026-08-01');
     });
 
@@ -924,7 +910,7 @@ describe('recurrence', () => {
             updatedAt: '2027-01-01T00:00:00.000Z',
         };
 
-        // February 2027 has neither a 30th nor a 31st, so the series falls through to March.
+
         expect(createNextRecurringTask(task, '2027-01-31T10:00:00.000Z', 'done')?.dueDate).toBe('2027-03-30');
     });
 
@@ -957,11 +943,11 @@ describe('recurrence', () => {
     });
 
     it.each([
-        ['2026-01-30', '2026-02-27'], // February ends on Saturday.
-        ['2026-02-27', '2026-03-31'], // March ends on Tuesday.
-        ['2026-04-30', '2026-05-29'], // May ends on Sunday.
-        ['2027-01-29', '2027-02-26'], // Non-leap February ends on Sunday.
-        ['2028-02-29', '2028-03-31'], // Leap February ends on Tuesday.
+        ['2026-01-30', '2026-02-27'],
+        ['2026-02-27', '2026-03-31'],
+        ['2026-04-30', '2026-05-29'],
+        ['2027-01-29', '2027-02-26'],
+        ['2028-02-29', '2028-03-31'],
     ])('advances last-weekday month end from %s to %s', (dueDate, expected) => {
         const rrule = buildRRuleString('monthly', ['MO', 'TU', 'WE', 'TH', 'FR'], 1, { bySetPos: -1 });
         const task: Task = {
@@ -1007,7 +993,7 @@ describe('recurrence', () => {
             status: 'done',
             tags: [],
             contexts: [],
-            dueDate: '2025-01-06T10:00:00.000Z', // Monday
+            dueDate: '2025-01-06T10:00:00.000Z',
             recurrence: { rule: 'weekly', byDay: [], strategy: 'strict' },
             createdAt: '2025-01-01T00:00:00.000Z',
             updatedAt: '2025-01-01T00:00:00.000Z',
@@ -1024,14 +1010,14 @@ describe('recurrence', () => {
             status: 'done',
             tags: [],
             contexts: [],
-            dueDate: '2025-01-08T10:00:00.000Z', // Wednesday
+            dueDate: '2025-01-08T10:00:00.000Z',
             recurrence: { rule: 'weekly', rrule: 'FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE', strategy: 'strict' },
             createdAt: '2025-01-01T00:00:00.000Z',
             updatedAt: '2025-01-01T00:00:00.000Z',
         };
 
         const next = createNextRecurringTask(task, '2025-01-08T12:00:00.000Z', 'done');
-        expect(next?.dueDate).toBe('2025-01-20T10:00:00.000Z'); // Monday two weeks later
+        expect(next?.dueDate).toBe('2025-01-20T10:00:00.000Z');
     });
 
     it('uses Monday as the default weekly interval anchor per RFC 5545', () => {
@@ -1041,7 +1027,7 @@ describe('recurrence', () => {
             status: 'done',
             tags: [],
             contexts: [],
-            dueDate: '2025-01-05T10:00:00.000Z', // Sunday
+            dueDate: '2025-01-05T10:00:00.000Z',
             recurrence: { rule: 'weekly', rrule: 'FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH', strategy: 'strict' },
             createdAt: '2025-01-01T00:00:00.000Z',
             updatedAt: '2025-01-01T00:00:00.000Z',
@@ -1058,7 +1044,7 @@ describe('recurrence', () => {
             status: 'done',
             tags: [],
             contexts: [],
-            dueDate: '2025-01-05T10:00:00.000Z', // Sunday
+            dueDate: '2025-01-05T10:00:00.000Z',
             recurrence: { rule: 'weekly', rrule: 'FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;WKST=SU', strategy: 'strict' },
             createdAt: '2025-01-01T00:00:00.000Z',
             updatedAt: '2025-01-01T00:00:00.000Z',
@@ -1084,8 +1070,8 @@ describe('recurrence', () => {
         };
 
         const next = createNextRecurringTask(task, '2025-01-09T12:00:00.000Z', 'done');
-        // The due date identifies the occurrence. The start keeps its original
-        // eight-day lead instead of snapping independently onto the BYDAY grid.
+
+
         expect(next?.dueDate).toBe('2025-03-13');
         expect(next?.startTime).toBe('2025-03-05');
     });
@@ -1176,15 +1162,16 @@ describe('recurrence', () => {
     });
 
     it('keeps projected schedule fields on the same plain monthly BYDAY occurrence', () => {
+        const localIso = (day: number, hour: number) => new Date(2026, 7, day, hour).toISOString();
         const task: Task = {
             id: 't6-plain-byday-projected-fields',
             title: 'Office day schedule',
             status: 'next',
             tags: [],
             contexts: [],
-            startTime: '2026-08-03T09:00:00.000Z',
-            dueDate: '2026-08-03T17:00:00.000Z',
-            reviewAt: '2026-08-03T18:00:00.000Z',
+            startTime: localIso(3, 9),
+            dueDate: localIso(3, 17),
+            reviewAt: localIso(3, 18),
             recurrence: {
                 rule: 'monthly',
                 strategy: 'strict',
@@ -1196,12 +1183,12 @@ describe('recurrence', () => {
             updatedAt: '2026-08-01T00:00:00.000Z',
         };
 
-        const projected = createProjectedRecurringTask(task, '2026-08-03T20:00:00.000Z');
+        const projected = createProjectedRecurringTask(task, localIso(3, 20));
 
         expect(projected).toMatchObject({
-            startTime: '2026-08-05T09:00:00.000Z',
-            dueDate: '2026-08-05T17:00:00.000Z',
-            reviewAt: '2026-08-05T18:00:00.000Z',
+            startTime: localIso(5, 9),
+            dueDate: localIso(5, 17),
+            reviewAt: localIso(5, 18),
         });
     });
 
@@ -1719,9 +1706,8 @@ describe('recurrence', () => {
     });
 
     it('projects a future-dated fluid task from its own date, not from now (#900)', () => {
-        // Reporter's case: due 3 days from now, fluid daily INTERVAL=3. Projecting
-        // from "now" would land on/before the due date and duplicate it on the
-        // calendar; the fix must project one interval past the due date itself.
+
+
         const task: Task = {
             id: 't-projected-fluid-future-daily',
             title: 'Run',
@@ -1745,8 +1731,7 @@ describe('recurrence', () => {
         expect(projected?.dueDate).toBe('2026-07-24');
         expect(projected?.dueDate).not.toBe(task.dueDate);
 
-        // Parity: the projection must match what completing the task on its own
-        // due date would actually spawn.
+
         const spawned = createNextRecurringTask(task, task.dueDate as string, 'done');
         expect(projected?.dueDate).toBe(spawned?.dueDate);
     });
@@ -1758,7 +1743,7 @@ describe('recurrence', () => {
             status: 'next',
             tags: [],
             contexts: [],
-            dueDate: '2026-07-12', // Sunday, future relative to projectedAtIso below
+            dueDate: '2026-07-12',
             recurrence: {
                 rule: 'weekly',
                 strategy: 'fluid',
@@ -1772,7 +1757,7 @@ describe('recurrence', () => {
         const projected = createProjectedRecurringTask(task, '2026-07-01T10:00:00.000Z');
         const spawned = createNextRecurringTask(task, task.dueDate as string, 'done');
 
-        // Two weeks after the task's own Sunday, not the Sunday nearest to "now".
+
         expect(projected?.dueDate).toBe('2026-07-26');
         expect(projected?.dueDate).not.toBe(task.dueDate);
         expect(projected?.dueDate).toBe(spawned?.dueDate);
@@ -1881,14 +1866,14 @@ describe('recurrence', () => {
     });
 
     it('sweeps fluid schedule/rule/timing combinations, projecting strictly past the field\'s own date when future-dated', () => {
-        const projectedAtIso = '2026-07-15T10:00:00.000Z'; // Wednesday
+        const projectedAtIso = '2026-07-15T10:00:00.000Z';
         type ScheduleType = 'due-only' | 'start-only' | 'start+due';
         type RuleType = 'daily-interval' | 'weekly-byday';
         type Timing = 'future' | 'overdue';
 
         const fieldDate = (rule: RuleType, timing: Timing): string => {
             if (rule === 'daily-interval') return timing === 'future' ? '2026-07-20' : '2026-07-10';
-            // Sundays, matching BYDAY=SU
+
             return timing === 'future' ? '2026-07-19' : '2026-07-05';
         };
 
@@ -2173,7 +2158,7 @@ describe('expandCalendarRecurringTasksInRange', () => {
     it('expands a single-weekday weekly recurrence to every occurrence in range', () => {
         const task = rangeTask({
             id: 't-range-weekly-single',
-            dueDate: '2026-08-03', // a Monday
+            dueDate: '2026-08-03',
             recurrence: { rule: 'weekly', strategy: 'strict', byDay: ['MO'], rrule: 'FREQ=WEEKLY;BYDAY=MO' },
         });
         const projectedAtIso = '2026-08-02T12:00:00.000Z';
@@ -2185,14 +2170,14 @@ describe('expandCalendarRecurringTasksInRange', () => {
             '2026-08-10', '2026-08-17', '2026-08-24', '2026-08-31', '2026-09-07', '2026-09-14',
         ]);
         for (const occurrence of projected) {
-            expect(new Date(`${occurrence.dueDate}T00:00:00`).getDay()).toBe(1); // Monday
+            expect(new Date(`${occurrence.dueDate}T00:00:00`).getDay()).toBe(1);
         }
     });
 
     it('expands a multi-weekday weekly recurrence, alternating between the configured weekdays', () => {
         const task = rangeTask({
             id: 't-range-weekly-multi',
-            dueDate: '2026-08-03', // a Monday
+            dueDate: '2026-08-03',
             recurrence: { rule: 'weekly', strategy: 'strict', byDay: ['MO', 'WE'], rrule: 'FREQ=WEEKLY;BYDAY=MO,WE' },
         });
         const projectedAtIso = '2026-08-02T12:00:00.000Z';
@@ -2205,7 +2190,7 @@ describe('expandCalendarRecurringTasksInRange', () => {
         ]);
         for (const occurrence of projected) {
             const weekday = new Date(`${occurrence.dueDate}T00:00:00`).getDay();
-            expect([1, 3]).toContain(weekday); // Monday or Wednesday only
+            expect([1, 3]).toContain(weekday);
         }
     });
 
@@ -2232,7 +2217,7 @@ describe('expandCalendarRecurringTasksInRange', () => {
     it('honors an interval greater than one for a weekly recurrence', () => {
         const task = rangeTask({
             id: 't-range-interval-weekly',
-            dueDate: '2026-08-03', // a Monday
+            dueDate: '2026-08-03',
             recurrence: { rule: 'weekly', strategy: 'strict', interval: 2, rrule: 'FREQ=WEEKLY;INTERVAL=2' },
         });
         const projectedAtIso = '2026-07-01T00:00:00.000Z';
@@ -2244,7 +2229,7 @@ describe('expandCalendarRecurringTasksInRange', () => {
             '2026-08-17', '2026-08-31', '2026-09-14',
         ]);
         for (const occurrence of projected) {
-            expect(new Date(`${occurrence.dueDate}T00:00:00`).getDay()).toBe(1); // stays on Monday
+            expect(new Date(`${occurrence.dueDate}T00:00:00`).getDay()).toBe(1);
         }
         for (let i = 1; i < projected.length; i += 1) {
             const gapMs = new Date(projected[i]!.dueDate as string).getTime() - new Date(projected[i - 1]!.dueDate as string).getTime();
@@ -2259,8 +2244,8 @@ describe('expandCalendarRecurringTasksInRange', () => {
             recurrence: { rule: 'daily', strategy: 'strict', count: 5, completedOccurrences: 0, rrule: 'FREQ=DAILY;COUNT=5' },
         });
         const projectedAtIso = '2026-08-02T12:00:00.000Z';
-        // Range extends far past where COUNT exhausts, to prove the stop happens mid-range and
-        // not because the range itself ran out.
+
+
         const range = { startIso: '2026-08-01', endIso: '2026-08-15' };
 
         const projected = expandCalendarRecurringTasksInRange(task, range, projectedAtIso).slice(1);
@@ -2294,7 +2279,7 @@ describe('expandCalendarRecurringTasksInRange', () => {
     it('keeps date-only occurrences date-only across a DST spring-forward transition', () => {
         const task = rangeTask({
             id: 't-range-dst-date-only',
-            dueDate: '2026-03-06', // Friday, before the 2026-03-08 US spring-forward
+            dueDate: '2026-03-06',
             recurrence: 'daily',
         });
         const projectedAtIso = '2026-03-01T00:00:00.000Z';
@@ -2317,8 +2302,8 @@ describe('expandCalendarRecurringTasksInRange', () => {
             recurrence: 'daily',
         });
         const projectedAtIso = '2026-03-01T00:00:00.000Z';
-        // endIso is an exact instant (inclusive), not a whole-day shorthand -- callers widen to
-        // end-of-day themselves (see the desktop/mobile controllers), so cover the whole 10th here.
+
+
         const range = { startIso: '2026-03-07', endIso: '2026-03-10T23:59:59' };
 
         const projected = expandCalendarRecurringTasksInRange(task, range, projectedAtIso).slice(1);
@@ -2362,8 +2347,8 @@ describe('expandCalendarRecurringTasksInRange', () => {
     });
 
     it('holds the monthly anchor day fixed across a February clamp instead of drifting to the clamped value', () => {
-        // Without a fixed anchor this drifts to Feb 28, Mar 28, Apr 28... instead of returning
-        // to the 31st whenever the month allows it (correction pass finding 1).
+
+
         const task = rangeTask({
             id: 't-range-monthly-anchor-31',
             dueDate: '2026-01-31',
@@ -2386,8 +2371,8 @@ describe('expandCalendarRecurringTasksInRange', () => {
             recurrence: 'yearly',
         });
         const projectedAtIso = '2024-03-01T00:00:00.000Z';
-        // 2025/2026/2027 clamp to the 28th and are walked-past (before rangeStart); 2028 is the
-        // next leap year and must land back on the 29th.
+
+
         const range = { startIso: '2027-06-01', endIso: '2028-12-31' };
 
         const projected = expandCalendarRecurringTasksInRange(task, range, projectedAtIso).slice(1);
@@ -2417,8 +2402,8 @@ describe('expandCalendarRecurringTasksInRange', () => {
     });
 
     it('fills the entire visible window for a daily task even when the range starts many months out (correction pass finding 3)', () => {
-        // The reviewer's measured repro: a per-task cap that counted walked-past steps instead of
-        // in-range occurrences returned 0 occurrences for November and 3-then-blank for October.
+
+
         const task = rangeTask({
             id: 't-range-far-future-window',
             dueDate: '2026-08-02',
@@ -2446,7 +2431,7 @@ describe('expandCalendarRecurringTasksInRange', () => {
             recurrence: 'daily',
         });
         const projectedAtIso = '2026-08-02T00:00:00.000Z';
-        // ~90 days of walked-past-but-discarded occurrences before the range even starts.
+
         const range = { startIso: '2026-11-01', endIso: '2027-01-01' };
 
         const projected = expandCalendarRecurringTasksInRange(task, range, projectedAtIso, 5).slice(1);
@@ -2683,9 +2668,8 @@ describe('expandCalendarRecurringTasksInRange', () => {
 });
 
 describe('createNextRecurringTask late completion coherence', () => {
-    // Local (offset-free) date strings throughout: the schedule fields and the
-    // completion instant are then read in the same zone, so every cell asserts
-    // the same thing regardless of the machine's timezone.
+
+
     const buildTask = (overrides: Partial<Task>): Task => ({
         id: 'late-completion',
         title: 'Late completion',
@@ -2726,8 +2710,7 @@ describe('createNextRecurringTask late completion coherence', () => {
             'done',
         );
 
-        // The due anchor catches up to the first occurrence after completion
-        // (16th); start and review keep their 2-day and 1-day offsets from it.
+
         expect(next?.startTime).toBe('2026-08-14');
         expect(next?.dueDate).toBe('2026-08-16');
         expect(next?.reviewAt).toBe('2026-08-17');
@@ -2754,8 +2737,8 @@ describe('createNextRecurringTask late completion coherence', () => {
         'start-before-due': { due: 2 },
         'start-due-review': { due: 2, review: 3 },
     };
-    // Base start is 2026-08-10 (a Monday), day 10 of the month, so no weekly or
-    // monthly cell ever hits a month-end clamp that would move a day offset.
+
+
     const fieldIso = (precision: Precision, day: string, time: string): string => (
         precision === 'date-only' ? day : `${day}T${time}`
     );
@@ -2808,11 +2791,11 @@ describe('createNextRecurringTask late completion coherence', () => {
                         const nextStart = next?.startTime as string;
                         const nextDue = next?.dueDate as string;
 
-                        // Coherence: the source start<->due<->review offsets survive.
+
                         expect(calendarDayDiff(nextStart, nextDue), label)
                             .toBe(calendarDayDiff(task.startTime as string, task.dueDate as string));
-                        // The same start-after-due check the store runs over every
-                        // task and both apps render as a warning on the row.
+
+
                         expect(isTaskDateCoherent(next as Task), label).toBe(true);
                         if (task.reviewAt) {
                             const nextReview = next?.reviewAt as string;
@@ -2821,15 +2804,12 @@ describe('createNextRecurringTask late completion coherence', () => {
                             expect(at(nextDue), label).toBeLessThanOrEqual(at(nextReview));
                         }
 
-                        // The past-completion guard's intent: never hand back an
-                        // occurrence that is already past. The occurrence is
-                        // identified by its due date; a start already behind at
-                        // completion time with its due date ahead is a live task.
+
                         expect(at(nextDue), label).toBeGreaterThan(at(completion));
-                        // And it always moves forward from the source instance.
+
                         expect(at(nextStart), label).toBeGreaterThan(at(task.startTime as string));
 
-                        // P13: date-only fields never gain an implicit time.
+
                         const fields = [nextStart, nextDue, ...(next?.reviewAt ? [next.reviewAt] : [])];
                         for (const value of fields) {
                             expect(/^\d{4}-\d{2}-\d{2}$/.test(value), `${label} ${value}`)
@@ -2861,15 +2841,133 @@ describe('createNextRecurringTask late completion coherence', () => {
         expect(next?.relativeStartOffset).toEqual({ amount: -1, unit: 'day' });
     });
 
-    it('leaves start-only strict tasks on a single step when completed late', () => {
+    it('catches up start-only strict tasks to today when completed several days late (#1366)', () => {
         const next = createNextRecurringTask(
             buildTask({ startTime: '2026-08-10' }),
-            '2026-08-11T20:00',
+            '2026-08-13T20:00',
             'done',
         );
 
-        expect(next?.startTime).toBe('2026-08-11');
+        expect(next?.startTime).toBe('2026-08-13');
         expect(next?.dueDate).toBeUndefined();
+    });
+
+    const catchUpRules = [
+        { name: 'daily', recurrence: { rule: 'daily' }, first: '2026-01-06', today: '2026-01-08', next: '2026-01-09' },
+        { name: 'weekly', recurrence: { rule: 'weekly' }, first: '2026-01-12', today: '2026-01-26', next: '2026-02-02' },
+        { name: 'monthly-day', recurrence: { rule: 'monthly', byMonthDay: [5] }, first: '2026-02-05', today: '2026-04-05', next: '2026-05-05' },
+        { name: 'monthly-nth', recurrence: { rule: 'monthly', byDay: ['1MO'] }, first: '2026-02-02', today: '2026-04-06', next: '2026-05-04' },
+        { name: 'yearly', recurrence: { rule: 'yearly' }, first: '2027-01-05', today: '2029-01-05', next: '2030-01-05' },
+        { name: 'COUNT', recurrence: { rule: 'daily', count: 3, completedOccurrences: 0 }, first: '2026-01-06', today: '2026-01-08', next: '2026-01-09' },
+    ] satisfies { name: string; recurrence: NonNullable<Exclude<Task['recurrence'], string>>; first: string; today: string; next: string }[];
+    const catchUpCases = catchUpRules.flatMap((schedule) =>
+        (['strict', 'fluid'] as const).flatMap((strategy) =>
+            (['start-only', 'due-only', 'both', 'neither'] as const).flatMap((shape) =>
+                (['date-only', 'datetime'] as const).map((precision) => ({
+                    ...schedule, strategy, shape, precision,
+                    label: `${strategy}/${shape}/${schedule.name}/${precision}`,
+                })))));
+
+    it.each(catchUpCases)('preserves recurrence completion matrix $label (#1366)', ({ recurrence, first, today, next, strategy, shape, precision }) => {
+        const scheduled = fieldIso(precision, '2026-01-05', '09:00');
+        const task = buildTask({
+            startTime: shape === 'start-only' || shape === 'both' ? scheduled : undefined,
+            dueDate: shape === 'due-only' || shape === 'both' ? scheduled : undefined,
+            recurrence: { ...recurrence, strategy, seriesId: 'matrix-series' },
+        });
+        const completion = `${today}T12:00`;
+        const result = createNextRecurringTask(task, completion, 'done')!;
+        const expectedDay = strategy === 'fluid' || shape === 'neither' || shape === 'both'
+            ? next : shape === 'due-only' ? first : precision === 'date-only' ? today : next;
+        const expected = shape === 'neither' ? expectedDay
+            : fieldIso(precision, expectedDay, strategy === 'fluid' ? '12:00' : '09:00');
+
+        const expectedStart = strategy === 'fluid' && shape === 'both' ? fieldIso(precision, expectedDay, '09:00') : expected;
+        expect(result.startTime).toBe(shape === 'start-only' || shape === 'both' || shape === 'neither' ? expectedStart : undefined);
+        expect(result.dueDate).toBe(shape === 'due-only' || shape === 'both' ? expected : undefined);
+        expect(result.status).toBe('next');
+        expect(result.recurrence).toMatchObject({ ...recurrence, strategy, seriesId: 'matrix-series',
+            ...(recurrence.count ? { completedOccurrences: 1 } : {}) });
+        expect(projectNextRecurringTask(task, completion)).toEqual(projectNextRecurringTask(task, completion));
+        const reloaded = normalizeRecurrenceForLoad(JSON.parse(JSON.stringify(result.recurrence)));
+        expect(reloaded).toEqual(normalizeRecurrenceForLoad(result.recurrence));
+        expect(applyTaskUpdates({ ...result, recurrence: reloaded }, { description: 'Edited' }, completion).updatedTask.recurrence)
+            .toEqual(reloaded);
+
+        if (strategy === 'strict' && shape !== 'neither') {
+            const skipped = createNextRecurringTask(task, completion, 'next', { advanceOne: true })!;
+            expect(skipped.startTime).toBe(shape === 'start-only' || shape === 'both' ? fieldIso(precision, first, '09:00') : undefined);
+            expect(skipped.dueDate).toBe(shape === 'due-only' || shape === 'both' ? fieldIso(precision, first, '09:00') : undefined);
+        }
+    });
+
+    it.each([
+        { startTime: '2026-08-10', completion: '2026-08-13T20:00', expected: '2026-08-13' },
+        { startTime: '2026-08-10T09:00', completion: '2026-08-13T08:00', expected: '2026-08-13T09:00' },
+        { startTime: '2026-08-10T09:00', completion: '2026-08-13T09:00', expected: '2026-08-16T09:00' },
+        { startTime: '2026-08-10T09:00', completion: '2026-08-13T20:00', expected: '2026-08-16T09:00' },
+    ])('retains strict interval cadence at the boundary $completion ($startTime)', ({ startTime, completion, expected }) => {
+        const task = buildTask({ startTime, recurrence: { rule: 'daily', strategy: 'strict', rrule: 'FREQ=DAILY;INTERVAL=3' } });
+        expect(createNextRecurringTask(task, completion, 'done')?.startTime).toBe(expected);
+    });
+
+    it('retains month-end anchors and review spacing after start-only catchup (#1366)', () => {
+        const task = buildTask({ startTime: '2026-01-31', reviewAt: '2026-02-01', recurrence: { rule: 'monthly', strategy: 'strict' } });
+        const result = createNextRecurringTask(task, '2026-04-20T12:00', 'done')!;
+        expect(result.startTime).toBe('2026-04-30');
+        expect(result.reviewAt).toBe('2026-05-01');
+        expect(createNextRecurringTask(result, '2026-04-30T12:00', 'done')?.startTime).toBe('2026-05-31');
+    });
+
+    it('keeps local wall time across DST and catches up long daily gaps (#1366)', () => {
+        const task = buildTask({ startTime: '2026-03-06T09:00' });
+        expect(createNextRecurringTask(task, '2026-03-09T12:00', 'done')?.startTime).toBe('2026-03-10T09:00');
+        expect(createNextRecurringTask({ ...task, startTime: '2000-01-01' }, '2026-08-13T20:00', 'done')?.startTime)
+            .toBe('2026-08-13');
+    });
+
+    it.each([
+        { startTime: '2000-01-03', recurrence: { rule: 'weekly', byDay: ['MO'] }, completion: '2026-10-11T12:00', expected: '2026-10-12' },
+        { startTime: '2000-01-03', recurrence: { rule: 'weekly', byDay: ['MO', 'WE', 'FR'], rrule: 'FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;WKST=SU' }, completion: '2026-10-11T12:00', expected: '2026-10-19' },
+        { startTime: '2000-01-03', recurrence: { rule: 'monthly', byDay: ['MO', 'TU', 'WE', 'TH', 'FR'] }, completion: '2026-10-11T12:00', expected: '2026-10-12' },
+        { startTime: '2000-01-31', recurrence: { rule: 'monthly', byDay: ['-1MO'], rrule: 'FREQ=MONTHLY;INTERVAL=2;BYDAY=-1MO' }, completion: '2026-10-11T12:00', expected: '2026-11-30' },
+    ] satisfies { startTime: string; recurrence: NonNullable<Exclude<Task['recurrence'], string>>; completion: string; expected: string }[])(
+        'catches up old selector series $recurrence without exhausting the search cap (#1366)', ({ startTime, recurrence, completion, expected }) => {
+            const task = buildTask({ startTime, recurrence: { ...recurrence, strategy: 'strict', count: 3 } });
+            const result = createNextRecurringTask(task, completion, 'done')!;
+            expect(result.startTime).toBe(expected);
+            expect(result.recurrence).toMatchObject({ count: 3, completedOccurrences: 1 });
+        },
+    );
+
+    it.each([
+        { rule: 'weekly', byDay: ['MO', 'WE', 'FR'], rrule: 'FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;WKST=SU' },
+        { rule: 'monthly', byDay: ['-1MO'], rrule: 'FREQ=MONTHLY;INTERVAL=2;BYDAY=-1MO' },
+        { rule: 'monthly', byMonthDay: [1, 31], rrule: 'FREQ=MONTHLY;INTERVAL=2;BYMONTHDAY=1,31' },
+    ] satisfies NonNullable<Exclude<Task['recurrence'], string>>[])(
+        'matches canonical one-step selector cadence across DST $rrule (#1366)', (recurrence) => {
+            const task = buildTask({ startTime: '2025-01-03T09:00', recurrence: { ...recurrence, strategy: 'strict' } });
+            const completion = '2026-03-09T12:00';
+            let expected = task;
+            for (let steps = 0; steps < 500; steps += 1) {
+                expected = createNextRecurringTask(expected, completion, 'done', { advanceOne: true })!;
+                if (at(expected.startTime!) > at(completion)) break;
+            }
+            expect(at(expected.startTime!)).toBeGreaterThan(at(completion));
+            expect(createNextRecurringTask(task, completion, 'done')?.startTime).toBe(expected.startTime);
+        },
+    );
+
+    it('honors UNTIL and counts completions rather than skipped dates on start-only catchup (#1366)', () => {
+        const task = buildTask({ startTime: '2026-08-10', recurrence: { rule: 'daily', strategy: 'strict', count: 2, until: '2026-08-13' } });
+        const result = createNextRecurringTask(task, '2026-08-13T20:00', 'done')!;
+        expect(result.startTime).toBe('2026-08-13');
+        expect(result.recurrence).toMatchObject({ completedOccurrences: 1 });
+        expect(createNextRecurringTask(result, '2026-08-13T20:00', 'done')).toBeNull();
+        expect(createNextRecurringTask({ ...task, recurrence: { rule: 'daily', strategy: 'strict', until: '2026-08-12' } }, '2026-08-13T20:00', 'done')).toBeNull();
+        const timed = buildTask({ startTime: '2026-08-10T12:00:00+14:00',
+            recurrence: { rule: 'daily', strategy: 'strict', until: '2026-08-11T11:00:00-12:00' } });
+        expect(createNextRecurringTask(timed, '2026-08-10T23:00:00Z', 'done')?.startTime).toBe('2026-08-11T22:00:00.000Z');
     });
 
     it('keeps fluid start and due spacing around the completion-anchored due date', () => {
@@ -2883,11 +2981,46 @@ describe('createNextRecurringTask late completion coherence', () => {
             'done',
         );
 
-        // Fluid re-bases the due anchor on completion, while the sibling start
-        // keeps its original two-day lead.
+
         expect(next?.startTime).toBe('2026-08-14');
         expect(next?.dueDate).toBe('2026-08-16');
     });
+
+
+    it.each([
+        { label: 'daily overdue date-only start', fields: { startTime: '2026-10-08' }, now: '2026-10-11T12:00', next: { startTime: '2026-10-11' } },
+        { label: 'daily start yesterday', fields: { startTime: '2026-10-10' }, now: '2026-10-11T00:30', next: { startTime: '2026-10-11' } },
+        { label: 'daily interval 3', fields: { startTime: '2026-08-10' }, rrule: { rule: 'daily', rrule: 'FREQ=DAILY;INTERVAL=3' }, now: '2026-08-13T20:00', next: { startTime: '2026-08-13' } },
+        { label: 'weekly', fields: { startTime: '2026-10-04' }, rrule: { rule: 'weekly' }, now: '2026-10-11T12:00', next: { startTime: '2026-10-11' } },
+        { label: 'weekly three weeks late', fields: { startTime: '2026-01-05' }, rrule: { rule: 'weekly' }, now: '2026-01-26T12:00', next: { startTime: '2026-01-26' } },
+        { label: 'monthly-day', fields: { startTime: '2026-02-05' }, rrule: { rule: 'monthly', byMonthDay: [5] }, now: '2026-04-05T12:00', next: { startTime: '2026-04-05' } },
+        { label: 'monthly-nth', fields: { startTime: '2026-02-02' }, rrule: { rule: 'monthly', byDay: ['1MO'] }, now: '2026-04-06T12:00', next: { startTime: '2026-04-06' } },
+        { label: 'month-end on the 30th', fields: { startTime: '2026-01-31', reviewAt: '2026-02-01' }, rrule: { rule: 'monthly' }, now: '2026-04-30T12:00', next: { startTime: '2026-04-30', reviewAt: '2026-05-01' } },
+        { label: 'month-end mid-month', fields: { startTime: '2026-01-31', reviewAt: '2026-02-01' }, rrule: { rule: 'monthly' }, now: '2026-04-20T12:00', next: { startTime: '2026-04-30', reviewAt: '2026-05-01' } },
+        { label: 'Feb 29 yearly', fields: { startTime: '2024-02-29' }, rrule: { rule: 'yearly' }, now: '2027-02-28T12:00', next: { startTime: '2027-02-28' } },
+        { label: 'DST date-only', fields: { startTime: '2026-03-06' }, now: '2026-03-09T12:00', next: { startTime: '2026-03-09' } },
+        { label: 'DST timed start', fields: { startTime: '2026-03-06T09:00' }, now: '2026-03-09T12:00', next: { startTime: '2026-03-10T09:00' } },
+        { label: 'timed start later today', fields: { startTime: '2026-10-08T15:00' }, now: '2026-10-11T12:00', next: { startTime: '2026-10-11T15:00' } },
+        { label: 'start and due', fields: { startTime: '2026-01-05', dueDate: '2026-01-05' }, now: '2026-01-08T12:00', next: { startTime: '2026-01-09', dueDate: '2026-01-09' } },
+        { label: 'future start', fields: { startTime: '2026-10-15' }, now: '2026-10-11T12:00', next: { startTime: '2026-10-16' } },
+        { label: 'start today', fields: { startTime: '2026-10-11' }, now: '2026-10-11T12:00', next: { startTime: '2026-10-12' } },
+    ] satisfies { label: string; fields: Partial<Task>; rrule?: NonNullable<Exclude<Task['recurrence'], string>>; now: string; next: Partial<Task> }[])(
+        'previews the same next occurrence that completion creates: $label (#1366)', ({ fields, rrule, now, next }) => {
+            const task = buildTask({ ...fields, recurrence: { ...(rrule ?? { rule: 'daily' }), strategy: 'strict' } });
+            const pick = (value: Task | null | undefined) => ({
+                startTime: value?.startTime, dueDate: value?.dueDate, reviewAt: value?.reviewAt,
+            });
+            const expected = { startTime: undefined, dueDate: undefined, reviewAt: undefined, ...next };
+            expect(pick(createNextRecurringTask(task, now, 'done'))).toEqual(expected);
+
+            const open: Task = { ...task, status: 'next', showFutureRecurrence: true };
+            expect(pick(createProjectedRecurringTask(open, now))).toEqual(expected);
+            expect(getRecurringTaskPreviewDate({ ...open, showFutureRecurrence: false }, now))
+                .toBe(getTaskCalendarOccurrenceDate({ ...open, ...expected }));
+            const range = expandCalendarRecurringTasksInRange(open, { startIso: '2000-01-01T00:00', endIso: '2031-01-01T00:00' }, now);
+            expect(pick(range[1])).toEqual(expected);
+        },
+    );
 });
 
 describe('getRecurringTaskPreviewDate', () => {

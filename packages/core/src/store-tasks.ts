@@ -1,4 +1,7 @@
+import { applyPreparedCaptureData, applyPreparedCaptureLinesData } from './prepared-capture-data';
+import { nativeVoiceBasis, readNativeVoicePrepared, type NativePreparedVoiceCapture, type NativePreparedVoiceResult } from './native-voice-prepared';
 import { mapSqliteTaskRow, rawReadTaskSnapshot } from './sqlite-adapter';
+import { retainTaskTaxonomy, retainTaxonomyEffects } from './taxonomy-catalog';
 import { rawReadProjectSnapshot } from './sqlite-raw-snapshot';
 import { referenceBatchModules, type ReferenceBatchValidator } from './store-reference-batch-modules';
 import { buildNewTask } from './task-creation';
@@ -10,6 +13,8 @@ import { sectionToSqliteRow } from './section-sync-schema';
 import {
     collectFocusEligibilityTasks,
     resolveFocusStarAction,
+    resolveRowFocusStarAction,
+    resolveTaskFocusUpdate,
     type FocusStarAction,
 } from './focus-star';
 import type { AppData, Area, Project, Section, Task, TaskStatus } from './types';
@@ -17,8 +22,8 @@ import type { NativePreparedArchivedTaskRestore } from './native-host-contract-a
 import { settingsWithPurgedParentAttachmentDeletes } from './attachment-cleanup';
 import type { StorageAdapter, TaskQueryOptions } from './storage';
 import { taskMatchesQuery } from './task-query';
-import type { PreparedAreaAuthority, PreparedCalendarCreate, PreparedCalendarTask, PreparedChecklistEffect, PreparedChecklistWriteOptions, PreparedFocusOrder, PreparedInboxEffect, PreparedTaskEdit, PreparedTaskEditResult, PreparedTaskFocus, PreparedTaskPromotion, StoreActionResult, TaskFocusWitnessRow, TaskStore } from './store-types';
-import { buildFocusControlsModel } from './focus-controls';
+import type { PreparedAreaAuthority, PreparedBoardMove, PreparedCalendarCreate, PreparedCalendarTask, PreparedChecklistEffect, PreparedChecklistWriteOptions, PreparedFocusOrder, PreparedInboxEffect, PreparedTaskEdit, PreparedTaskEditResult, PreparedTaskFocus, PreparedTaskPromotion, PreparedTaskToSection, StoreActionResult, TaskFocusWitnessRow, TaskStore } from './store-types';
+import { buildFocusControlsModel, canReorderFocusTasks, mergeFocusReorderIds } from './focus-controls';
 import {
     applyTaskProjectReactivationTransition,
     applyTaskUpdates,
@@ -30,8 +35,8 @@ import {
     getNextDataChangeAt,
     getNextProjectOrder,
     getTaskOrder,
-    isTaskCountedAsFocused,
     matchesDuplicateSource,
+    isTaskCountedAsFocused,
     isRestorableProjectArchiveSection,
     nextRevision,
     normalizeTaskUpdate,
@@ -42,6 +47,7 @@ import {
     type ProjectOrderReserver,
 } from './store-helpers';
 import { logInfo, logWarn } from './logger';
+import { safeParseDate } from './date';
 import {
     isTaskActionable,
     isTaskCancelled,
@@ -54,9 +60,11 @@ import { buildNextRecurringTask, canSkipRecurringTaskOccurrence, createNextRecur
     normalizeRecurrenceForLoad, type RecurrenceProjection } from './recurrence';
 import { normalizeFocusTaskLimit } from './focus-utils';
 import { resolveProcessInboxPlan } from './process-inbox-plan';
-import { boardOrderForDuplicate, countFocusedTasksBeforeBoundary, isTaskFutureFocusCandidate,
+import { boardOrderForDuplicate, countFocusedTasksBeforeBoundary, isTaskFutureFocusCandidate, sortTasksByFocusOrder,
     type FocusDateLookup } from './task-utils';
 import { sameTaskSqliteRow, sameSectionDeleteJson } from './store-projects/section-actions';
+import { trashItemsRestoreScope, trashItemsRestoreEffect } from './native-host-contract-trash-bulk-restore';
+import { trashItemsPurgeScope, trashItemsPurgeEffect } from './native-host-contract-trash-purge';
 import { sameSectionSqliteRow } from './store-projects/section-actions';
 import { sameProjectSqliteRow } from './store-projects/project-actions';
 import { normalizeTaskForLoad } from './task-status';
@@ -70,6 +78,8 @@ import {
     resolveTaskContainerHierarchy,
 } from './task-container-rules';
 import { findSelectableProjectByTitleAndArea, isSelectableProjectForTaskAssignment } from './project-utils';
+import { canMoveTaskToChecklist, checklistItemIdForMovedTask, isChecklistMoveTarget } from './task-checklist-move';
+import { resolveQuickCaptureDefaultAreaId } from './quick-capture-model';
 import { isStatusListTaskReadOnly } from './menu-views-model';
 import { getBulkMoveStatusOptions } from './task-list-bulk-actions';
 import { buildBulkTaskTokenUpdates } from './bulk-task-tokens';
@@ -84,18 +94,33 @@ type TaskActions = Pick<
     TaskStore,
     | 'addTask'
     | 'addTasks'
+    | 'commitPreparedVoiceRows'
     | 'commitPreparedCapture'
+    | 'commitPreparedCaptureLines'
     | 'commitPreparedTaskEdit'
+    | 'commitPreparedTaskEdits'
     | 'commitPreparedTaskDraftV2'
     | 'commitPreparedArchivedTaskRestore'
     | 'commitPreparedArchivedTasksRestore'
+    | 'commitPreparedTrashItemsRestore'
+    | 'commitPreparedTrashItemsPurge'
     | 'commitPreparedReferenceTasksMove'
+    | 'commitPreparedInboxTasksMove'
+    | 'commitPreparedProjectTasksMove'
+    | 'commitPreparedInboxTasksAddTag'
+    | 'commitPreparedProjectTasksAddTag'
+    | 'commitPreparedInboxTasksRemoveTag'
+    | 'commitPreparedProjectTasksRemoveTag'
+    | 'commitPreparedInboxTasksOrganize'
+    | 'commitPreparedProjectTasksOrganize'
     | 'commitPreparedReferenceTasksAddTag'
     | 'commitPreparedReferenceTasksRemoveTag'
     | 'commitPreparedArchivedTasksMutation'
+    | 'commitPreparedTaskChecklistMove'
     | 'commitPreparedTaskFocus'
     | 'commitPreparedFocusOrder'
     | 'commitPreparedBoardTask'
+    | 'commitPreparedBoardOrder'
     | 'commitPreparedCalendarTask'
     | 'commitPreparedCalendarCreate'
     | 'commitPreparedInboxEffect'
@@ -111,9 +136,12 @@ type TaskActions = Pick<
     | 'purgeDeletedTasks'
     | 'duplicateTask'
     | 'convertTaskToSection'
+    | 'commitPreparedTaskToSection'
     | 'promoteTaskToProject'
     | 'commitPreparedTaskPromotion'
     | 'resetTaskChecklist'
+    | 'moveTaskToChecklist'
+    | 'undoMoveTaskToChecklist'
     | 'moveTask'
     | 'batchUpdateTasks'
     | 'batchMoveTasks'
@@ -191,9 +219,32 @@ const logTaskProjectReactivationSaved = (count: number): void => {
     });
 };
 
-// `tasks` and `_tasksById` are derived from `_allTasks` by
-// prepareStoreStateUpdate (store.ts) on every write, so producers below only
-// ever write `_allTasks`.
+const logStartOnlyRecurringCompletions = (
+    rows: readonly { before: Task | null; after: Task }[],
+    createdTasks: readonly Task[],
+): void => {
+    if (createdTasks.length === 0) return;
+    const createdSeries = new Set(createdTasks.map((task) => normalizeRecurrenceForLoad(task.recurrence)?.seriesId));
+    const count = rows.filter(({ before, after }) => {
+        if (!before || before.status === 'done' || before.status === 'archived' || after.status !== 'done'
+            || !before.startTime || before.dueDate) return false;
+        const recurrence = normalizeRecurrenceForLoad(before.recurrence);
+        if (!recurrence || recurrence.strategy === 'fluid' || !createdSeries.has(recurrence.seriesId ?? before.id)) return false;
+        const start = safeParseDate(before.startTime);
+        const completion = safeParseDate(after.completedAt);
+        return Boolean(start && completion && start <= completion);
+    }).length;
+    if (count > 0) {
+        try {
+            logInfo('Strict start-only recurrence generated', {
+                scope: 'store', category: 'storage',
+                context: { releaseCheck: 'v1.3.5/start-only-recurrence', outcome: 'generated', count },
+            });
+        } catch {                                                                          }
+    }
+};
+
+
 export type MutateTasksOptions = {
     selectTasks: (state: TaskStore) => Task[];
     buildUpdates: (task: Task, context: { now: string; state: TaskStore }) => Partial<Task>;
@@ -202,7 +253,7 @@ export type MutateTasksOptions = {
     ensureDeviceIdWhenEmpty?: boolean;
 };
 
-/** The existing mutation row formula, with caller-owned selection and context. */
+
 export const planTaskMutations = <TState,>({
     tasks,
     state,
@@ -257,8 +308,9 @@ export const mutateTasks = async (
             now,
             settings: deviceState.settings,
         });
-        const nextSettings = updatedSettings ?? deviceState.settings;
-        const settingsChanged = Boolean(updatedSettings) || deviceState.updated;
+        const nextSettings = retainTaxonomyEffects(updatedSettings ?? deviceState.settings,
+            changedTasks.map((after, index) => ({ before: selectedTasks[index], after })));
+        const settingsChanged = nextSettings !== state.settings;
         persist(set, debouncedSave, state, {
             tasks: nextAllTasks,
             ...(settingsChanged ? { settings: nextSettings } : {}),
@@ -272,7 +324,7 @@ export const mutateTasks = async (
     return missing ? actionFail(options.missingMessage ?? 'Task not found') : actionOk();
 };
 
-/** Full visible-row identity, with sorted object keys but untouched array and raw date values. */
+
 export const focusOrderToken = (tasks: readonly Task[]): string => JSON.stringify(tasks, (_key, value) =>
     value && typeof value === 'object' && !Array.isArray(value)
         ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value);
@@ -284,12 +336,13 @@ const changedFocusOrder = (task: Task, targets: ReadonlyMap<string, number>): nu
     return target !== undefined && task.focusOrder !== target ? target : undefined;
 };
 
-/** Exactly the task stamps used by reorderFocusedTasks through mutateTasks. */
+
 export const focusOrderEffect = (scope: PreparedFocusOrder['scope'], ids: readonly string[],
-    deviceId: string, preparedAt: string): PreparedFocusOrder['effect'] => {
+    deviceId: string, preparedAt: string, preserveHidden = false): PreparedFocusOrder['effect'] => {
     const byId = new Map(scope.tasks.map((task) => [task.id, task]));
-    const targets = focusOrderTargets(ids);
-    return { tasks: ids.flatMap((id) => {
+    const order = preserveHidden ? mergeFocusReorderIds(scope.tasks.map((task) => task.id), ids) : ids;
+    const targets = focusOrderTargets(order);
+    return { tasks: order.flatMap((id) => {
         const before = byId.get(id);
         const target = before && changedFocusOrder(before, targets);
         return before && target !== undefined ? [{ before, after: compactPurgedTaskForLocalStorage({
@@ -303,7 +356,10 @@ const currentFocusOrder = (state: TaskStore, controls: PreparedFocusOrder['reque
     const model = buildFocusControlsModel({ state: controls, tasks: state.tasks,
         projects: state.projects, areas: state.areas, sections: state.sections,
         settings: state.settings, now: new Date(), t: (key) => key });
-    return { canReorder: model.canReorder, tasks: model.lists.focusedTasks };
+    return { canReorder: model.canReorder, legacyCanReorder: canReorderFocusTasks({
+        effectiveSortBy: model.perspective.effectiveSortBy, hasActiveFilters: model.filter.hasActive,
+        focusedCount: model.globalFocusedTasks.length,
+    }), tasks: model.globalFocusedTasks, visibleTasks: model.lists.focusedTasks };
 };
 
 export const sanitizeRestoredTaskContainerReferences = (
@@ -365,12 +421,12 @@ export const prepareTaskUpdatesForStore = ({
     allProjects: AppData['projects'];
     allSections: AppData['sections'];
     allAreas: AppData['areas'];
-    /** Enables the settings-driven update rules (auto-archive on a completion edit). */
+
     settings?: AppData['settings'];
-    /** Frozen end of the preparation process's local day, for prepared replay validation. */
+
     futureBoundary?: string;
     futureDates?: FocusDateLookup;
-    /** Frozen preparation clock; ordinary RN callers retain the ambient default. */
+
     nowMs?: number;
     reserveProjectOrder?: boolean;
     projectOrderReserver?: ProjectOrderReserver;
@@ -405,7 +461,7 @@ export const prepareTaskUpdatesForStore = ({
     };
 };
 
-/** Shared batch preflight; save-only optimistic retries precede normalization. */
+
 export const prepareTaskBatchUpdatesForStore = ({
     updatesList,
     state,
@@ -483,7 +539,7 @@ export const prepareTaskBatchUpdatesForStore = ({
     return { ok: true, preparedUpdatesById, optimisticRetryProjectIds };
 };
 
-/** Applies a shared batch in source-array order, with one parent transition. */
+
 export const planTaskBatchUpdateEffects = ({
     preparedUpdatesById,
     allTasks,
@@ -493,6 +549,7 @@ export const planTaskBatchUpdateEffects = ({
     deviceId,
     createId,
     recurrenceProjections,
+    onTaskUpdated,
 }: {
     preparedUpdatesById: ReadonlyMap<string, Partial<Task>>;
     allTasks: Task[];
@@ -502,6 +559,7 @@ export const planTaskBatchUpdateEffects = ({
     deviceId: string;
     createId?: () => string;
     recurrenceProjections?: ReadonlyMap<string, RecurrenceProjection | null>;
+    onTaskUpdated?: (before: Task, after: Task) => void;
 }): {
     tasks: Task[];
     projects: AppData['projects'];
@@ -536,8 +594,9 @@ export const planTaskBatchUpdateEffects = ({
             getTaskOrder(task),
             projectOrderReserver,
         );
-        // Keep argument construction lazy: copying the collection once per
-        // non-recurring selection makes ordinary bulk moves quadratic.
+        onTaskUpdated?.(task, updatedTask);
+
+
         if (stampedNextRecurringTask) {
             const duplicateFollowUp = findExistingRecurringFollowUp(
                 [...newAllTasksBase, ...createdTasks],
@@ -562,7 +621,7 @@ export const planTaskBatchUpdateEffects = ({
     return { ...projectReactivation, createdTasks };
 };
 
-/** Calculates the exact rows affected by one already-prepared task update. */
+
 export const planTaskUpdateEffects = ({
     task,
     preparedUpdates,
@@ -604,7 +663,7 @@ export const planTaskUpdateEffects = ({
         nextRecurringTask,
         deviceId,
         getTaskOrder(task),
-        // This collection scan remains lazy for updates without a follow-up.
+
         (projectId) => getNextProjectOrder(projectId, allTasks),
     );
     const recurringDuplicateTask = findExistingRecurringFollowUp(allTasks, stampedNextRecurringTask, task.id);
@@ -627,14 +686,13 @@ export const planTaskUpdateEffects = ({
         recurringDuplicateTask, ...projectReactivation };
 };
 
-/** The relevant complete membership for Archive Restore, including legacy Section-only children. */
+
 export const archiveRestoreScope = (task: Task,
     data: { tasks: Task[]; projects: Project[]; sections: Section[]; areas: Area[] }): NativePreparedArchivedTaskRestore['scope'] => {
     const sourceSection = data.sections.find((row) => row.id === task.sectionId);
     const parentProject = data.projects.find((row) => row.id === (task.projectId ?? sourceSection?.projectId)) ?? null;
-    // A legacy Section-only Task can infer this archived Project during the
-    // shared container normalization, then reopen it. Freeze all of its owned
-    // rows before that single Task action, just as a direct Project child does.
+
+
     const fullParent = Boolean(parentProject?.status === 'archived'
         && (task.projectId === parentProject.id || sourceSection?.projectId === parentProject.id));
     const parentSections = parentProject
@@ -646,13 +704,13 @@ export const archiveRestoreScope = (task: Task,
             || (!row.projectId && row.sectionId !== undefined && sectionIds.has(row.sectionId)))
         : [task];
     return { task, parentProject, parentTasks, parentSections,
-        // Shared container resolution clears Area whenever Project/Section wins,
-        // even if a legacy raw areaId names a deleted or missing Area.
+
+
         sourceArea: parentProject ? null : data.areas.find((row) => row.id === task.areaId) ?? null,
         fullParent };
 };
 
-/** RN's one `updateTask({status:'inbox'})`, including implicit archived-parent reactivation. */
+
 export const archiveRestoreEffect = (scope: NativePreparedArchivedTaskRestore['scope'],
     deviceId: string, updateAt: string, futureBoundary: string,
     dates: FocusDateLookup): NativePreparedArchivedTaskRestore['effect'] | null => {
@@ -683,13 +741,13 @@ export const archiveRestoreEffect = (scope: NativePreparedArchivedTaskRestore['s
         ? { before: scope.parentProject, after: projectAfter } : null };
 };
 
-/** Archive one already-resolved occurrence and plan its frozen next instance. */
+
 export const planSkippedRecurringOccurrence = ({ task, allTasks, now, deviceId, projection, createId }: {
     task: Task;
     allTasks: Task[];
     now: string;
     deviceId: string;
-    /** Native prepared writes pass this frozen value; RN computes at the action boundary. */
+
     projection?: RecurrenceProjection | null;
     createId?: () => string;
 }): { updatedTask: Task; recurringCandidateTask: Task | null; recurringDuplicateTask: Task | null;
@@ -711,7 +769,7 @@ export const planSkippedRecurringOccurrence = ({ task, allTasks, now, deviceId, 
         tasks: recurringFollowUpTask ? [...updatedTasks, recurringFollowUpTask] : updatedTasks };
 };
 
-/** The bounded Focus witness contains only columns consulted by eligibility and the cap. */
+
 export const taskFocusWitnessRow = (task: Task): TaskFocusWitnessRow => ({
     id: task.id, status: task.status, createdAt: task.createdAt,
     projectId: task.projectId ?? null, sectionId: task.sectionId ?? null,
@@ -744,7 +802,69 @@ export const taskFocusScope = (state: TaskStore, task: Task): PreparedTaskFocus[
     };
 };
 
-/** Re-evaluate the RN star policy against the frozen local day and compact rows. */
+
+export const boardReactivationContainerAllowed = (task: Task, projects: readonly Project[], sections: readonly Section[]): boolean => {
+    const validId = (id: unknown): id is string => typeof id === 'string' && id.trim().length > 0 && id.length <= 500;
+    const sourceSections = sections.filter(row => row.id === task.sectionId);
+    if (task.sectionId !== undefined && (!validId(task.sectionId) || sourceSections.length !== 1
+        || sourceSections[0].deletedAt != null || !validId(sourceSections[0].projectId))) return false;
+    const inferred = sourceSections[0]?.projectId;
+    if (task.projectId !== undefined && (!validId(task.projectId) || inferred && inferred !== task.projectId)) return false;
+    const parentId = task.projectId ?? inferred;
+    if (!parentId) return true;
+    const parents = projects.filter(row => row.id === parentId);
+    return parents.length === 1 && ['active', 'waiting', 'someday'].includes(parents[0].status)
+        && parents[0].deletedAt == null && parents[0].purgedAt == null;
+};
+
+
+export const boardMoveScope = (state: TaskStore, task: Task): PreparedBoardMove['scope'] => {
+    const section = state._allSections.find(row => row.id === task.sectionId);
+    const sourceSections = task.status === 'done' ? state._allSections.filter(row => row.id === task.sectionId)
+        : section ? [section] : [];
+    const projectIds = new Set([task.projectId, ...sourceSections.map(row => row.projectId)]);
+    const sorted = <T extends { id: string }>(rows: T[]) => rows.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    return {
+        projects: sorted(state._allProjects.filter(row => projectIds.has(row.id))),
+        sections: sourceSections,
+        areas: state._allAreas.filter(row => row.id === task.areaId),
+        focused: sorted(state._allTasks.filter(row => !row.deletedAt && row.isFocusedToday === true).map(taskFocusWitnessRow)),
+        focusLimit: normalizeFocusTaskLimit(state.settings.gtd?.focusTaskLimit),
+    };
+};
+
+
+export const boardMoveEffect = (before: Task, status: Task['status'], move: PreparedBoardMove, at: string): Task => {
+    if (!['inbox', 'next', 'waiting', 'someday', 'done'].includes(before.status)
+        || !['inbox', 'next', 'waiting', 'someday'].includes(status)
+        || before.status === status || before.deletedAt || before.purgedAt
+        || !move.deviceIdBefore || isStatusListTaskReadOnly(before, move.scope.projects)
+        || before.status === 'done' && !boardReactivationContainerAllowed(before, move.scope.projects, move.scope.sections)) {
+        throw new Error('Board Move needs a writable nonterminal card and existing device identity');
+    }
+    const dates = new Map(move.clock.dates.map(row => [row.value, row]));
+    const normalized = prepareTaskUpdatesForStore({ task: before, updates: { status },
+        allProjects: move.scope.projects, allSections: move.scope.sections, allAreas: move.scope.areas,
+        futureBoundary: move.clock.futureBoundary, futureDates: dates, nowMs: Date.parse(at),
+        ...(before.status === 'done' ? { reserveProjectOrder: false } : {}) });
+    if (!normalized.ok) throw new Error(normalized.error);
+    const fills = countFocusedTasksBeforeBoundary([before], move.clock.futureBoundary, dates) === 0
+        && countFocusedTasksBeforeBoundary([{ ...before, ...normalized.updates }], move.clock.futureBoundary, dates) === 1;
+    if (fills && countFocusedTasksBeforeBoundary(move.scope.focused.map(asFocusTask), move.clock.futureBoundary, dates) >= move.scope.focusLimit)
+        throw new Error('Focus limit reached; free a Focus slot before moving this card');
+    const plan = planTaskUpdateEffects({ task: before, preparedUpdates: normalized.updates,
+        allTasks: [before], allProjects: move.scope.projects, allSections: move.scope.sections, now: at,
+        deviceId: move.deviceIdBefore, createId: () => { throw new Error('Board Move cannot allocate an entity'); } });
+    if (plan.recurringCandidateTask || plan.recurringDuplicateTask || plan.recurringFollowUpTask
+        || plan.reactivatedProjectIds.length || plan.tasks.length !== 1
+        || !taskEditValuesEqual(plan.projects, move.scope.projects) || !taskEditValuesEqual(plan.sections, move.scope.sections)
+        || plan.updatedTask.id !== before.id || plan.updatedTask.status !== status) {
+        throw new Error('This Board Move requires multirow lifecycle effects; only one task is supported');
+    }
+    return plan.updatedTask;
+};
+
+
 export const taskFocusAction = (scope: PreparedTaskFocus['scope'], preparedAt: string,
     futureBoundary: string, dates: FocusDateLookup): FocusStarAction => resolveFocusStarAction(scope.task, {
     tasks: scope.peers.map(asFocusTask), projects: scope.project ? [scope.project] : [],
@@ -754,7 +874,7 @@ export const taskFocusAction = (scope: PreparedTaskFocus['scope'], preparedAt: s
     endOfTodayIso: futureBoundary, frozenDates: dates,
 });
 
-/** Derive the complete Task receipt through the same normalizer/effect planner as RN updateTask. */
+
 export const taskFocusEffect = (scope: PreparedTaskFocus['scope'], focused: boolean,
     deviceId: string, preparedAt: string, futureBoundary: string, dates: FocusDateLookup): PreparedTaskFocus['effect'] | null => {
     const action = taskFocusAction(scope, preparedAt, futureBoundary, dates);
@@ -776,7 +896,7 @@ export const taskFocusEffect = (scope: PreparedTaskFocus['scope'], focused: bool
     return { task: { before: scope.task, after: planned.updatedTask } };
 };
 
-/** RN Reset's exact one-row field change, including the already-open write. */
+
 export const buildResetTaskChecklistUpdates = (task: Task): Partial<Task> => {
     const wasDone = task.status === 'done';
     return {
@@ -795,7 +915,7 @@ const INDEPENDENT_TASK_EDIT_FIELDS = new Set([
 
 type PreparedAffectedRows = Pick<PreparedInboxEffect, 'tasks' | 'projects' | 'sections'>;
 
-/** The SQLite representation, including every revision/stamp, is the durable receipt. */
+
 const samePreparedSqliteRow = (columns: readonly string[], jsonColumns: ReadonlySet<string>, left: unknown[], right: unknown[]) => (
     left.length === right.length && left.every((value, index) => {
         const other = right[index];
@@ -810,6 +930,20 @@ const taskJsonColumns = new Set(['relativeStartOffset', 'recurrence', 'tags', 'c
 const projectJsonColumns = new Set(['tagIds', 'attachments']);
 export const samePreparedTask = (left: Task, right: Task) => samePreparedSqliteRow(TASK_SQLITE_COLUMNS, taskJsonColumns,
     taskToSqliteRow(left), taskToSqliteRow(right));
+
+export const samePreparedBoardOrderTask = (left: Task, right: Task): boolean => samePreparedTask(left, right)
+    && sameSectionDeleteJson({ ...left, pushCount: left.pushCount ?? 0 }, { ...right, pushCount: right.pushCount ?? 0 });
+
+export const samePreparedBoardOrderBefore = (raw: Task, frozen: Task): boolean => {
+    const projected = { ...raw };
+    if (typeof raw.recurrence === 'string' && ['daily', 'weekly', 'monthly', 'yearly'].includes(raw.recurrence)) {
+        projected.recurrence = { rule: raw.recurrence };
+    }
+    if (raw.rev == null) projected.rev = 0;
+    if (raw.timeSpentMinutes === 0) delete projected.timeSpentMinutes;
+    if (raw.pushCount == null) projected.pushCount = 0;
+    return samePreparedBoardOrderTask(projected, frozen);
+};
 const samePreparedProject = (left: AppData['projects'][number], right: AppData['projects'][number]) =>
     samePreparedSqliteRow(PROJECT_SQLITE_COLUMNS, projectJsonColumns, projectToSqliteRow(left), projectToSqliteRow(right));
 const samePreparedSection = (left: Section, right: Section) =>
@@ -839,7 +973,85 @@ const applyPreparedAffectedRows = (state: Pick<TaskStore, '_allTasks' | '_allPro
         ...input.sections.filter((row) => !row.before).map((row) => row.after)],
 });
 
-/** The RN action and native journal share the same saved-source promotion policy. */
+
+export const taskToSectionOrderMax = (allSections: Section[], projectId: string): number => allSections
+    .filter((section) => section.projectId === projectId && !section.deletedAt)
+    .reduce((max, section) => Math.max(max, Number.isFinite(section.order) ? section.order : -1), -1);
+
+
+export const planTaskToSection = ({ sourceTask, allTasks, allProjects, allSections, allAreas, settings, deviceId, now,
+    generateId = uuidv4 }: {
+    sourceTask: Task; allTasks: Task[]; allProjects: AppData['projects']; allSections: Section[]; allAreas: AppData['areas'];
+    settings: AppData['settings']; deviceId: string; now: string; generateId?: () => string;
+}): { ok: true; section: Section; tasks: Task[]; deletedSource: Task } | { ok: false; error: string } => {
+    const projectId = normalizeOptionalContainerId(sourceTask.projectId);
+    if (!projectId) return { ok: false, error: 'Task is not in a project' };
+    const projectExists = allProjects.some((project) => project.id === projectId && !project.deletedAt);
+    const sectionTitle = typeof sourceTask.title === 'string' ? sourceTask.title.trim() : '';
+    if (!projectExists || !sectionTitle) return { ok: false, error: 'Section could not be created' };
+    const description = typeof sourceTask.description === 'string' ? sourceTask.description.trim() : '';
+    const section: Section = {
+        id: generateId(),
+        projectId,
+        title: sectionTitle,
+        ...(description ? { description } : {}),
+        order: taskToSectionOrderMax(allSections, projectId) + 1,
+        isCollapsed: false,
+        rev: 1,
+        revBy: deviceId,
+        createdAt: now,
+        updatedAt: now,
+    };
+    const nextAllSections = [...allSections, section];
+    const projectOrderReserver = createProjectOrderReserver(allTasks);
+    const tasks: Task[] = [];
+    for (const item of sourceTask.checklist || []) {
+        const title = typeof item.title === 'string' ? item.title.trim() : '';
+        if (!title) continue;
+        const containerResolution = resolveTaskContainerAssignment({
+            projectId,
+            sectionId: section.id,
+            areaId: undefined,
+            allProjects,
+            allSections: nextAllSections,
+            allAreas,
+        });
+        if (!containerResolution.ok) return { ok: false, error: containerResolution.error };
+        const order = projectOrderReserver(containerResolution.projectId);
+        tasks.push({
+            id: generateId(),
+            title,
+            status: item.isCompleted ? 'done' : 'next',
+            taskMode: 'task',
+            tags: [],
+            contexts: [],
+            pushCount: 0,
+            isFocusedToday: false,
+            reminderPolicy: 'inherit',
+            suppressMindwtrReminders: settings.taskReminderDefault === 'skip',
+            projectId: containerResolution.projectId,
+            sectionId: containerResolution.sectionId,
+            areaId: containerResolution.areaId,
+            ...(item.isCompleted ? { completedAt: now } : {}),
+            order,
+            orderNum: order,
+            rev: 1,
+            revBy: deviceId,
+            createdAt: now,
+            updatedAt: now,
+        });
+    }
+    const deletedSource: Task = {
+        ...sourceTask,
+        deletedAt: now,
+        updatedAt: now,
+        rev: nextRevision(sourceTask.rev),
+        revBy: deviceId,
+    };
+    return { ok: true, section, tasks, deletedSource };
+};
+
+
 export const planTaskPromotion = ({ sourceTask, title, color, areaId, allTasks, allProjects, allSections,
     allAreas, settings, deviceId, now, projectId }: {
     sourceTask: Task; title?: string; color?: string; areaId?: string;
@@ -905,8 +1117,37 @@ const matchesPreparedTaskEdit = (current: Task, expected: Task, changes: Prepare
     ))
 );
 
-/** The existing duplicate row construction, shared with native preparation.
- * Generated IDs and order reservations may be supplied from an immutable journal. */
+const PREPARED_TASK_EDIT_CONFLICT: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared task edit conflicts with current data' };
+const PREPARED_TASK_EDIT_PROTECTED: PreparedTaskEditResult = { success: false, reason: 'invalid', error: 'Prepared task edit changes protected fields' };
+const preparedTaskEditChangesProtected = (changes: PreparedTaskEdit['changes']): boolean => ['id', 'createdAt', 'rev', 'revBy', 'updatedAt', 'deletedAt', 'purgedAt']
+    .some((field) => Object.prototype.hasOwnProperty.call(changes, field));
+
+const preparedTaskEditRefusal = (
+    state: Pick<TaskStore, '_allProjects' | '_allSections' | '_allAreas'>, current: Task, edit: PreparedTaskEdit,
+): PreparedTaskEditResult | null => {
+    if (!matchesPreparedTaskEdit(current, edit.before, edit.changes)) return PREPARED_TASK_EDIT_CONFLICT;
+    if (current.deletedAt || current.purgedAt || current.status === 'reference'
+        || isStatusListTaskReadOnly(current, state._allProjects)) {
+        return { success: false, reason: 'invalid', error: 'Task is not editable' };
+    }
+    const after = applyPreparedTaskEditChanges(edit);
+    const container = resolveTaskContainerAssignment({
+        projectId: after.projectId, sectionId: after.sectionId, areaId: after.areaId,
+        allProjects: state._allProjects, allSections: state._allSections, allAreas: state._allAreas,
+    });
+    if (!container.ok || !taskEditValuesEqual(container.projectId, after.projectId)
+        || !taskEditValuesEqual(container.sectionId, after.sectionId) || !taskEditValuesEqual(container.areaId, after.areaId)
+        || (after.projectId && !state._allProjects.some((project) => project.id === after.projectId && isSelectableProjectForTaskAssignment(project)))) {
+        return { success: false, reason: 'invalid', error: 'Prepared task destination is no longer available' };
+    }
+    return null;
+};
+
+const preparedTaskEditUpdate = (current: Task, changes: PreparedTaskEdit['changes'], deviceId: string, updatedAt: string): Task => ({
+    ...applyPreparedTaskEditChanges({ before: current, changes }),
+    rev: nextRevision(current.rev), revBy: deviceId, updatedAt,
+});
+
 export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, deviceId, projectOrder, boardOrder, generateId = uuidv4 }: {
     sourceTask: Task;
     asNextAction?: boolean;
@@ -920,7 +1161,6 @@ export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, devi
     const duplicatedChecklist = (sourceTask.checklist || []).map((item) => ({
         ...item,
         id: generateId(),
-        isCompleted: false,
     }));
     const duplicatedAttachments = (sourceTask.attachments || []).flatMap((attachment) => {
         if (attachment.kind === 'file') {
@@ -948,7 +1188,7 @@ export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, devi
             : isTaskFinished(sourceTask)
                 ? 'inbox'
                 : sourceTask.status,
-        // Normalized so the rrule's series stamp names the new series too.
+
         recurrence: typeof sourceTask.recurrence === 'object'
             ? normalizeRecurrenceForLoad({ ...sourceTask.recurrence, seriesId: newTaskId })
             : sourceTask.recurrence,
@@ -958,9 +1198,8 @@ export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, devi
         cancelledAt: undefined,
         archivedAt: undefined,
         isFocusedToday: false,
-        // A copy is not in Today's Focus and was never archived with a
-        // project, so neither the focus position nor the restore
-        // metadata of the source belongs to it.
+
+
         focusOrder: undefined,
         boardOrder: undefined,
         statusBeforeProjectArchive: undefined,
@@ -982,8 +1221,9 @@ export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, devi
     return newTask;
 }
 
-export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPendingSave, trackImmediateSave, hasQueuedSnapshotSave, getSaveGeneration }: TaskActionContext): TaskActions => {
-    // The family-specific full envelope and raw authority checks remain caller-owned.
+
+export function createTaskActions({ set, get, getStorage, debouncedSave, flushPendingSave, trackImmediateSave, hasQueuedSnapshotSave, getSaveGeneration }: TaskActionContext): TaskActions {
+
     const commitPreparedRawReferenceBatch = async (input: {
         request: { taskIds: string[] }; effect: { tasks: { before: Task; after: Task }[];
             projects: { before: Project; after: Project }[]; sections: { before: Section; after: Section }[];
@@ -992,8 +1232,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
     conflictMessage: string): Promise<PreparedTaskEditResult> => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: conflictMessage };
         const adapter = getStorage();
-        // These modules import the store, so they register themselves (store-reference-batch-modules.ts). Capture the
-        // adapter, yield once as the module load did, then retain every guard after the await.
+
+
         await Promise.resolve();
         const shared = referenceBatchModules.shared;
         try {
@@ -1001,9 +1241,9 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 scope: 'store', category: 'storage',
                 context: { releaseCheck: 'v1.3.5/reference-batch-registry', outcome: family && shared ? 'registered' : 'missing' },
             });
-        } catch { /* Diagnostics must not affect the guarded action. */ }
+        } catch {                                                       }
         if (!family || !shared) return result;
-        const { validateEnvelope, authorityMatches } = family(input);
+        const { validateEnvelope, authorityMatches, temporal } = family(input);
         const { historyRowLoadProjection, NativeReceiptSqliteAdapter } = shared;
         if (getStorage() !== adapter || !(adapter instanceof NativeReceiptSqliteAdapter) || !adapter.concurrentWritesGuarded
             || !validateEnvelope()) return result;
@@ -1033,8 +1273,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             const tasks = [...durable.tasks.map((row) => taskAfter.get(row.id) ?? row), ...(input.effect.createdTasks ?? [])];
             const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
             const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
-            const settings = input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings;
-            const freshTasks = tasks.map((row) => historyRowLoadProjection(row, input.updateAt));
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, input.effect.tasks, input.effect.projects);
+            const freshTasks = tasks.map((row) => historyRowLoadProjection(row, input.updateAt, temporal));
             const freshProjects = projects.map(normalizeProjectLifecycleFields);
             clearDerivedCache();
             persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
@@ -1047,15 +1287,14 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: sections,
                 _allAreas: durable.areas, _allPeople: durable.people ?? [], settings, lastDataChangeAt };
         });
+        if (result.success && result.outcome === 'applied') {
+            logStartOnlyRecurringCompletions(input.effect.tasks, input.effect.createdTasks ?? []);
+        }
         return result;
     };
     return ({
 
-    /**
-     * Add a new task to the store and persist to storage.
-     * @param title Task title
-     * @param initialProps Optional initial properties
-     */
+
     addTask: async (
         title: string,
         initialProps?: Partial<Task>,
@@ -1076,9 +1315,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id: result.ids?.[0] });
     },
 
-    /**
-     * Add multiple tasks in one store update and persistence snapshot.
-     */
+
     addTasks: async (items: Array<{
         title: string;
         initialProps?: Partial<Task>;
@@ -1170,9 +1407,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         if (newTasks.length === 0) {
             if (currentState.persistenceFailure) {
                 try {
-                    // A terminal flush dequeues its exhausted snapshot. Replay
-                    // must durably retry the unchanged optimistic capture
-                    // before native ingress is allowed to acknowledge it.
+
+
                     await get().persistSnapshot();
                     await flushPendingSave();
                 } catch (error) {
@@ -1190,18 +1426,16 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         }
 
         set((state) => {
+            const settings = retainTaxonomyEffects(completedCreationContext.deviceState.updated
+                ? completedCreationContext.deviceState.settings : state.settings, newTasks.map((after) => ({ after })));
             persist(set, debouncedSave, state, {
                 tasks: nextAllTasks,
-                ...(completedCreationContext.deviceState.updated
-                    ? { settings: completedCreationContext.deviceState.settings }
-                    : {}),
+                settings,
             });
             return {
                 _allTasks: nextAllTasks,
                 lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
-                ...(completedCreationContext.deviceState.updated
-                    ? { settings: completedCreationContext.deviceState.settings }
-                    : {}),
+                settings,
             };
         });
 
@@ -1213,6 +1447,54 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
 
         return actionOk({ id: resultIds[0], ids: resultIds });
+    },
+
+    commitPreparedVoiceRows: async (input: NativePreparedVoiceCapture | NativePreparedVoiceResult, authority) => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Voice rows changed before commit' };
+        const prepared = readNativeVoicePrepared(input);
+        if (!prepared || prepared.kind === 'settings') return result;
+        set(memory => {
+            const before = authority.state, durable = authority.snapshot;
+            if (memory.persistenceFailure || memory._allTasks !== before._allTasks || memory._allProjects !== before._allProjects
+                || memory._allSections !== before._allSections || memory._allAreas !== before._allAreas || memory._allPeople !== before._allPeople
+                || memory.settings !== before.settings || memory.lastDataChangeAt !== before.lastDataChangeAt) return memory;
+            const task = prepared.kind === 'capture' ? prepared.task : prepared.taskAfter;
+            const project = prepared.kind === 'capture' ? prepared.capture.project : prepared.project;
+            const current = durable.tasks.filter(row => row.id === task.id);
+            if (prepared.kind === 'capture') {
+                if (current.length || project && durable.projects.some(row => row.id === project.id)
+                    || project && findSelectableProjectByTitleAndArea(durable.projects, project.title, project.areaId)) return memory;
+            } else {
+                const raw = current.length === 1 ? rawReadTaskSnapshot(current[0]) : null;
+                if (!raw || !sameTaskSqliteRow(raw, prepared.taskBefore) || !taskEditValuesEqual(nativeVoiceBasis(durable), prepared.basis)
+                    || project && durable.projects.some(row => row.id === project.id)) return memory;
+            }
+            const deviceId = prepared.kind === 'capture' ? prepared.capture.deviceIdToInitialize : null;
+            if (prepared.kind === 'capture' && (deviceId ? (durable.settings.deviceId ?? null) !== null : durable.settings.deviceId !== task.revBy)) return memory;
+            if (project?.areaId && !(durable.areas ?? []).some(area => area.id === project.areaId && !area.deletedAt)) return memory;
+            const projects = project ? [...durable.projects, project] : durable.projects;
+            if (!task.deletedAt) {
+                const destination = resolveTaskContainerAssignment({ projectId: task.projectId, sectionId: task.sectionId, areaId: task.areaId,
+                    allProjects: projects, allSections: durable.sections ?? [], allAreas: durable.areas ?? [] });
+                if (!destination.ok || destination.projectId !== task.projectId || destination.sectionId !== task.sectionId
+                    || destination.areaId !== task.areaId || task.projectId && !projects.some(row => row.id === task.projectId && isSelectableProjectForTaskAssignment(row))) return memory;
+            }
+            const tasks = prepared.kind === 'capture' ? [...durable.tasks, task] : durable.tasks.map(row => row.id === task.id ? task : row);
+            const settings = retainTaskTaxonomy(deviceId ? { ...durable.settings, deviceId } : durable.settings,
+                prepared.kind === 'result' ? prepared.taskBefore : undefined, task);
+            const snapshot = { ...durable, tasks, projects, settings };
+            const freshTasks = tasks.map(row => normalizeTaskForLoad(row)), freshProjects = projects.map(normalizeProjectLifecycleFields);
+            clearDerivedCache();
+            persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
+                _allSections: durable.sections ?? [], _allAreas: durable.areas ?? [], _allPeople: durable.people ?? [], settings: durable.settings }, snapshot);
+            const lastDataChangeAt = getNextDataChangeAt(memory.lastDataChangeAt);
+            authority.saveBoundary = { taskReference: freshTasks, lastDataChangeAt, generation: getSaveGeneration(), failure: memory.persistenceFailure };
+            authority.rawSavedSnapshot = snapshot;
+            result = { success: true, id: task.id, outcome: 'applied' };
+            return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: durable.sections ?? [], _allAreas: durable.areas ?? [],
+                _allPeople: durable.people ?? [], settings, lastDataChangeAt };
+        });
+        return result;
     },
 
     commitPreparedCapture: async ({ task, project, deviceIdToInitialize, deviceIdBefore }, raw) => {
@@ -1236,7 +1518,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                     || container.areaId !== task.areaId || task.projectId && !durable.projects.some((row) => row.id === task.projectId
                         && isSelectableProjectForTaskAssignment(row))) return memory;
                 const tasks = [...durable.tasks, task];
-                const settings = deviceIdToInitialize ? { ...durable.settings, deviceId: deviceIdToInitialize } : durable.settings;
+                const settings = retainTaskTaxonomy(deviceIdToInitialize ? { ...durable.settings, deviceId: deviceIdToInitialize } : durable.settings, undefined, task);
                 const freshTasks = tasks.map((row) => normalizeTaskForLoad(row));
                 const projects = durable.projects.map(normalizeProjectLifecycleFields);
                 clearDerivedCache();
@@ -1254,59 +1536,45 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         }
         let result = actionFail('Prepared capture conflicts with current data');
         set((state) => {
-            const existingTask = state._allTasks.find((entry) => entry.id === task.id);
-            const existingProject = project && state._allProjects.find((entry) => entry.id === project.id);
-            const sameTask = existingTask && !existingTask.deletedAt && !existingTask.purgedAt
-                && JSON.stringify(taskToSqliteRow(existingTask)) === JSON.stringify(taskToSqliteRow(task));
-            const sameProject = existingProject && !existingProject.deletedAt && !existingProject.purgedAt
-                && JSON.stringify(projectToSqliteRow(existingProject)) === JSON.stringify(projectToSqliteRow(project!));
-            if ((existingTask && !sameTask) || (existingProject && !sameProject)) return state;
-            // A matching receipt precedes mutable container/creation checks. Never
-            // resurrect an operation-created project missing from an existing task.
-            if (existingTask) {
-                if (project && !sameProject) return state;
-                result = actionOk({ id: task.id });
-                return state;
-            }
-            if (project && !existingProject && findSelectableProjectByTitleAndArea(state._allProjects, project.title, project.areaId)) return state;
-            const projects = project && !existingProject ? [...state._allProjects, project] : state._allProjects;
-            if (task.projectId && !projects.some((entry) => entry.id === task.projectId && isSelectableProjectForTaskAssignment(entry))) return state;
-            if (project?.areaId && !state._allAreas.some((entry) => entry.id === project.areaId && !entry.deletedAt)) return state;
-            const container = resolveTaskContainerAssignment({
-                projectId: task.projectId, sectionId: task.sectionId, areaId: task.areaId,
-                allProjects: projects, allSections: state._allSections, allAreas: state._allAreas,
-            });
-            if (!container.ok || container.projectId !== task.projectId || container.sectionId !== task.sectionId || container.areaId !== task.areaId) return state;
-            const tasks = [...state._allTasks, task];
-            const settings = !state.settings.deviceId && deviceIdToInitialize
-                ? { ...state.settings, deviceId: deviceIdToInitialize }
-                : state.settings;
-            persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
+            const next = applyPreparedCaptureData(state, { task, project, deviceIdToInitialize });
+            if (!next) return state;
             result = actionOk({ id: task.id });
-            return {
-                _allTasks: tasks,
-                _allProjects: projects,
-                settings,
-                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt),
-            };
+            if (!next.changed) return state;
+            const { tasks, projects, settings } = next;
+            persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
+            return { _allTasks: tasks, _allProjects: projects, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
         });
         return result;
     },
 
-    // The contract validates action authority before this guarded one-row commit.
-    commitPreparedBoardTask: async ({ kind, before, after, deviceIdBefore, deviceIdToInitialize, respectReadOnly, strictBefore }) => {
+    commitPreparedCaptureLines: async ({ tasks: preparedTasks, projects: preparedProjects, deviceIdToInitialize }) => {
+        let result = actionFail('Prepared lines conflict with current data');
+        set((state) => {
+            const next = applyPreparedCaptureLinesData(state, { tasks: preparedTasks, projects: preparedProjects, deviceIdToInitialize });
+            if (!next) return state;
+            result = actionOk({ ids: preparedTasks.map((task) => task.id) });
+            if (!next.changed) return state;
+            const { tasks, projects, settings } = next;
+            persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
+            return { _allTasks: tasks, _allProjects: projects, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
+        });
+        return result;
+    },
+
+
+    commitPreparedBoardTask: async ({ kind, before, after, move, admitMove, deviceIdBefore, deviceIdToInitialize, respectReadOnly, strictBefore }) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared Board action conflicts with current data' };
         const persisted = (task: Task) => {
-            // Normal loading adds pushCount: 0 without saving it. A raw recovery
-            // row must match that default while retaining every other CAS field.
+
+
             const values = taskToSqliteRow({ ...task, pushCount: task.pushCount ?? 0 });
             return taskFromSqliteRow(Object.fromEntries(TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]])));
         };
         const matches = (left: Task, right: Task) => taskEditValuesEqual(persisted(left), persisted(right));
         set((state) => {
             const target = state._tasksById.get(after.id);
-            // An unchanged durable copy is a receipt even if its source was
-            // subsequently edited, deleted or moved to another container.
+
+
             if (!strictBefore && target && matches(target, after)) {
                 result = { success: true, id: after.id, outcome: 'replayed' };
                 return state;
@@ -1316,6 +1584,16 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 || (kind === 'restoreTask' ? !source.deletedAt : Boolean(source.deletedAt))
                 || (kind === 'restoreTask' && (state.settings.deviceId ?? null) !== deviceIdBefore)
                 || (kind === 'duplicateTask' && target)) return state;
+            if (kind === 'moveCard') {
+                if (!move || deviceIdToInitialize !== null || state.settings.deviceId !== move.deviceIdBefore
+                    || !taskEditValuesEqual(boardMoveScope(state, source), move.scope) || !admitMove?.()) return state;
+                try {
+                    if (!matches(boardMoveEffect(source, after.status, move, after.updatedAt), after)) return state;
+                } catch (error) {
+                    result = { success: false, reason: 'invalid', error: error instanceof Error ? error.message : 'Board Move scope refused' };
+                    return state;
+                }
+            }
             if (respectReadOnly && kind === 'trashTask' && isStatusListTaskReadOnly(source, state._allProjects)) return state;
             if (kind === 'restoreTask') {
                 const sanitized = sanitizeRestoredTaskContainerReferences(source, state);
@@ -1324,8 +1602,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 })) return state;
             }
             if (kind === 'duplicateTask') {
-                // Recheck only the scalar reservations the pure builder read.
-                // Exact target replay above deliberately precedes these guards.
+
+
                 const projectOrder = before.projectId ? createProjectOrderReserver(state._allTasks)(before.projectId) : undefined;
                 const boardOrder = after.status === before.status ? boardOrderForDuplicate(before.boardOrder,
                     state._allTasks.filter((task) => task.status === before.status && !task.deletedAt)) : undefined;
@@ -1342,8 +1620,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 }
             }
             const tasks = kind === 'duplicateTask' ? [...state._allTasks, after] : replaceEntityInArray(state._allTasks, before.id, after);
-            const settings = !state.settings.deviceId && deviceIdToInitialize
-                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings;
+            const settings = retainTaskTaxonomy(!state.settings.deviceId && deviceIdToInitialize
+                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings, kind === 'duplicateTask' ? undefined : before, after);
             persist(set, debouncedSave, state, { tasks, ...(settings !== state.settings ? { settings } : {}) });
             result = { success: true, id: after.id, outcome: 'applied' };
             return { _allTasks: tasks, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
@@ -1364,8 +1642,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 result = { success: false, reason: 'missing', error: 'Task not found' };
                 return state;
             }
-            // The complete stamped row is the receipt. Subsequent task and
-            // container edits have no power to invalidate an already saved result.
+
+
             if (matches(current, after)) {
                 result = { success: true, id: after.id, outcome: 'replayed' };
                 return state;
@@ -1382,8 +1660,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             if (!container.ok || container.projectId !== after.projectId
                 || container.sectionId !== after.sectionId || container.areaId !== after.areaId) return state;
             const tasks = replaceEntityInArray(state._allTasks, before.id, after);
-            const settings = deviceIdToInitialize && !state.settings.deviceId
-                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings;
+            const settings = retainTaskTaxonomy(deviceIdToInitialize && !state.settings.deviceId
+                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings, before, after);
             persist(set, debouncedSave, state, { tasks, ...(settings !== state.settings ? { settings } : {}) });
             result = { success: true, id: after.id, outcome: 'applied' };
             return { _allTasks: tasks, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
@@ -1396,8 +1674,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         const sameTask = (left: Task, right: Task) => JSON.stringify(taskToSqliteRow(left)) === JSON.stringify(taskToSqliteRow(right));
         set((state) => {
             const existingTask = state._tasksById.get(task.id);
-            // The full durable task row answers a lost reply before any mutable
-            // project, setting, area, order or Focus input is inspected.
+
+
             if (existingTask) {
                 if (sameTask(existingTask, task)) result = { success: true, id: task.id, outcome: 'replayed' };
                 return state;
@@ -1407,9 +1685,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 if (defaultAreaWitness.before === null ? Boolean(current)
                     : !current || (current.deletedAt ?? null) !== defaultAreaWitness.before.deletedAt) return state;
             }
-            // This command publishes task and optional project together. An
-            // occupied generated project ID with no task is a conflict, never
-            // a partial-commit recovery or an overwrite.
+
+
             if (project && state._projectsById.has(project.id)) return state;
             const usesDefaultArea = !intent.projectToCreate && !intent.props.projectId
                 && !Object.prototype.hasOwnProperty.call(intent.props, 'areaId');
@@ -1459,8 +1736,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                         && state._allTasks.some((entry) => entry.projectId === task.projectId))) return state;
             }
             const tasks = [...state._allTasks, task];
-            const settings = deviceIdToInitialize && !state.settings.deviceId
-                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings;
+            const settings = retainTaskTaxonomy(deviceIdToInitialize && !state.settings.deviceId
+                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings, undefined, task);
             persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
             result = { success: true, id: task.id, outcome: 'applied' };
             return { _allTasks: tasks, _allProjects: projects, settings,
@@ -1469,13 +1746,13 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /** One guarded Process Inbox publication; the native contract proves the effect first. */
+
     commitPreparedInboxEffect: async (input: PreparedInboxEffect) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared Process Inbox change conflicts with current data' };
         set((state) => {
             const receipt = inspectPreparedAffectedRows(state, input);
-            // Every target row is the complete durable receipt. It precedes all
-            // settings, source, membership and order guards that may later change.
+
+
             if (receipt === 'after') {
                 result = { success: true, id: input.sourceBefore.id, outcome: 'replayed' };
                 return state;
@@ -1544,18 +1821,21 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 if (!container.ok || container.projectId !== row.after.projectId
                     || container.sectionId !== row.after.sectionId || container.areaId !== row.after.areaId) return state;
             }
-            const settings = input.deviceIdToInitialize
-                ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings;
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize
+                ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings, input.tasks, input.projects);
             persist(set, debouncedSave, state, { tasks, projects, sections,
                 ...(settings !== state.settings ? { settings } : {}) });
             result = { success: true, id: input.sourceBefore.id, outcome: 'applied' };
             return { _allTasks: tasks, _allProjects: projects, _allSections: sections, settings,
                 lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
         });
+        if (result.success && result.outcome === 'applied') {
+            logStartOnlyRecurringCompletions(input.tasks, input.tasks.filter((row) => !row.before).map((row) => row.after));
+        }
         return result;
     },
 
-    /** A frozen checklist/editor Save or saved-list Reset, including induced rows. */
+
     commitPreparedChecklistEffect: async (input: PreparedChecklistEffect, options?: PreparedChecklistWriteOptions) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared checklist change conflicts with current data' };
         set((memory) => {
@@ -1591,7 +1871,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 const tasks = durable.tasks.map((task) => {
                     const values = taskToSqliteRow(task);
                     return normalizeTaskForLoad(mapSqliteTaskRow(Object.fromEntries(
-                        TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]]))), at);
+                        TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]]))), at, raw.frozenTemporal);
                 });
                 const projects = durable.projects.map(normalizeProjectLifecycleFields);
                 const sections = durable.sections ?? []; const areas = durable.areas ?? [];
@@ -1602,12 +1882,12 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                     _areasById: new Map(areas.map((row) => [row.id, row])), tasks,
                     settings: durable.settings };
             }
-            // A complete target receipt takes precedence over every mutable
-            // setting, source, membership, and order guard on cold recovery.
+
+
             const receipt = inspectPreparedAffectedRows(state, input);
             if (receipt === 'after') {
-                // A new receipted completion UUID must never claim another request's
-                // already-applied effect. Only its own durable receipt can replay.
+
+
                 if (options?.requireBefore) return memory;
                 result = { success: true, id: input.sourceBefore.id, outcome: 'replayed' };
                 return memory;
@@ -1647,7 +1927,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             }
             if (guards.focusCount !== null) {
                 if (!guards.focusBoundary || guards.focusLimit === null
-                    || countFocusedTasksBeforeBoundary(state.tasks, guards.focusBoundary) !== guards.focusCount
+                    || countFocusedTasksBeforeBoundary(state.tasks, guards.focusBoundary, raw?.frozenTemporal?.dates) !== guards.focusCount
                     || normalizeFocusTaskLimit(state.settings.gtd?.focusTaskLimit) !== guards.focusLimit) return memory;
             }
             if (guards.autoArchiveDays !== null && (state.settings.gtd?.autoArchiveDays ?? null) !== guards.autoArchiveDays) return memory;
@@ -1660,18 +1940,25 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 if (!container.ok || container.projectId !== row.after.projectId
                     || container.sectionId !== row.after.sectionId || container.areaId !== row.after.areaId) return memory;
             }
-            const settings = input.deviceIdToInitialize
-                ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings;
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize
+                ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings, input.tasks, input.projects);
             if (raw && durable) {
-                // The guards inspect the actual normal-load view; the save overlays
-                // only affected rows over the complete original durable snapshot.
+
+
                 const overlay = <T extends { id: string }>(rows: T[], effects: Array<{ before: T | null; after: T }>) =>
                     [...replaceEntitiesInArray(rows, effects.filter((row) => row.before).map((row) => row.after)),
                         ...effects.filter((row) => !row.before).map((row) => row.after)];
                 const savedTasks = overlay(durable.tasks, input.tasks);
                 const savedProjects = overlay(durable.projects, input.projects);
                 const savedSections = overlay(durable.sections ?? [], input.sections);
-                const freshTasks = savedTasks.map((row) => normalizeTaskForLoad(row));
+                const changedIds = new Set(input.tasks.map(row => row.after.id));
+                const at = input.tasks.find(row => row.after.id === input.sourceBefore.id)!.after.updatedAt;
+                const freshTasks = savedTasks.map(row => {
+                    if (!raw.frozenTemporal || !changedIds.has(row.id)) return normalizeTaskForLoad(row);
+                    const values = taskToSqliteRow(row);
+                    return normalizeTaskForLoad(mapSqliteTaskRow(Object.fromEntries(
+                        TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]]))), at, raw.frozenTemporal);
+                });
                 const freshProjects = savedProjects.map(normalizeProjectLifecycleFields);
                 clearDerivedCache();
                 persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
@@ -1691,52 +1978,71 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             return { _allTasks: tasks, _allProjects: projects, _allSections: sections, settings,
                 lastDataChangeAt: getNextDataChangeAt(memory.lastDataChangeAt) };
         });
+        if (result.success && result.outcome === 'applied') {
+            logStartOnlyRecurringCompletions(input.tasks, input.tasks.filter((row) => !row.before).map((row) => row.after));
+        }
         return result;
     },
 
     commitPreparedTaskEdit: async ({ before, changes }) => {
-        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared task edit conflicts with current data' };
+        let result: PreparedTaskEditResult = PREPARED_TASK_EDIT_CONFLICT;
         const after = applyPreparedTaskEditChanges({ before, changes });
-        if (['id', 'createdAt', 'rev', 'revBy', 'updatedAt', 'deletedAt', 'purgedAt'].some((field) => Object.prototype.hasOwnProperty.call(changes, field))) {
-            return { success: false, reason: 'invalid', error: 'Prepared task edit changes protected fields' };
-        }
+        if (preparedTaskEditChangesProtected(changes)) return PREPARED_TASK_EDIT_PROTECTED;
         set((state) => {
             const current = state._allTasks.find((entry) => entry.id === before.id);
             if (!current) {
                 result = { success: false, reason: 'missing', error: 'Task not found' };
                 return state;
             }
-            // The complete applied state precedes mutable container checks. A
-            // content match still needs the contract's durable-save barrier.
+
+
             if (matchesPreparedTaskEdit(current, after, changes)) {
                 result = { success: true, id: current.id, outcome: 'replayed' };
                 return state;
             }
-            if (!matchesPreparedTaskEdit(current, before, changes)) return state;
-            if (current.deletedAt || current.purgedAt || current.status === 'reference'
-                || isStatusListTaskReadOnly(current, state._allProjects)) {
-                result = { success: false, reason: 'invalid', error: 'Task is not editable' };
-                return state;
-            }
-            const container = resolveTaskContainerAssignment({
-                projectId: after.projectId, sectionId: after.sectionId, areaId: after.areaId,
-                allProjects: state._allProjects, allSections: state._allSections, allAreas: state._allAreas,
-            });
-            if (!container.ok || !taskEditValuesEqual(container.projectId, after.projectId)
-                || !taskEditValuesEqual(container.sectionId, after.sectionId) || !taskEditValuesEqual(container.areaId, after.areaId)
-                || (after.projectId && !state._allProjects.some((project) => project.id === after.projectId && isSelectableProjectForTaskAssignment(project)))) {
-                result = { success: false, reason: 'invalid', error: 'Prepared task destination is no longer available' };
+            const refusal = preparedTaskEditRefusal(state, current, { before, changes });
+            if (refusal) {
+                result = refusal;
                 return state;
             }
             const device = ensureDeviceId(state.settings);
-            const updated = {
-                ...applyPreparedTaskEditChanges({ before: current, changes }),
-                rev: nextRevision(current.rev), revBy: device.deviceId, updatedAt: new Date().toISOString(),
-            };
+            const updated = preparedTaskEditUpdate(current, changes, device.deviceId, new Date().toISOString());
             const tasks = replaceEntityInArray(state._allTasks, current.id, updated);
-            persist(set, debouncedSave, state, { tasks, ...(device.updated ? { settings: device.settings } : {}) });
+            const settings = retainTaskTaxonomy(device.settings, current, updated);
+            persist(set, debouncedSave, state, { tasks, settings });
             result = { success: true, id: current.id, outcome: 'applied' };
-            return { _allTasks: tasks, ...(device.updated ? { settings: device.settings } : {}), lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
+            return { _allTasks: tasks, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
+        });
+        return result;
+    },
+
+    commitPreparedTaskEdits: async (edits) => {
+        if (!edits.length || new Set(edits.map((edit) => edit.before.id)).size !== edits.length) return PREPARED_TASK_EDIT_CONFLICT;
+        if (edits.some((edit) => preparedTaskEditChangesProtected(edit.changes))) return PREPARED_TASK_EDIT_PROTECTED;
+        let result: PreparedTaskEditResult = PREPARED_TASK_EDIT_CONFLICT;
+        set((state) => {
+            const device = ensureDeviceId(state.settings);
+            const updatedAt = new Date().toISOString();
+            let tasks = state._allTasks;
+            let settings = device.settings;
+            for (const edit of edits) {
+                const current = state._allTasks.find((entry) => entry.id === edit.before.id);
+                if (!current) {
+                    result = { success: false, reason: 'missing', error: 'Task not found' };
+                    return state;
+                }
+                const refusal = preparedTaskEditRefusal(state, current, edit);
+                if (refusal) {
+                    result = refusal;
+                    return state;
+                }
+                const updated = preparedTaskEditUpdate(current, edit.changes, device.deviceId, updatedAt);
+                tasks = replaceEntityInArray(tasks, current.id, updated);
+                settings = retainTaskTaxonomy(settings, current, updated);
+            }
+            persist(set, debouncedSave, state, { tasks, settings });
+            result = { success: true, ids: edits.map((edit) => edit.before.id), outcome: 'applied' };
+            return { _allTasks: tasks, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
         });
         return result;
     },
@@ -1784,8 +2090,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             const projects = durable.projects.map((row) => row.id === effect.project?.before.id
                 ? effect.project.after : row);
             const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
-            const settings = input.deviceIdToInitialize
-                ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings;
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize
+                ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, effect.tasks, effect.project ? [effect.project] : []);
             const freshTasks = tasks.map((row) => normalizeTaskForLoad(row));
             const freshProjects = projects.map(normalizeProjectLifecycleFields);
             clearDerivedCache();
@@ -1797,6 +2103,108 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: sections,
                 _allAreas: durable.areas, _allPeople: durable.people ?? [], settings,
                 lastDataChangeAt: getNextDataChangeAt(memory.lastDataChangeAt) };
+        });
+        return result;
+    },
+
+    commitPreparedTrashItemsRestore: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Trash Restore conflicts with saved data' };
+        set((memory) => {
+            const before = authority.state;
+            if (memory._allTasks !== before._allTasks || memory._allProjects !== before._allProjects
+                || memory._allAreas !== before._allAreas || memory._allSections !== before._allSections
+                || memory._allPeople !== before._allPeople || memory.settings !== before.settings
+                || memory.lastDataChangeAt !== before.lastDataChangeAt) return memory;
+            const durable = authority.snapshot;
+            if ((durable.settings.deviceId ?? null) !== input.deviceIdBefore
+                || (input.deviceIdBefore === null ? !input.deviceIdToInitialize : input.deviceIdToInitialize !== null)) return memory;
+            const scope = trashItemsRestoreScope(input.request, durable);
+            if (!sameSectionDeleteJson(scope, input.scope)
+                || !sameSectionDeleteJson(trashItemsRestoreEffect({ ...input, scope }), input.effect)) return memory;
+            const bindRows = <T extends { id: string }>(rows: T[], pairs: { before: T; after: T }[],
+                sameRow: (left: T, right: T) => boolean): Map<string, T> | null => {
+                const current = new Map(rows.map((row) => [row.id, row])), after = new Map<string, T>();
+                for (const pair of pairs) {
+                    const saved = current.get(pair.before.id);
+                    if (!saved || pair.after.id !== pair.before.id || after.has(pair.before.id)
+                        || !sameRow(saved, pair.before) || !sameSectionDeleteJson(saved, pair.before)) return null;
+                    after.set(pair.before.id, pair.after);
+                }
+                return after;
+            };
+            const taskAfter = bindRows(durable.tasks, input.effect.tasks, sameTaskSqliteRow);
+            const projectAfter = bindRows(durable.projects, input.effect.projects, sameProjectSqliteRow);
+            const sectionAfter = bindRows(durable.sections, input.effect.sections, sameSectionSqliteRow);
+            if (!taskAfter || !projectAfter || !sectionAfter) return memory;
+
+            const tasks = durable.tasks.map((row) => taskAfter.get(row.id) ?? row);
+            const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
+            const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, input.effect.tasks, input.effect.projects);
+            const freshTasks = tasks.map((row) => normalizeTaskForLoad(row)), freshProjects = projects.map(normalizeProjectLifecycleFields);
+            clearDerivedCache();
+            persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
+                _allSections: durable.sections, _allAreas: durable.areas, _allPeople: durable.people ?? [], settings: durable.settings },
+            { ...durable, tasks, projects, sections, settings });
+            const lastDataChangeAt = getNextDataChangeAt(memory.lastDataChangeAt);
+            authority.saveBoundary = { taskReference: freshTasks, lastDataChangeAt,
+                generation: getSaveGeneration(), failure: memory.persistenceFailure };
+            result = { success: true, ids: [...input.request.taskIds], outcome: 'applied' };
+            return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: sections,
+                _allAreas: durable.areas, _allPeople: durable.people ?? [], settings, lastDataChangeAt };
+        });
+        return result;
+    },
+
+    commitPreparedTrashItemsPurge: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Trash purge conflicts with saved data' };
+        set((memory) => {
+            const before = authority.state;
+            if (memory._allTasks !== before._allTasks || memory._allProjects !== before._allProjects
+                || memory._allAreas !== before._allAreas || memory._allSections !== before._allSections
+                || memory._allPeople !== before._allPeople || memory.settings !== before.settings
+                || memory.lastDataChangeAt !== before.lastDataChangeAt) return memory;
+            const durable = authority.snapshot;
+            if ((durable.settings.deviceId ?? null) !== input.deviceIdBefore
+                || (input.deviceIdBefore === null ? !input.deviceIdToInitialize : input.deviceIdToInitialize !== null)) return memory;
+            const scope = trashItemsPurgeScope(input.request, durable);
+            if (!sameSectionDeleteJson(scope, input.scope)
+                || !sameSectionDeleteJson(trashItemsPurgeEffect({ ...input, scope }), input.effect)) return memory;
+            const bindRows = <T extends { id: string }>(rows: T[], pairs: { before: T; after: T }[],
+                sameRow: (left: T, right: T) => boolean): Map<string, T> | null => {
+                const current = new Map(rows.map((row) => [row.id, row])), after = new Map<string, T>();
+                for (const pair of pairs) {
+                    const saved = current.get(pair.before.id);
+                    if (!saved || pair.after.id !== pair.before.id || after.has(pair.before.id)
+                        || !sameRow(saved, pair.before) || !sameSectionDeleteJson(saved, pair.before)) return null;
+                    after.set(pair.before.id, pair.after);
+                }
+                return after;
+            };
+            const taskAfter = bindRows(durable.tasks, input.effect.tasks, sameTaskSqliteRow);
+            const projectAfter = bindRows(durable.projects, input.effect.projects, sameProjectSqliteRow);
+            const sectionAfter = bindRows(durable.sections, input.effect.sections, sameSectionSqliteRow);
+            if (!taskAfter || !projectAfter || !sectionAfter) return memory;
+
+            const tasks = durable.tasks.map((row) => taskAfter.get(row.id) ?? row);
+            const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
+            const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
+            let settings = input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings;
+            if (!sameSectionDeleteJson(input.scope.pendingRemoteDeletes, input.effect.pendingRemoteDeletes)) {
+                settings = { ...settings, attachments: { ...settings.attachments,
+                    pendingRemoteDeletes: input.effect.pendingRemoteDeletes ?? undefined } };
+            }
+            const freshTasks = tasks.map((row) => normalizeTaskForLoad(row)), freshProjects = projects.map(normalizeProjectLifecycleFields);
+            clearDerivedCache();
+            persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
+                _allSections: durable.sections, _allAreas: durable.areas, _allPeople: durable.people ?? [], settings: durable.settings },
+            { ...durable, tasks, projects, sections, settings });
+            const lastDataChangeAt = getNextDataChangeAt(memory.lastDataChangeAt);
+            authority.saveBoundary = { taskReference: freshTasks, lastDataChangeAt,
+                generation: getSaveGeneration(), failure: memory.persistenceFailure };
+            result = { success: true, ids: [...input.request.taskIds], outcome: 'applied' };
+            return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: sections,
+                _allAreas: durable.areas, _allPeople: durable.people ?? [], settings, lastDataChangeAt };
         });
         return result;
     },
@@ -1859,13 +2267,13 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                         && getBulkMoveStatusOptions('done').includes(input.request.status) ? input.request.status : null;
                 if (!target || !input.request.taskIds.every((id) => taskAfter.get(id)?.status === target)) return memory;
             }
-            // Only exact BEFORE can apply. Equal AFTER without this request's
-            // durable receipt is never evidence that the batch already ran.
+
+
             const tasks = durable.tasks.map((row) => taskAfter.get(row.id) ?? row);
             const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
             const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
-            const settings = input.deviceIdToInitialize
-                ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings;
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize
+                ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, input.effect.tasks, input.effect.projects);
             const freshTasks = tasks.map((row) => normalizeTaskForLoad(row));
             const freshProjects = projects.map(normalizeProjectLifecycleFields);
             clearDerivedCache();
@@ -1885,11 +2293,66 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
     commitPreparedReferenceTasksMove: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.move, 'Reference Move conflicts with saved data'),
 
+    commitPreparedInboxTasksMove: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxMove, 'Inbox Move conflicts with saved data'),
+    commitPreparedProjectTasksMove: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectMove, 'Project Move conflicts with saved data'),
+
+    commitPreparedInboxTasksAddTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxAddTag, 'Inbox Add tag conflicts with saved data'),
+
+    commitPreparedProjectTasksAddTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectAddTag, 'Project Add tag conflicts with saved data'),
+
+    commitPreparedInboxTasksRemoveTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxRemoveTag, 'Inbox Remove tag conflicts with saved data'),
+
+    commitPreparedProjectTasksRemoveTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectRemoveTag, 'Project Remove tag conflicts with saved data'),
+
+    commitPreparedInboxTasksOrganize: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxOrganize, 'Inbox Organize conflicts with saved data'),
+
+    commitPreparedProjectTasksOrganize: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectOrganize, 'Project Organize conflicts with saved data'),
+
     commitPreparedReferenceTasksAddTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.addTag, 'Reference Add tag conflicts with saved data'),
 
     commitPreparedReferenceTasksRemoveTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.removeTag, 'Reference Remove tag conflicts with saved data'),
+
+    commitPreparedTaskChecklistMove: async (input, authority): Promise<PreparedTaskEditResult> => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Checklist move conflicts with saved data' };
+        set(memory => {
+            const before = authority.state, shared = referenceBatchModules.shared;
+            if (!shared || memory._allTasks !== before._allTasks || memory._allProjects !== before._allProjects
+                || memory._allAreas !== before._allAreas || memory._allSections !== before._allSections
+                || memory._allPeople !== before._allPeople || memory.settings !== before.settings
+                || memory.lastDataChangeAt !== before.lastDataChangeAt) return memory;
+            const durable = authority.snapshot;
+            if ((durable.settings.deviceId ?? null) !== input.deviceIdBefore
+                || (input.deviceIdBefore === null ? !input.deviceIdToInitialize : input.deviceIdToInitialize !== null)
+                || !input.before.length || input.before.length > 2 || input.before.length !== input.after.length) return memory;
+            const current = new Map(durable.tasks.map(row => [row.id,row])), after = new Map<string,Task>();
+            for (let index=0;index<input.before.length;index++) {
+                const old=input.before[index],next=input.after[index],saved=current.get(old.id);
+                if (!saved || old.id!==next.id || after.has(old.id) || !sameTaskSqliteRow(saved,old) || !sameSectionDeleteJson(saved,old)) return memory;
+                after.set(next.id,next);
+            }
+            const tasks=durable.tasks.map(row=>after.get(row.id)??row),settings=retainTaxonomyEffects(input.deviceIdToInitialize
+                ? {...durable.settings,deviceId:input.deviceIdToInitialize}:durable.settings,input.after.map((row,index)=>({before:input.before[index],after:row})),[]);
+            const freshTasks=tasks.map(row=>after.has(row.id)?shared.historyRowLoadProjection(row,input.updateAt,input.frozenTemporal):normalizeTaskForLoad(row));
+            clearDerivedCache();persist(set,debouncedSave,{...memory,_allTasks:durable.tasks,_allProjects:durable.projects,_allSections:durable.sections,
+                _allAreas:durable.areas,_allPeople:durable.people??[],settings:durable.settings},{...durable,tasks,settings});
+            const lastDataChangeAt=getNextDataChangeAt(memory.lastDataChangeAt);
+            authority.saveBoundary={taskReference:freshTasks,lastDataChangeAt,generation:getSaveGeneration(),failure:memory.persistenceFailure};
+            result={success:true,ids:input.before.map(row=>row.id),outcome:'applied'};
+            return {_allTasks:freshTasks,_allProjects:durable.projects.map(normalizeProjectLifecycleFields),_allSections:durable.sections,
+                _allAreas:durable.areas,_allPeople:durable.people??[],settings,lastDataChangeAt};
+        });
+        return result;
+    },
 
     commitPreparedArchivedTasksMutation: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Archive Trash conflicts with saved data' };
@@ -1912,10 +2375,13 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                     || (input.operation === 'delete' ? Boolean(old.deletedAt) || !next.deletedAt : !old.deletedAt || Boolean(next.deletedAt))) return memory;
                 after.set(old.id, next);
             }
-            // Exact BEFORE is required; equal AFTER alone never acknowledges a UUID.
+
             const tasks = durable.tasks.map((row) => after.get(row.id) ?? row);
-            const settings = input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings;
-            const freshTasks = tasks.map((row) => normalizeTaskForLoad(row));
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, input.after.map((after, index) => ({ before: input.before[index], after })), []);
+            const loadFrozen = referenceBatchModules.shared?.historyRowLoadProjection;
+            if (input.frozenTemporal && !loadFrozen) return memory;
+            const freshTasks = tasks.map((row) => input.frozenTemporal && after.has(row.id)
+                ? loadFrozen!(row, input.frozenTemporal.at, input.frozenTemporal) : normalizeTaskForLoad(row));
             const freshProjects = durable.projects.map(normalizeProjectLifecycleFields);
             clearDerivedCache();
             persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
@@ -1926,6 +2392,40 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             result = { success: true, ids: input.before.map((row) => row.id), outcome: 'applied' };
             return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: durable.sections,
                 _allAreas: durable.areas, _allPeople: durable.people ?? [], settings, lastDataChangeAt };
+        });
+        return result;
+    },
+
+    commitPreparedBoardOrder: async (input, authority, admit): Promise<PreparedTaskEditResult> => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Board order conflicts with saved data' };
+        set((memory) => {
+            const before = authority.state;
+            if (memory._allTasks !== before._allTasks || memory._allProjects !== before._allProjects
+                || memory._allAreas !== before._allAreas || memory._allSections !== before._allSections
+                || memory._allPeople !== before._allPeople || memory.settings !== before.settings
+                || memory.lastDataChangeAt !== before.lastDataChangeAt || !admit()) return memory;
+            const durable = authority.snapshot;
+            if (durable.settings.deviceId !== input.deviceIdBefore || !input.effect.tasks.length) return memory;
+            const replacements = new Map<string, Task>();
+            for (const pair of input.effect.tasks) {
+                const rows = durable.tasks.filter(row => row.id === pair.before.id);
+                if (rows.length !== 1 || replacements.has(pair.before.id) || pair.after.id !== pair.before.id
+                    || !samePreparedBoardOrderBefore(rows[0], pair.before)) return memory;
+                replacements.set(pair.before.id, pair.after);
+            }
+
+            const tasks = durable.tasks.map(row => replacements.get(row.id) ?? row);
+            const freshTasks = tasks.map(row => normalizeTaskForLoad(row));
+            const freshProjects = durable.projects.map(normalizeProjectLifecycleFields);
+            clearDerivedCache();
+            persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
+                _allSections: durable.sections ?? [], _allAreas: durable.areas ?? [], _allPeople: durable.people ?? [], settings: durable.settings },
+            { ...durable, tasks });
+            const lastDataChangeAt = getNextDataChangeAt(memory.lastDataChangeAt);
+            authority.saveBoundary = { taskReference: freshTasks, lastDataChangeAt, generation: getSaveGeneration(), failure: memory.persistenceFailure };
+            result = { success: true, ids: [...replacements.keys()], outcome: 'applied' };
+            return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: durable.sections ?? [],
+                _allAreas: durable.areas ?? [], _allPeople: durable.people ?? [], settings: durable.settings, lastDataChangeAt };
         });
         return result;
     },
@@ -1947,7 +2447,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             }
             const sameRaw = (left: Task, right: Task) => sameTaskSqliteRow(left, right)
                 && sameSectionDeleteJson(left, right);
-            // Full result receipt wins before mutable parent/order eligibility.
+
             if (sameRaw(current, input.effect.task.after)
                 && (input.deviceIdToInitialize === null
                     || (durable.settings.deviceId ?? null) === input.deviceIdToInitialize)) {
@@ -1957,8 +2457,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             if (!sameRaw(current, input.effect.task.before)
                 || (durable.settings.deviceId ?? null) !== input.deviceIdBefore) return memory;
             const tasks = durable.tasks.map((row) => row.id === current.id ? input.effect.task.after : row);
-            const settings = input.deviceIdToInitialize
-                ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings;
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize
+                ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, [input.effect.task], []);
             const freshTasks = tasks.map((row) => normalizeTaskForLoad(row));
             const freshProjects = durable.projects.map(normalizeProjectLifecycleFields);
             clearDerivedCache();
@@ -1982,7 +2482,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             error: 'Prepared task Focus conflicts with current data' };
         set((state) => {
             const current = state._allTasks.find((row) => row.id === input.request.taskId);
-            // A full durable Task receipt wins before mutable eligibility, parent or clock checks.
+
             if (current && sameTaskSqliteRow(current, input.effect.task.after)) {
                 result = { success: true, id: current.id, outcome: 'replayed' };
                 return state;
@@ -2017,7 +2517,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             if (affected.length === 0 || currentById.size !== state._allTasks.length
                 || new Set(input.request.ids).size !== input.request.ids.length
                 || new Set(affected.map(({ before }) => before.id)).size !== affected.length) return state;
-            // A complete durable receipt wins before mutable membership, parent, or clock checks.
+
             if (affected.every(({ after }) => {
                 const current = currentById.get(after.id);
                 return current && sameTaskSqliteRow(current, after) && sameSectionDeleteJson(current, after);
@@ -2026,7 +2526,9 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 return state;
             }
             const live = currentFocusOrder(state, input.request.controls);
-            if (!live.canReorder || live.tasks.length > 100
+            if (!(input.version === 2 ? live.canReorder : live.legacyCanReorder) || live.tasks.length > 100
+                || (input.version === 2 && (input.request.ids.length !== live.visibleTasks.length
+                    || input.request.ids.some((id) => !live.visibleTasks.some((task) => task.id === id))))
                 || focusOrderToken(live.tasks) !== input.request.expectedOrder
                 || !sameSectionDeleteJson(live.tasks, input.scope.tasks)
                 || (state.settings.deviceId ?? null) !== input.deviceIdBefore
@@ -2036,7 +2538,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                     return !current || !sameTaskSqliteRow(current, before) || !sameSectionDeleteJson(current, before);
                 })) return state;
             const planned = focusOrderEffect(input.scope, input.request.ids,
-                input.deviceIdBefore ?? input.deviceIdToInitialize!, input.preparedAt);
+                input.deviceIdBefore ?? input.deviceIdToInitialize!, input.preparedAt, input.version === 2);
             if (!sameSectionDeleteJson(planned, input.effect)) return state;
             const tasks = replaceEntitiesInArray(state._allTasks, affected.map(({ after }) => after));
             const settings = input.deviceIdToInitialize
@@ -2050,11 +2552,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /**
-     * Update an existing task.
-     * @param id Task ID
-     * @param updates Properties to update
-     */
+
     updateTask: async (id: string, updates: Partial<Task>) => {
         const updateStartedAt = Date.now();
         const changeAt = Date.now();
@@ -2108,29 +2606,28 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             set({ error: preparedUpdates.error });
             return actionFail(preparedUpdates.error);
         }
-        const isPromotingTaskFocus = preparedUpdates.updates.isFocusedToday === true && existingTask.isFocusedToday !== true;
         const focusNow = new Date();
-        const isFillingFocusSlot = !isTaskCountedAsFocused(existingTask, focusNow)
-            && isTaskCountedAsFocused({ ...existingTask, ...preparedUpdates.updates }, focusNow);
-        if (isFillingFocusSlot) {
-            const focusTaskLimit = normalizeFocusTaskLimit(currentState.settings.gtd?.focusTaskLimit);
-            const focusedCount = currentState.getFocusedCount();
-            if (focusedCount >= focusTaskLimit) {
-                const message = `Focus limit of ${focusTaskLimit} reached`;
-                set({ error: message });
-                return actionFail(message);
-            }
+        const focusDecision = resolveTaskFocusUpdate(existingTask, { ...existingTask, ...preparedUpdates.updates }, {
+            focusedCount: currentState.getFocusedCount(),
+            focusTaskLimit: normalizeFocusTaskLimit(currentState.settings.gtd?.focusTaskLimit),
+            now: focusNow,
+        });
+        if (focusDecision.outcome === 'refused-limit') {
+            set({ error: focusDecision.message });
+            return actionFail(focusDecision.message);
         }
         const prepareMs = Date.now() - updateStartedAt;
         let snapshot: AppData | null = null;
+        let completedRecurrenceRows: Array<{ before: Task; after: Task }> = [];
+        let createdRecurringTasks: Task[] = [];
         const incrementalPersistence: {
             task?: Task;
             hasRecurringFollowUp: boolean;
-            mintedDeviceId: boolean;
+            settingsChanged: boolean;
             reactivatedProjectIds: string[];
         } = {
             hasRecurringFollowUp: false,
-            mintedDeviceId: false,
+            settingsChanged: false,
             reactivatedProjectIds: [],
         };
         let setProducerMs = 0;
@@ -2157,15 +2654,20 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                     deviceId: deviceState.deviceId,
                 });
                 const { updatedTask, recurringFollowUpTask } = effects;
+                const settings = retainTaskTaxonomy(deviceState.settings, oldTask, updatedTask);
+                if (recurringFollowUpTask) {
+                    completedRecurrenceRows = [{ before: oldTask, after: updatedTask }];
+                    createdRecurringTasks = [recurringFollowUpTask];
+                }
                 incrementalPersistence.task = updatedTask;
                 incrementalPersistence.hasRecurringFollowUp = recurringFollowUpTask !== null;
-                incrementalPersistence.mintedDeviceId = deviceState.updated;
+                incrementalPersistence.settingsChanged = settings !== state.settings;
                 incrementalPersistence.reactivatedProjectIds = effects.reactivatedProjectIds;
                 snapshot = buildSaveSnapshot(state, {
                     tasks: effects.tasks,
                     projects: effects.projects,
                     sections: effects.sections,
-                    ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                    settings,
                 });
                 setProducerMs = Date.now() - producerStartedAt;
                 return {
@@ -2173,30 +2675,22 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                     _allProjects: effects.projects,
                     _allSections: effects.sections,
                     lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
-                    ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                    settings,
                 };
             });
         } finally {
             if (notifyProfilingEnabled) notifyProfile = endNotifyProfile();
         }
         const setStateMs = Date.now() - setStateStartedAt;
+        logStartOnlyRecurringCompletions(completedRecurrenceRows, createdRecurringTasks);
         const persistenceStartedAt = Date.now();
         const storage = getStorage();
-        // A queued (not yet dispatched) full-state save can hold rows this task
-        // now references — e.g. Process Inbox creates the project through the
-        // debounced path and immediately points the task at it. A focused task
-        // save dispatched now would reach SQLite before the project row and
-        // fail its FOREIGN KEY check (#1024), so fold the task into the queued
-        // snapshot instead. Saves already in flight are safe: both platform
-        // adapters run writes through one FIFO queue.
-        //
-        // A deviceId minted in this update lives only in the snapshot's settings,
-        // which the single-row write cannot carry: dropping it would let the next
-        // launch mint another id and churn revBy.
+
+
         if (
             incrementalPersistence.task
             && !incrementalPersistence.hasRecurringFollowUp
-            && !incrementalPersistence.mintedDeviceId
+            && !incrementalPersistence.settingsChanged
             && incrementalPersistence.reactivatedProjectIds.length === 0
             && storage.saveTask
             && !hasQueuedSnapshotSave()
@@ -2258,7 +2752,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             }
             logTaskProjectReactivationSaved(incrementalPersistence.reactivatedProjectIds.length);
         }
-        if (isPromotingTaskFocus && incrementalPersistence.task?.isFocusedToday
+        if (focusDecision.outcome === 'queued' && incrementalPersistence.task?.isFocusedToday
             && isTaskFutureFocusCandidate(incrementalPersistence.task)) {
             logInfo('Scheduled Focus queued', {
                 scope: 'store',
@@ -2266,7 +2760,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 context: { releaseCheck: 'v1.3.3/scheduled-focus-queue', operation: 'update' },
             });
         }
-        if (isFillingFocusSlot && isTaskFutureFocusCandidate(existingTask, focusNow)) {
+        if (focusDecision.outcome === 'focused' && isTaskFutureFocusCandidate(existingTask, focusNow)) {
             logInfo('Queued Focus activated', {
                 scope: 'store', category: 'storage',
                 context: { releaseCheck: 'v1.3.3/editor-focus-star' },
@@ -2275,7 +2769,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return actionOk();
     },
 
-    /** Archive one occurrence and durably create the next without a completion. */
+
     skipRecurringTaskOccurrence: async (id: string) => {
         const task = get()._tasksById.get(id);
         if (!task || !canSkipRecurringTaskOccurrence(task)) {
@@ -2291,14 +2785,20 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             const tasks = planSkippedRecurringOccurrence({ task: currentTask, allTasks: state._allTasks,
                 now, deviceId: deviceState.deviceId,
                 createId: uuidv4 }).tasks;
+
+            const settings = retainTaxonomyEffects(deviceState.settings, tasks.flatMap((after) => {
+                const before = state._tasksById.get(after.id);
+                return before === after ? [] : [{ before, after }];
+            }));
+            const settingsChanged = settings !== state.settings;
             persist(set, debouncedSave, state, {
                 tasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                ...(settingsChanged ? { settings } : {}),
             });
             return {
                 _allTasks: tasks,
                 lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                ...(settingsChanged ? { settings } : {}),
             };
         });
         try {
@@ -2317,7 +2817,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return actionOk();
     },
 
-    /** Archive a task as cancelled without completing or advancing recurrence. */
+
     cancelTask: async (id: string) => {
         const task = get()._tasksById.get(id);
         if (!task || task.deletedAt || task.purgedAt) {
@@ -2334,9 +2834,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             });
             if (!result.success) return result;
         } else if (retryingFailedCancellation) {
-            // A terminal flush dequeues its exhausted snapshot. The in-memory
-            // cancellation still needs a fresh durable retry on the next user
-            // acknowledgement attempt, without changing its revision or time.
+
+
             await get().persistSnapshot();
         }
         try {
@@ -2362,10 +2861,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id });
     },
 
-    /**
-     * Soft-delete a task by setting deletedAt.
-     * @param id Task ID
-     */
+
     deleteTask: async (id: string) => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -2377,11 +2873,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Restore a soft-deleted task. A purged task is the compacted tombstone of
-     * a permanent delete, so it counts as missing: reviving it would resurrect
-     * an emptied row and sync it back to every device.
-     */
+
     restoreTask: async (id: string) => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -2396,12 +2888,10 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Permanently delete a task (removes from storage).
-     */
+
     purgeTask: async (id: string) => {
-        // Only a task still in Trash may be deleted forever: sync can restore it between the
-        // Trash confirmation and the tap, and then this must not purge a live task.
+
+
         const current = get()._tasksById.get(id);
         if (current && (!current.deletedAt || current.purgedAt)) {
             logWarn('Purge refused for a task not in Trash', {
@@ -2411,8 +2901,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             });
             return actionFail('Task is not in Trash');
         }
-        // The mutation checks again on the state it writes, as purgeTasks does, so a
-        // purge that waited behind a document restore never compacts a live task.
+
+
         const refusal = { purged: null as boolean | null };
         const result = await mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -2444,9 +2934,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return actionFail('Task is not in Trash');
     },
 
-    /**
-     * Restore multiple soft-deleted tasks in a single store update.
-     */
+
     restoreTasks: async (ids: string[]) => {
         const idSet = new Set(ids);
         return mutateTasks({ set, debouncedSave }, {
@@ -2459,10 +2947,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Permanently delete multiple soft-deleted tasks in a single store update.
-     * Only already-trashed tasks are purged, so the visible list is untouched.
-     */
+
     purgeTasks: async (ids: string[]) => {
         const idSet = new Set(ids);
         return mutateTasks({ set, debouncedSave }, {
@@ -2480,9 +2965,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Permanently delete all soft-deleted tasks.
-     */
+
     purgeDeletedTasks: async () => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => state._allTasks.filter((task) => task.deletedAt && !task.purgedAt),
@@ -2499,16 +2982,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Duplicate a task as a fresh, re-doable copy: clones the details (title, dates,
-     * recurrence, tags, project) but resets completion — unchecks the checklist and
-     * clears completedAt.
-     *
-     * The copy keeps the source's status, which done/archived cannot do (a
-     * pre-completed copy is useless). Those land in the Inbox instead of straight
-     * on the actionable list: work finished once is not automatically still worth
-     * doing, so it gets clarified again like any other capture (#950).
-     */
+
     duplicateTask: async (id: string, asNextAction?: boolean, copyId?: string) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
@@ -2540,29 +3014,21 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             });
             duplicatedTaskId = newTask.id;
             const newAllTasks = [...state._allTasks, newTask];
+            const settings = retainTaskTaxonomy(deviceState.settings, undefined, newTask);
             persist(set, debouncedSave, state, {
                 tasks: newAllTasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             });
             return {
                 _allTasks: newAllTasks,
                 lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             };
         });
         return missingTask ? actionFail('Task not found') : refusedCopyId ? actionFail('Duplicate id does not match source') : actionOk({ id: duplicatedTaskId });
     },
 
-    /**
-     * Turn a task into a section of the project it already lives in: the title
-     * becomes the section, its checklist items become tasks inside it (completed
-     * ones stay done), and the original task is soft-deleted so its notes and
-     * attachments remain recoverable from Trash (#1106).
-     *
-     * Every entity is validated and built before one store mutation publishes
-     * the complete task/section snapshot. No partial conversion is observable or
-     * persistable, and retry sees the source tombstone instead of duplicating it.
-     */
+
     convertTaskToSection: async (id: string) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
@@ -2574,100 +3040,31 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 errorMessage = 'Task not found';
                 return state;
             }
-            const projectId = normalizeOptionalContainerId(sourceTask.projectId);
-            if (!projectId) {
-                errorMessage = 'Task is not in a project';
-                return state;
-            }
-            const projectExists = state._allProjects.some((project) => project.id === projectId && !project.deletedAt);
-            const sectionTitle = typeof sourceTask.title === 'string' ? sourceTask.title.trim() : '';
-            if (!projectExists || !sectionTitle) {
-                errorMessage = 'Section could not be created';
-                return state;
-            }
-
             const deviceState = ensureDeviceId(state.settings);
-            const sectionOrder = state._allSections
-                .filter((section) => section.projectId === projectId && !section.deletedAt)
-                .reduce((max, section) => Math.max(max, Number.isFinite(section.order) ? section.order : -1), -1) + 1;
-            const description = typeof sourceTask.description === 'string' ? sourceTask.description.trim() : '';
-            const section: Section = {
-                id: uuidv4(),
-                projectId,
-                title: sectionTitle,
-                ...(description ? { description } : {}),
-                order: sectionOrder,
-                isCollapsed: false,
-                rev: 1,
-                revBy: deviceState.deviceId,
-                createdAt: now,
-                updatedAt: now,
-            };
-            const nextAllSections = [...state._allSections, section];
-            const projectOrderReserver = createProjectOrderReserver(state._allTasks);
-            const checklistTasks: Task[] = [];
-
-            for (const item of sourceTask.checklist || []) {
-                const title = typeof item.title === 'string' ? item.title.trim() : '';
-                if (!title) continue;
-                const containerResolution = resolveTaskContainerAssignment({
-                    projectId,
-                    sectionId: section.id,
-                    areaId: undefined,
-                    allProjects: state._allProjects,
-                    allSections: nextAllSections,
-                    allAreas: state._allAreas,
-                });
-                if (!containerResolution.ok) {
-                    errorMessage = containerResolution.error;
-                    return state;
-                }
-                const order = projectOrderReserver(containerResolution.projectId);
-                checklistTasks.push({
-                    id: uuidv4(),
-                    title,
-                    status: item.isCompleted ? 'done' : 'next',
-                    taskMode: 'task',
-                    tags: [],
-                    contexts: [],
-                    pushCount: 0,
-                    isFocusedToday: false,
-                    suppressMindwtrReminders: false,
-                    projectId: containerResolution.projectId,
-                    sectionId: containerResolution.sectionId,
-                    areaId: containerResolution.areaId,
-                    ...(item.isCompleted ? { completedAt: now } : {}),
-                    order,
-                    orderNum: order,
-                    rev: 1,
-                    revBy: deviceState.deviceId,
-                    createdAt: now,
-                    updatedAt: now,
-                });
+            const plan = planTaskToSection({ sourceTask, allTasks: state._allTasks, allProjects: state._allProjects,
+                allSections: state._allSections, allAreas: state._allAreas, settings: state.settings,
+                deviceId: deviceState.deviceId, now });
+            if (!plan.ok) {
+                errorMessage = plan.error;
+                return state;
             }
-
-            const deletedSource: Task = {
-                ...sourceTask,
-                deletedAt: now,
-                updatedAt: now,
-                rev: nextRevision(sourceTask.rev),
-                revBy: deviceState.deviceId,
-            };
+            const nextAllSections = [...state._allSections, plan.section];
             const nextAllTasks = [
-                ...replaceEntityInArray(state._allTasks, deletedSource.id, deletedSource),
-                ...checklistTasks,
+                ...replaceEntityInArray(state._allTasks, plan.deletedSource.id, plan.deletedSource),
+                ...plan.tasks,
             ];
-            convertedSectionId = section.id;
+            convertedSectionId = plan.section.id;
+            const settings = retainTaskTaxonomy(deviceState.settings, sourceTask, plan.deletedSource);
             persist(set, debouncedSave, state, {
                 tasks: nextAllTasks,
                 sections: nextAllSections,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             });
             return {
                 _allTasks: nextAllTasks,
                 _allSections: nextAllSections,
                 lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             };
         });
 
@@ -2676,9 +3073,41 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id: convertedSectionId });
     },
 
-    /**
-     * Create or reuse a project from a task while keeping the task as the first action.
-     */
+
+    commitPreparedTaskToSection: async (input: PreparedTaskToSection) => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict',
+            error: 'Prepared Convert to section conflicts with current data' };
+        set((state) => {
+            const receipt = inspectPreparedAffectedRows(state, input);
+            if (receipt === 'after') {
+                result = { success: true, id: input.result.sectionId, outcome: 'replayed' };
+                return state;
+            }
+            if (receipt !== 'before') return state;
+            const source = state._tasksById.get(input.sourceBefore.id);
+            const project = state._projectsById.get(input.project.id);
+            if (!source || !samePreparedTask(source, input.sourceBefore) || source.deletedAt || source.purgedAt
+                || isStatusListTaskReadOnly(source, state._allProjects)
+                || !project || !samePreparedProject(project, input.project) || project.deletedAt
+                || (state.settings.deviceId ?? null) !== input.deviceIdBefore
+                || (input.deviceIdBefore === null ? !input.deviceIdToInitialize : input.deviceIdToInitialize !== null)
+                || (state.settings.taskReminderDefault ?? null) !== input.taskReminderDefault
+                || taskToSectionOrderMax(state._allSections, project.id) !== input.sectionOrderMax
+                || (getNextProjectOrder(project.id, state._allTasks) ?? 0) - 1 !== input.taskOrderMax) return state;
+            const { tasks, sections } = applyPreparedAffectedRows(state, input);
+            const settings = retainTaskTaxonomy(input.deviceIdToInitialize
+                ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings,
+            input.sourceBefore, input.tasks[0].after);
+            persist(set, debouncedSave, state, { tasks, sections,
+                ...(settings !== state.settings ? { settings } : {}) });
+            result = { success: true, id: input.result.sectionId, outcome: 'applied' };
+            return { _allTasks: tasks, _allSections: sections, settings,
+                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
+        });
+        return result;
+    },
+
+
     promoteTaskToProject: async (id: string, options?: { title?: string; color?: string; areaId?: string }) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
@@ -2706,16 +3135,17 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             reusedExistingProject = !plan.createdProject;
             const nextAllProjects = plan.createdProject ? [...state._allProjects, plan.createdProject] : state._allProjects;
             const nextAllTasks = replaceEntityInArray(state._allTasks, id, plan.taskAfter);
+            const settings = retainTaxonomyEffects(deviceState.settings, [{ before: sourceTask, after: plan.taskAfter }], plan.createdProject ? [{ after: plan.createdProject }] : []);
             persist(set, debouncedSave, state, {
                 tasks: nextAllTasks,
                 projects: nextAllProjects,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             });
             return {
                 _allTasks: nextAllTasks,
                 _allProjects: nextAllProjects,
                 lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             };
         });
         if (missingTask) return actionFail('Task not found');
@@ -2723,7 +3153,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id: promotedProjectId, reused: reusedExistingProject });
     },
 
-    /** Atomic saved-task move and optional project creation for the native journal. */
+
     commitPreparedTaskPromotion: async (input: PreparedTaskPromotion & { request: { requestId: string;
         taskId: string; taskRevision: string; title: string }; result: { id: string; reused: boolean } }) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict',
@@ -2749,9 +3179,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 const current = state._areasById.get(input.selectedArea.id);
                 if (!current || !taskEditValuesEqual(current, input.selectedArea) || current.deletedAt) return state;
             } else {
-                // A missing/deleted inherited Area is a decision too. If it
-                // becomes live before the write, the shared planner would now
-                // assign the project to it instead of creating an unassigned one.
+
+
                 const inheritedAreaId = input.sourceBefore.areaId ?? input.sourceProject?.areaId;
                 const current = inheritedAreaId ? state._areasById.get(inheritedAreaId) : undefined;
                 if (current && !current.deletedAt) return state;
@@ -2770,8 +3199,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 && ((getNextProjectOrder(input.result.id, state._allTasks) ?? 0) - 1) !== input.taskOrderMax) return state;
             if (input.projects.length && (state.settings.gtd?.defaultProjectFlowMode ?? null) !== input.defaultProjectFlowMode) return state;
             const { tasks, projects } = applyPreparedAffectedRows(state, input);
-            const settings = input.deviceIdToInitialize
-                ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings;
+            const settings = retainTaxonomyEffects(input.deviceIdToInitialize
+                ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings, input.tasks, input.projects);
             persist(set, debouncedSave, state, { tasks, projects,
                 ...(settings !== state.settings ? { settings } : {}) });
             result = { success: true, id: input.result.id, reused: input.result.reused, outcome: 'applied' };
@@ -2781,9 +3210,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /**
-     * Reset checklist items to unchecked (useful for reusable lists).
-     */
+
     resetTaskChecklist: async (id: string) => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -2795,19 +3222,59 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Move a task to a different status.
-     * @param id Task ID
-     * @param newStatus New status
-     */
+    moveTaskToChecklist: async (sourceId: string, targetId: string) => {
+        const itemId = checklistItemIdForMovedTask(sourceId);
+        let alreadyMoved = false;
+
+        const result = await mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => {
+                const source = state._tasksById.get(sourceId);
+                const target = state._tasksById.get(targetId);
+                if (!source || !target || !isChecklistMoveTarget(target, sourceId)) return [];
+                const hasItem = Boolean(target.checklist?.some((item) => item.id === itemId));
+                if (hasItem && source.deletedAt) {
+                    alreadyMoved = true;
+                    return [];
+                }
+                if (!canMoveTaskToChecklist(source, resolveQuickCaptureDefaultAreaId(state.settings, state.areas))) return [];
+                return hasItem ? [source] : [target, source];
+            },
+            buildUpdates: (task, { now, state }) => task.id === sourceId
+                ? { deletedAt: now }
+                : { checklist: [...(task.checklist ?? []),
+                    { id: itemId, title: state._tasksById.get(sourceId)!.title.trim(), isCompleted: false }] },
+            missingMessage: 'Task not found',
+        });
+        return alreadyMoved || result.success ? actionOk({ id: targetId }) : result;
+    },
+
+    undoMoveTaskToChecklist: async (sourceId: string, targetId: string) => {
+        const itemId = checklistItemIdForMovedTask(sourceId);
+        return mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => {
+                const source = state._tasksById.get(sourceId);
+                const target = state._tasksById.get(targetId);
+                return [
+                    ...(target && target.id !== sourceId && target.checklist?.some((item) => item.id === itemId) ? [target] : []),
+                    ...(source?.deletedAt && !source.purgedAt ? [source] : []),
+                ];
+            },
+            buildUpdates: (task, { state }) => {
+                if (task.id === sourceId) return { deletedAt: undefined, ...sanitizeRestoredTaskContainerReferences(task, state) };
+                const checklist = (task.checklist ?? []).filter((item) => item.id !== itemId);
+                return { checklist: checklist.length > 0 ? checklist : undefined };
+            },
+            missingMessage: 'Task not found',
+        });
+    },
+
+
     moveTask: async (id: string, newStatus: TaskStatus) => {
-        // Delegate to updateTask to ensure recurrence/metadata logic is applied
+
         return get().updateTask(id, { status: newStatus });
     },
 
-    /**
-     * Batch update tasks in a single save cycle.
-     */
+
     batchUpdateTasks: async (updatesList: Array<{ id: string; updates: Partial<Task> }>) => {
         if (updatesList.length === 0) return actionOk();
         const prepared = prepareTaskBatchUpdatesForStore({ updatesList, state: get() });
@@ -2830,9 +3297,12 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         const changeAt = Date.now();
         const now = new Date().toISOString();
         let reactivatedProjectCount = 0;
+        let completedRecurrenceRows: Array<{ before: Task; after: Task }> = [];
+        let createdRecurringTasks: Task[] = [];
 
         set((state) => {
             const deviceState = ensureDeviceId(state.settings);
+            const taxonomyPairs: Array<{ before: Task; after: Task }> = [];
             const projectReactivation = planTaskBatchUpdateEffects({
                 preparedUpdatesById: prepared.preparedUpdatesById,
                 allTasks: state._allTasks,
@@ -2840,14 +3310,22 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 allSections: state._allSections,
                 now,
                 deviceId: deviceState.deviceId,
+                onTaskUpdated: (before, after) => { taxonomyPairs.push({ before, after }); },
             });
+            const settings = retainTaxonomyEffects(deviceState.settings, taxonomyPairs);
             reactivatedProjectCount = projectReactivation.reactivatedProjectIds.length;
+            if (projectReactivation.createdTasks.length > 0) {
+                createdRecurringTasks = projectReactivation.createdTasks;
+                completedRecurrenceRows = state._allTasks.flatMap((task, index) =>
+                    prepared.preparedUpdatesById.has(task.id)
+                        ? [{ before: task, after: projectReactivation.tasks[index] }] : []);
+            }
 
             persist(set, debouncedSave, state, {
                 tasks: projectReactivation.tasks,
                 projects: projectReactivation.projects,
                 sections: projectReactivation.sections,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             });
 
             return {
@@ -2855,10 +3333,11 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 _allProjects: projectReactivation.projects,
                 _allSections: projectReactivation.sections,
                 lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+                settings,
             };
         });
 
+        logStartOnlyRecurringCompletions(completedRecurrenceRows, createdRecurringTasks);
         if (reactivatedProjectCount > 0) {
             try {
                 await flushPendingSave();
@@ -2900,7 +3379,9 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
 
     reorderFocusedTasks: async (orderedIds: string[]) => {
         if (orderedIds.length === 0) return actionOk();
-        const targetOrderById = focusOrderTargets(orderedIds);
+        const now = new Date();
+        const current = sortTasksByFocusOrder(get().tasks.filter((task) => isTaskCountedAsFocused(task, now)));
+        const targetOrderById = focusOrderTargets(mergeFocusReorderIds(current.map((task) => task.id), orderedIds));
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => state._allTasks.filter((task) => {
                 if (task.deletedAt) return false;
@@ -2910,10 +3391,11 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    getFocusStarAction: (task: Task, options?: { allowUnclarified?: boolean }): FocusStarAction => {
+    getFocusStarAction: (task: Task, options?: { allowUnclarified?: boolean; promoteInbox?: boolean }): FocusStarAction => {
         const state = get();
         const derived = state.getDerivedState();
-        return resolveFocusStarAction(task, {
+        const resolve = options?.promoteInbox ? resolveRowFocusStarAction : resolveFocusStarAction;
+        return resolve(task, {
             tasks: collectFocusEligibilityTasks(derived.activeTasksByStatus),
             projects: derived.projectMap,
             sections: state.sections,
@@ -2921,6 +3403,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
             focusTaskLimit: normalizeFocusTaskLimit(state.settings.gtd?.focusTaskLimit),
             sequentialProjectIds: derived.sequentialProjectIds,
             sectionScopedProjectIds: derived.sequentialWithinSectionProjectIds,
+            sequentialSectionKeys: derived.sequentialSectionKeys,
             allowUnclarified: options?.allowUnclarified,
         });
     },
@@ -2941,12 +3424,11 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave, flushPe
                 : statusFilter && statusFilter !== 'all'
                     ? derived.activeTasksByStatus.get(statusFilter) ?? []
                     : state.tasks;
-            // indexedTasks are already visible (deleted/archived excluded by whichever
-            // derived index produced them), so taskMatchesQuery's own visibility check
-            // here is redundant but harmless - cheaper than a second matcher variant.
+
+
             return indexedTasks.filter((task) => taskMatchesQuery(task, options));
         }
         return get()._allTasks.filter((task) => taskMatchesQuery(task, options));
     },
 });
-};
+}

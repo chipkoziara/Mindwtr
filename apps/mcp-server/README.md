@@ -8,11 +8,11 @@ By default this is a **stdio** server: MCP clients launch it as a subprocess and
 
 ## App Binaries vs. MCP Helper
 
-The desktop app includes a built-in MCP server in **Settings → Integrations → MCP**. It requires no separately installed runtime or helper. The desktop installer does not add a standalone `mindwtr-mcp` command to your `PATH`; mobile apps do not host MCP.
+The desktop app includes a built-in MCP server in **Settings → Integrations → Local MCP server (advanced)**. It requires no separately installed runtime or helper. The desktop installer does not add a standalone `mindwtr-mcp` command to your `PATH`; mobile apps do not host MCP.
 
 You do **not** need to run the whole app from source to use MCP. You can use the normal desktop app binary for your tasks, then run this separate MCP helper from the repository with Bun, or build the helper once and run it with Node. Point the helper at the desktop app's local `mindwtr.db`, or use the Local API backend below.
 
-On desktop, the app shows the exact local data path in **Settings -> Sync -> Local Data**. Mobile binaries do not expose a local MCP server surface.
+On desktop, find the database in the default database locations listed under [Requirements](#requirements). Mobile binaries do not expose a local MCP server surface.
 
 ---
 
@@ -36,7 +36,7 @@ In MCP client configurations using `npx`, add `"--allow-scripts=better-sqlite3"`
 
 Default database locations. The installed Windows and macOS apps keep the database in a `data` subfolder from version 1.3.2 on; Linux and the portable builds are unchanged. The server looks in both places, so it finds the database either way.
 
-- Linux: `~/.local/share/mindwtr/mindwtr.db` (Flatpak: `~/.var/app/tech.dongdongbh.mindwtr/data/mindwtr/mindwtr.db`)
+- Linux: `~/.local/share/mindwtr/mindwtr.db` (Flatpak: `~/.var/app/tech.dongdongbh.mindwtr/data/mindwtr/mindwtr.db`; Snap: `~/snap/mindwtr/current/.local/share/mindwtr/mindwtr.db`)
 - macOS, 1.3.2 and later: `~/Library/Application Support/mindwtr/data/mindwtr.db`
 - macOS, 1.3.1 and earlier: `~/Library/Application Support/mindwtr/mindwtr.db`
 - Windows, 1.3.2 and later: `%APPDATA%\mindwtr\data\mindwtr.db`
@@ -49,7 +49,7 @@ Additional macOS paths for sandboxed builds:
 A `--db` path pinned in an MCP client configuration keeps working across that move: if the file is not at the configured path, the server checks the matching `data` subfolder (or the parent folder) and reports on stderr which database it opened.
 
 If `mindwtr.db` is missing but `data.json` exists in the same desktop data folder, the MCP server will bootstrap a fresh SQLite database from that local data snapshot on first start.
-Desktop Settings → Sync → Local Data shows the exact storage location used by the app.
+The desktop data folder is the folder that holds `mindwtr.db` in the default locations above.
 
 You can override local mode with:
 - `--db /path/to/mindwtr.db`
@@ -121,6 +121,13 @@ Use the port shown in Settings. `MINDWTR_MCP_API_URL` can replace `--api-url`. U
 
 Writes remain disabled unless explicitly enabled with `--write`. If the app is closed or the token is invalid, the helper returns an error. A timed-out write may have reached the app: inspect the task before retrying, as the helper does not retry writes automatically.
 
+Desktop 1.3.8 adds optional protection for task creation and edits in Local API mode:
+
+- `mindwtr_add_task` accepts `idempotencyKey`, 1–128 visible ASCII characters without spaces. Keep the same key and identical input when retrying an uncertain create, including attachment links. The desktop retains the original result for seven days, even if that task is later edited or deleted. Different input with the same key returns `idempotency_conflict`. A full receipt store returns `idempotency_capacity`; retry later with the same key and input.
+- `mindwtr_get_task`, task creation, and task edits return `{ "task": { ... }, "version": "sha256-..." }`. Pass the version unchanged as `expectedVersion` to `mindwtr_update_task`. A stale edit returns `task_version_conflict`; read the task again and review the changes before retrying. An edit that changes nothing preserves the version.
+
+Both arguments are optional. Without them, writes keep their existing behavior. Protected requests use versioned desktop endpoints and fail on older desktop versions without falling back to an unprotected write. Older desktop reads can omit `version`. These arguments are unavailable in Cloud and direct SQLite mode; unsupported task input fields are rejected. Attachment replacement and lifecycle restrictions below still apply.
+
 | MCP capability | Desktop Local API support |
 | --- | --- |
 | List/get tasks | Supported, including rich search operators, date filters, sorting and pagination |
@@ -128,6 +135,7 @@ Writes remain disabled unless explicitly enabled with `--write`. If the app is c
 | Update/complete/delete/restore tasks | Supported through the API's corresponding endpoints; terminal status changes cannot be submitted as ordinary edits |
 | List/get/create/update/delete projects | Supported for the API's basic project fields: title, color, status, Area and sequential behavior |
 | List areas | Supported |
+| View section catalogue and project assignments | Unavailable; task assignments by known ID are supported |
 | Sections, managed people, Area writes | Unavailable; these tools are hidden in API mode |
 | GTD availability `view` | Unavailable because the API does not expose the required section snapshot |
 | Replacing attachment links | Unavailable because the API does not provide conditional attachment updates |
@@ -174,6 +182,8 @@ Flags (all have `MINDWTR_MCP_HTTP*` env var equivalents):
 - `--http-token <token>` / `MINDWTR_MCP_HTTP_TOKEN` — **required** whenever HTTP mode is on, at least 16 characters. Generate one with `openssl rand -hex 32`. The server refuses to start without it — there is no way to expose HTTP mode unauthenticated, even on loopback.
 - `--http-host <host>` / `MINDWTR_MCP_HTTP_HOST` — bind address, default `127.0.0.1`.
 - `--http-port <port>` / `MINDWTR_MCP_HTTP_PORT` — bind port, default `8722`.
+
+The desktop app's built-in MCP server also uses port `8722`. If it is on, pass another port with `--http-port`, for example `--http-port 8723`.
 
 The MCP endpoint is `POST /mcp` and requires `Authorization: Bearer <token>` on every request; `GET /healthz` returns `200 ok` without auth for reverse-proxy health checks. Requests without a valid token get `401`; repeated authentication failures get `429` with a `Retry-After` header. Bodies over 1 MiB get `413`. When HTTP mode is on, the server does not also connect a stdio transport — it stays alive as long as the HTTP server is listening, not stdin.
 
@@ -267,11 +277,13 @@ mindwtr-mcp --db "/path/to/mindwtr.db"
 
 ### Desktop app toggle?
 
-The desktop app has **Settings → Integrations → MCP**. Access is disabled and read-only by default. Enable it and copy connection details for a client supporting authenticated Streamable HTTP at `http://127.0.0.1:8722/mcp`. Configuration syntax depends on the client; stdio-only clients can continue using this standalone helper.
+The desktop app has **Settings → Integrations → Local MCP server (advanced)**. Access is disabled and read-only by default. Enable it and copy connection details for a client supporting authenticated Streamable HTTP. The default endpoint is `http://127.0.0.1:8722/mcp`; **Advanced** lets you choose a port from 1024 to 65535. Save the port, then update your client's connection details. The server remains bound to loopback.
 
-Enable **Allow changes** only to permit creating, editing, and deleting tasks and projects, including completing tasks. Connected AI clients can read exposed Mindwtr data and may send it to their provider. Keep the copied bearer token private; regenerating it disconnects old clients.
+Starting with v1.3.7, **Allow task and project edits** permits creating, editing, completing, and restoring tasks, and creating or editing projects. **Advanced** has separate **Allow archiving** and **Allow deletion** permissions. Each permission is independent; all start off on a new installation. Existing installations that enabled **Allow changes** retain their previous deletion permission, which can now be disabled separately. Archiving requires an explicit new grant. Updates that combine ordinary edits with archive/cancellation changes require both permissions. The dedicated `mindwtr_archive_task` tool uses the app's archive operation without completing the task or generating a recurring occurrence. Deletion remains soft deletion.
 
-The built-in server runs inside the desktop app and shares its task and project operations with the Local API. You do not need to enable the Local API. Closing to the tray keeps it running; disabling MCP or quitting stops it. A startup failure or occupied port is shown in Settings with Retry. The app must stay available. This mode does not provide remote ChatGPT access, a tunnel, or hosting, and has the same supported operations as the Local API backend above.
+**Copy for Codex** provides TOML for `~/.codex/config.toml`. Add or replace the `mcp_servers.mindwtr` entry while preserving your other configuration; Mindwtr does not edit that file. **Copy connection details** retains the JSON format for clients using `mcpServers`. Both include a private bearer token. Connected AI clients can read exposed Mindwtr data and may send it to their provider. Regenerating the token disconnects old clients.
+
+The built-in server runs inside the desktop app and shares its task and project operations with the Local API. You do not need to enable the Local API. Closing to the tray keeps it running; disabling MCP or quitting stops it. A startup failure or occupied port is shown in Settings with Retry. This mode does not provide remote ChatGPT access, a tunnel, or hosting. The standalone helper's backend-specific capabilities and `--write` flag are separate from these desktop permissions.
 
 Source builds compile the built-in server with the desktop Rust application; no separate MCP executable or runtime is bundled.
 
@@ -461,6 +473,7 @@ Any MCP-compatible client can work as long as it can launch a **stdio** server w
   - Input: `{}`
 - `mindwtr_get_project`
   - Input: `{ id, includeDeleted? }`
+- `mindwtr_list_view_sections` — view section IDs, titles and order; optional `view`: `someday`, `waiting`, or `focus` (SQLite/Cloud)
 - `mindwtr_list_sections`
   - Input: `{ projectId?, includeDeleted? }`
 - `mindwtr_get_section`
@@ -474,9 +487,11 @@ Any MCP-compatible client can work as long as it can launch a **stdio** server w
 - `mindwtr_get_task`
   - Input: `{ id, includeDeleted? }`
 - `mindwtr_add_task` **(requires `--write`)**
-  - Input: `{ title? | quickAdd?, status?, projectId?, sectionId?, areaId?, dueDate?, startTime?, cancelledAt?, reviewAt?, recurrence?, contexts?, tags?, description?, priority?, energyLevel?, assignedTo?, timeEstimate?, taskMode?, relativeStartOffset?, showFutureRecurrence?, pushCount?, checklist?, textDirection?, location?, isFocusedToday?, timeSpentMinutes?, suppressMindwtrReminders?, repeatReminderMinutes?, attachments? }`
+  - Input: `{ title? | quickAdd?, status?, projectId?, sectionId?, viewSectionIds?, areaId?, dueDate?, startTime?, cancelledAt?, reviewAt?, recurrence?, contexts?, tags?, description?, priority?, energyLevel?, assignedTo?, timeEstimate?, taskMode?, relativeStartOffset?, showFutureRecurrence?, pushCount?, checklist?, textDirection?, location?, isFocusedToday?, timeSpentMinutes?, suppressMindwtrReminders?, reminderPolicy?, repeatReminderMinutes?, dueReminderLeadMinutes?, startReminderLeadMinutes?, attachments? }`
 - `mindwtr_update_task` **(requires `--write`)**
-  - Input: `{ id, title?, status?, projectId?, sectionId?, areaId?, dueDate?, startTime?, cancelledAt?, reviewAt?, recurrence?, contexts?, tags?, description?, priority?, energyLevel?, assignedTo?, timeEstimate?, taskMode?, relativeStartOffset?, showFutureRecurrence?, pushCount?, checklist?, textDirection?, location?, isFocusedToday?, timeSpentMinutes?, suppressMindwtrReminders?, repeatReminderMinutes?, order?, boardOrder?, focusOrder?, attachments? }`
+  - Input: `{ id, title?, status?, projectId?, sectionId?, viewSectionIds?, areaId?, dueDate?, startTime?, cancelledAt?, reviewAt?, recurrence?, contexts?, tags?, description?, priority?, energyLevel?, assignedTo?, timeEstimate?, taskMode?, relativeStartOffset?, showFutureRecurrence?, pushCount?, checklist?, textDirection?, location?, isFocusedToday?, timeSpentMinutes?, suppressMindwtrReminders?, reminderPolicy?, repeatReminderMinutes?, dueReminderLeadMinutes?, startReminderLeadMinutes?, order?, boardOrder?, focusOrder?, attachments? }`
+  - `startReminderLeadMinutes`: `0` (Off), `5`, `15`, `30`, or `60` minutes before an explicit start time. Omitted legacy values remain off; date-only starts do not schedule an alert.
+  - `reminderPolicy` accepts `inherit`, `send`, or `skip` for start/due reminders. Use `inherit` to follow the library default; `null` is not accepted. Existing tasks retain their legacy reminder choice until explicitly changed.
   - `recurrence` accepts a recurrence object or an RFC 5545 RRULE string. Pass `null` to clear it.
   - `attachments` holds link attachments only (`{ id?, title?, uri }`, e.g. `obsidian://`, `file://` or `https://`). The list you pass is the complete set of links: links you leave out are removed, file attachments are never touched, and `null` clears every link.
   - `cancelledAt` is an ISO timestamp with timezone. Setting it closes the task as cancelled (`archived`) without counting it as completed or generating its next recurrence. Moving it to an active status or completing it clears cancellation. Update every syncing client before using cancellation; older writers can discard the marker.
@@ -487,9 +502,9 @@ Any MCP-compatible client can work as long as it can launch a **stdio** server w
 - `mindwtr_restore_task` **(requires `--write`)**
   - Input: `{ id }`
 - `mindwtr_add_project` **(requires `--write`)**
-  - Input: `{ title, color?, status?, areaId?, isSequential?, isFocused?, dueDate?, startDate?, cancelledAt?, reviewAt?, supportNotes?, attachments? }`
+  - Input: `{ title, color?, status?, areaId?, isSequential?, isFocused?, viewSectionIds?, dueDate?, startDate?, cancelledAt?, reviewAt?, supportNotes?, attachments? }`
 - `mindwtr_update_project` **(requires `--write`)**
-  - Input: `{ id, title?, color?, status?, areaId?, isSequential?, isFocused?, dueDate?, startDate?, cancelledAt?, reviewAt?, supportNotes?, attachments? }`
+  - Input: `{ id, title?, color?, status?, areaId?, isSequential?, isFocused?, viewSectionIds?, dueDate?, startDate?, cancelledAt?, reviewAt?, supportNotes?, attachments? }`
   - `attachments` follows the same rule as `mindwtr_update_task`: link attachments only, the list is the complete set of links, and `null` clears them.
 - `mindwtr_delete_project` **(requires `--write`)**
   - Input: `{ id }`
@@ -603,3 +618,24 @@ The SQLite details below apply to direct database mode. Local API mode uses the 
 
 - This MCP server targets the SQLite database used by the desktop app, with mutations routed through `@mindwtr/core`.
 - Keep an eye on schema changes across app versions (update queries if needed).
+
+### View section assignments
+
+In SQLite and Cloud mode, call `mindwtr_list_view_sections` (optionally with
+`{"view":"someday"}`) to resolve section IDs and titles. The result is
+`{"viewSections":[{"view":"someday","id":"books","title":"Books","order":0}]}`.
+These are view headings, separate from project sections returned by
+`mindwtr_list_sections`. Create or rename view headings in the Mindwtr app.
+
+Task and project create/update tools accept `viewSectionIds`, for example
+`{"someday":"books","waiting":"people"}`. Assigning a heading does not change
+the entity's status. Updates replace the **whole map**: include other view
+assignments you want to retain. Omit the field to preserve assignments; pass
+`{}` or, on update, `null` to clear all assignments. To clear one view, send the
+map containing only the other assignments. Values must be nonempty section-ID
+strings; unknown view names remain supported for compatibility with newer apps.
+
+The catalogue works in read-only mode. Assignment writes require `--write`.
+Cloud mode uses the existing data endpoint and works with Mindwtr Cloud 1.3.7.
+Desktop Local API mode supports task assignments by known ID, but does not expose
+the view section catalogue or project assignments; unsupported inputs are rejected.

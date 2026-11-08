@@ -30,7 +30,7 @@ const renderWithLanguage = (ui: React.ReactElement) => render(
 
 const runAxe = (container: HTMLElement) => axe(container, {
     rules: {
-        // jsdom cannot compute CSS variable/theme contrast reliably; keep this covered by browser/manual checks.
+
         'color-contrast': { enabled: false },
     },
 });
@@ -150,6 +150,8 @@ describe('Accessibility', () => {
     it('PomodoroPanel should have no violations with task linking enabled', async () => {
         useTaskStore.setState((state) => ({
             ...state,
+            tasks: [mockTask],
+            _allTasks: [mockTask],
             settings: {
                 ...(state.settings ?? {}),
                 notificationsEnabled: false,

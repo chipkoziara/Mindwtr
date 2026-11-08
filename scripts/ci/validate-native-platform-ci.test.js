@@ -18,19 +18,22 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(workflow.match(/- "apps\/android-native\/\*\*"/g)).toHaveLength(2);
   expect(workflow.match(/- "packages\/core\/package\.json"/g)).toHaveLength(2);
   expect(workflow).toContain('android_client: ${{ steps.filter.outputs.android_client }}');
-  expect(workflow).toContain('apps/android-native/*|packages/core/src/*|packages/core/package.json|');
+  expect(workflow).toContain('apps/android-native/*|apps/mobile/modules/sync-file-lock/*|apps/mobile/modules/sync-file-transition-cas/*|packages/core/src/*|packages/core/package.json|');
+
+  expect(workflow).toContain('ndk;27.1.12297006 cmake;3.22.1');
+  expect(workflow).toContain('name: Verify the native app\'s File Sync lock JNI');
   const clientJob = parse(workflow).jobs['android-client'];
   expect(clientJob.if).toContain("needs.changes.outputs.android_client == 'true'");
   expect(clientJob.steps.find((step) => step.name === 'Build Android Compose client')).toMatchObject({
     'working-directory': 'apps/android-native/android',
-    run: './gradlew :app:assembleDebug --no-daemon',
+    run: './gradlew :app:assembleDebug :app:checkVariantIdentity --no-daemon',
   });
   expect(workflow).toContain('apps/mobile/modules/**/ios/**');
   expect(
     workflow.match(/- "apps\/mobile\/modules\/\*\*\/expo-module\.config\.json"/g),
   ).toHaveLength(2);
-  // The maintained iOS sources live outside the gitignored generated ios/
-  // project, so the triggers must name them directly or edits skip CI.
+
+
   expect(workflow.match(/- "apps\/mobile\/ios-app-intents\/\*\*"/g)).toHaveLength(2);
   expect(workflow.match(/- "apps\/mobile\/widgets-ios\/\*\*"/g)).toHaveLength(2);
   expect(workflow.match(/- "scripts\/ci\/setup-ruby\.sh"/g)).toHaveLength(2);
@@ -42,8 +45,8 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(workflow).toMatch(
     /apps\/mobile\/modules\/\*\/ios\/\*\|apps\/mobile\/modules\/\*\/expo-module\.config\.json\|/,
   );
-  // The generated projects are gitignored; filters on them never match a
-  // committed diff and only feign coverage.
+
+
   expect(workflow).not.toContain("apps/mobile/ios/**");
   expect(workflow).not.toContain("apps/mobile/android/**");
 
@@ -79,6 +82,7 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(androidJob).toContain("name: Run Android native recovery and system bar tests");
   expect(androidJob).toContain(":attachment-file-installer:testDebugUnitTest");
   expect(androidJob).toContain(":sync-file-lock:testDebugUnitTest");
+  expect(androidJob).toContain(":sync-file-transition-cas:testDebugUnitTest");
   expect(androidJob).toContain(":system-bars:testDebugUnitTest");
 
   expect(workflow).toContain("name: iOS Swift compile");
@@ -109,6 +113,8 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(iosJob).toContain("name: Validate generated Watch Xcode project");
   expect(iosJob).toContain("name: Typecheck Watch receiver against the iOS SDK");
   expect(iosJob).toContain("apps/mobile/modules/watch-connectivity/ios/MindwtrWatchConnectivityReceiver.swift");
+  expect(iosJob).toContain("apps/mobile/modules/watch-connectivity/ios/MindwtrWatchPendingCommand.swift");
+  expect(iosJob).toContain("apps/mobile/modules/watch-connectivity/ios/MindwtrWatchRetainedAudio.swift");
   expect(workflow).toContain("CODE_SIGNING_ALLOWED=NO");
   expect(iosJob).toContain("name: Run attachment installer Swift recovery tests");
   expect(iosJob).toContain(
@@ -467,7 +473,7 @@ test("desktop Rust pull requests check and test the native library on Windows", 
   expect(windowsJob).toContain("needs: changes");
   expect(windowsJob).toContain("runs-on: windows-latest");
   expect(windowsJob).toContain(
-    "uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable",
+    "uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7",
   );
   expect(windowsJob).toContain("RUSTFLAGS: -C target-feature=-crt-static");
   expect(windowsJob).toContain(
@@ -504,7 +510,7 @@ test("manual native CI selects one platform or all platforms", () => {
   }
 });
 
-test("SwiftUI client changes and shared host changes select the isolated Apple build", () => {
+test("SwiftUI client detection is retained while its CI job is paused for migration", () => {
   const workflow = parse(readFileSync(".github/workflows/native-platform-ci.yml", "utf8"));
   for (const event of ["push", "pull_request"]) {
     expect(workflow.on[event].paths).toContain("apps/ios-native/**");
@@ -529,6 +535,7 @@ test("SwiftUI client changes and shared host changes select the isolated Apple b
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
   const job = workflow.jobs["ios-client"];
+  expect(job.if).toStartWith("false && ");
   expect(job.if).toContain("needs.changes.outputs.ios_client == 'true'");
   expect(job.if).toContain("needs.changes.outputs.macmini != 'true'");
   const validation = job.steps.find((step) => step.run?.includes("bash apps/ios-native/scripts/validate.sh"));
@@ -536,7 +543,8 @@ test("SwiftUI client changes and shared host changes select the isolated Apple b
   expect(validation.run).toContain("set -o pipefail");
   expect(validation.run).toContain('bash apps/ios-native/scripts/validate.sh 2>&1 | tee "$RUNNER_TEMP/ios-swiftui-artifacts/validation.log"');
   expect(readFileSync("apps/ios-native/scripts/validate.sh", "utf8")).toContain("export TZ=America/New_York");
-  expect(workflow.jobs["ios-macmini"].if).toContain("needs.changes.outputs.ios_client == 'true'");
+  expect(workflow.jobs["ios-macmini"].if).toBe("needs.changes.outputs.ios == 'true' && needs.changes.outputs.macmini == 'true'");
+  expect(workflow.jobs["ios-native"].if).toBe("needs.changes.outputs.ios == 'true' && needs.changes.outputs.macmini != 'true'");
 });
 
 test("macOS native CI links the release Rust and Swift bridges", () => {

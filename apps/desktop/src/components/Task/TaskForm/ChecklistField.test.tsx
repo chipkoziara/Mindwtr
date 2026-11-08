@@ -1,10 +1,13 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { createEvent, fireEvent, render, waitFor } from '@testing-library/react';
-import { useState } from 'react';
+import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useEffect, useState } from 'react';
 import { useTaskStore, type Task } from '@mindwtr/core';
 import { ChecklistField, reorderChecklistItems } from './ChecklistField';
+import { useUiStore } from '../../../store/ui-store';
+import { holdSyncSave } from '../../../test/hold-sync-save';
 
 const initialTaskState = useTaskStore.getState();
+const initialUiState = useUiStore.getState();
 
 const initialChecklist: NonNullable<Task['checklist']> = [
     { id: '1', title: 'Item 1', isCompleted: false },
@@ -12,34 +15,48 @@ const initialChecklist: NonNullable<Task['checklist']> = [
     { id: '3', title: 'Item 3', isCompleted: false },
 ];
 
+const AT = new Date(Date.now() - 60_000).toISOString();
+const storedTask = (checklist: Task['checklist'], extra: Partial<Task> = {}): Task => ({
+    id: 'task-1', title: 'Task', status: 'next', tags: [], contexts: [], checklist, rev: 1, createdAt: AT, updatedAt: AT, ...extra,
+} as Task);
+const seedChecklist = (checklist: Task['checklist']) => useTaskStore.setState({ _allTasks: [storedTask(checklist)] });
+
+
+const onStoredChecklist = (report: (updates: Partial<Task>) => void) => useTaskStore.subscribe((state, previous) => {
+    const next = state._tasksById.get('task-1')?.checklist;
+    if (next !== previous._tasksById.get('task-1')?.checklist) report({ checklist: next });
+});
+
 function ChecklistHarness({
     initial = initialChecklist,
     onUpdateTask,
-    plainList = false,
+    isReference = false,
 }: {
     initial?: Task['checklist'];
     onUpdateTask?: (updates: Partial<Task>) => void;
-    plainList?: boolean;
+    isReference?: boolean;
 }) {
-    const [checklist, setChecklist] = useState<Task['checklist']>(initial);
+    useState(() => seedChecklist(initial));
+    const checklist = useTaskStore((state) => state._tasksById.get('task-1')?.checklist);
+    useEffect(() => onStoredChecklist((updates) => onUpdateTask?.(updates)), []);
     return (
         <ChecklistField
             t={(key) => key}
             taskId="task-1"
             checklist={checklist}
-            plainList={plainList}
-            updateTask={(_taskId, updates) => {
-                onUpdateTask?.(updates);
-                setChecklist(updates.checklist ?? []);
-            }}
-            resetTaskChecklist={() => setChecklist([])}
+            isReference={isReference}
+            resetTaskChecklist={() => seedChecklist([])}
         />
     );
 }
 
 describe('ChecklistField', () => {
+    let unsubscribe: (() => void) | undefined;
     afterEach(() => {
+        unsubscribe?.();
+        unsubscribe = undefined;
         useTaskStore.setState(initialTaskState, true);
+        useUiStore.setState(initialUiState, true);
     });
 
     it('reorders checklist items without changing completion state', () => {
@@ -74,50 +91,45 @@ describe('ChecklistField', () => {
         });
     });
 
-    it('edits a reference list without completion controls and preserves item metadata', () => {
-        const updates: Partial<Task>[] = [];
+    it('merges the field\'s change onto the list a sync save published since the field opened, keeping the synced item', async () => {
+        render(<ChecklistHarness initial={[{ id: 'c1', title: 'One', isCompleted: false }]} />);
+        const finish = holdSyncSave(() => useTaskStore.setState({ _allTasks: [storedTask(
+            [{ id: 'c1', title: 'One', isCompleted: false }, { id: 'c2', title: 'Two', isCompleted: false }],
+            { rev: 3 },
+        )] }));
+        fireEvent.click(screen.getByRole('button', { name: 'taskEdit.checklist 1' }));
+        await act(finish);
+
+        await waitFor(() => expect(useTaskStore.getState()._tasksById.get('task-1')?.checklist?.map((item) => [item.id, item.isCompleted]))
+            .toEqual([['c1', true], ['c2', false]]));
+        expect(useUiStore.getState().toasts.map((toast) => toast.message)).not.toContainEqual(expect.stringMatching(/^STALE_REVISION/));
+    });
+
+    it('ticks a reference list like a checklist and leaves the reference a reference (#1416)', async () => {
         const resetTaskChecklist = vi.fn();
         const referenceItems: NonNullable<Task['checklist']> = [
-            { id: 'done', title: 'Completed source item', isCompleted: true },
-            { id: 'pending', title: 'Pending source item', isCompleted: false },
+            { id: 'done', title: 'Alien', isCompleted: true },
+            { id: 'pending', title: 'Brazil', isCompleted: false },
         ];
-        const props = {
-            t: (key: string) => key,
-            taskId: 'task-1',
-            checklist: referenceItems,
-            updateTask: (_taskId: string, update: Partial<Task>) => updates.push(update),
-            resetTaskChecklist,
-        };
-        const { getAllByRole, getByRole, getByText, queryByRole, queryByText, rerender } = render(
-            <div>
-                <ChecklistField {...props} />
-                <button type="button">outside</button>
-            </div>
-        );
-
-        fireEvent.change(getAllByRole('textbox')[0], { target: { value: 'Edited source item' } });
-        rerender(
-            <div>
-                <ChecklistField {...props} plainList />
-                <button type="button">outside</button>
-            </div>
+        useTaskStore.setState({ _allTasks: [storedTask(referenceItems, { status: 'reference', taskMode: 'list' })] });
+        const { getAllByRole, getByRole, getByText } = render(
+            <ChecklistField t={(key) => key} taskId="task-1" checklist={referenceItems} isReference resetTaskChecklist={resetTaskChecklist} />
         );
 
         expect(getByText('taskEdit.tab.list')).toBeInTheDocument();
-        expect((getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('Edited source item');
-        expect(queryByRole('button', { name: 'taskEdit.checklist 1' })).not.toBeInTheDocument();
-        expect(queryByText('taskEdit.resetChecklist')).not.toBeInTheDocument();
-        expect(getAllByRole('textbox')[0]).not.toHaveClass('line-through');
+        expect(getAllByRole('textbox')[0]).toHaveClass('line-through');
+        expect(getAllByRole('textbox')[1]).not.toHaveClass('line-through');
+        fireEvent.click(getByRole('button', { name: 'taskEdit.tab.list 2' }));
 
-        fireEvent.blur(getAllByRole('textbox')[0], { relatedTarget: getByRole('button', { name: 'outside' }) });
+        await waitFor(() => expect(useTaskStore.getState()._tasksById.get('task-1')?.checklist?.map((item) => item.isCompleted))
+            .toEqual([true, true]));
+        const stored = useTaskStore.getState()._tasksById.get('task-1')!;
+        expect(stored.status).toBe('reference');
+        expect(stored.completedAt).toBeUndefined();
+        expect(stored.isFocusedToday).toBeFalsy();
 
-        expect(updates).toEqual([{
-            checklist: [
-                { id: 'done', title: 'Edited source item', isCompleted: true },
-                { id: 'pending', title: 'Pending source item', isCompleted: false },
-            ],
-        }]);
-        expect(resetTaskChecklist).not.toHaveBeenCalled();
+        fireEvent.click(getByText('taskEdit.resetChecklist'));
+        expect(resetTaskChecklist).toHaveBeenCalledWith('task-1');
     });
 
     it('renders desktop drag handles only when checklist order can change', () => {
@@ -357,20 +369,15 @@ describe('ChecklistField', () => {
         expect(committed?.[2]?.isCompleted).toBe(true);
     });
 
-    it('strips pasted checklist markers in a reference list without changing hidden completion state', () => {
+    it('keeps pasted checked markers checked in a reference list, as in a checklist (#1416)', () => {
         const updates: Partial<Task>[] = [];
         const initial: NonNullable<Task['checklist']> = [
             { id: 'existing-open', title: 'Replace me', isCompleted: false },
             { id: 'existing-done', title: 'Keep completed', isCompleted: true },
         ];
-        const renderField = (plainList: boolean) => (
-            <ChecklistHarness
-                initial={initial}
-                plainList={plainList}
-                onUpdateTask={(next) => updates.push(next)}
-            />
+        const { getAllByRole } = render(
+            <ChecklistHarness initial={initial} isReference onUpdateTask={(next) => updates.push(next)} />
         );
-        const { getAllByRole, queryByRole, rerender } = render(renderField(true));
 
         const input = getAllByRole('textbox')[0] as HTMLInputElement;
         input.setSelectionRange(0, input.value.length);
@@ -387,14 +394,9 @@ describe('ChecklistField', () => {
             'Also checked',
             'Keep completed',
         ]);
-        expect(committed?.map((item) => item.isCompleted)).toEqual([false, false, false, true]);
+        expect(committed?.map((item) => item.isCompleted)).toEqual([true, false, true, true]);
         expect(committed?.[0]?.id).toBe('existing-open');
-
-        rerender(renderField(false));
-        expect(getAllByRole('button', { name: /^taskEdit\.checklist \d$/ })).toHaveLength(4);
-        rerender(renderField(true));
-        expect(queryByRole('button', { name: /^taskEdit\.checklist \d$/ })).not.toBeInTheDocument();
-        expect(updates).toHaveLength(1);
+        expect(getAllByRole('button', { name: /^taskEdit\.tab\.list \d$/ })).toHaveLength(4);
     });
 
     it('inserts pasted lines at the cursor position within the current item title', () => {
@@ -428,7 +430,6 @@ describe('ChecklistField', () => {
             t: (key: string) => key,
             taskId: 'task-1',
             checklist: initialChecklist,
-            updateTask: () => {},
             resetTaskChecklist: () => {},
         };
         const { getAllByRole, rerender } = render(<ChecklistField {...props} />);
@@ -437,8 +438,7 @@ describe('ChecklistField', () => {
         fireEvent.change(input, { target: { value: 'Item 1 edited' } });
         expect((getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('Item 1 edited');
 
-        // Simulate a background store refresh (e.g. after sync) delivering an
-        // equal checklist with fresh object identity while the user is typing.
+
         rerender(<ChecklistField {...props} checklist={initialChecklist.map((item) => ({ ...item }))} />);
 
         expect((getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('Item 1 edited');
@@ -449,7 +449,6 @@ describe('ChecklistField', () => {
             t: (key: string) => key,
             taskId: 'task-1',
             checklist: initialChecklist,
-            updateTask: () => {},
             resetTaskChecklist: () => {},
         };
         const { getAllByRole, rerender } = render(<ChecklistField {...props} />);

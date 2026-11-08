@@ -135,8 +135,7 @@ describe('SyncBackupSection', () => {
     }
   });
 
-  // The split the maintainer asked for: opening one card must not drag the
-  // other errand's rows in with it.
+
   it('reveals only the backup rows when the backup header is pressed', () => {
     const handleBackup = vi.fn();
     let tree!: renderer.ReactTestRenderer;
@@ -250,6 +249,26 @@ describe('SyncBackupSection', () => {
     expect(action.props.accessibilityState).toEqual({ busy: false, disabled: true });
     expect(action.props.disabled).toBe(true);
     expect(tree.root.findAllByType(ActivityIndicator)).toHaveLength(0);
+  });
+});
+
+describe('Getting Started while it saves (D1b RN bug 1)', () => {
+  it('turns every Backup and Import row off, so no restore or import starts under the seed', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <SyncBackupSection {...baseProps} isGettingStartedDisabled isGettingStartedBusy />,
+      );
+    });
+    act(() => { tree.root.findByProps({ testID: 'backup-disclosure' }).props.onPress(); });
+    act(() => { tree.root.findByProps({ testID: 'import-disclosure' }).props.onPress(); });
+    for (const testID of ['data-transfer-export', 'data-transfer-export-csv', 'data-transfer-export-tasknotes', 'data-transfer-restore',
+      'data-transfer-merge', 'data-transfer-import-todoist', 'data-transfer-import-ticktick', 'data-transfer-import-dgt',
+      'data-transfer-import-omnifocus', 'data-transfer-import-mindwtr-csv']) {
+      const row = tree.root.findByProps({ testID });
+      expect(row.props.disabled).toBe(true);
+      expect(row.props.accessibilityState).toMatchObject({ busy: false, disabled: true });
+    }
   });
 });
 

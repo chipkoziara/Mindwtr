@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
-import { ChevronDown, ChevronUp } from 'lucide-react-native';
+import { ChevronDown, ChevronUp, Check } from 'lucide-react-native';
 import { workspaceSessionStorage as AsyncStorage } from '@/lib/workspace-session-storage';
 import {
   type Task,
   formatPomodoroClock,
   getPomodoroFocusSessionsCompletedToday,
   getPomodoroPresetOptions,
+  isTaskActionable,
   type PomodoroAutoStartOptions,
   tFallback,
   useTaskStore,
@@ -32,6 +33,10 @@ export function PomodoroPanel({
   const customDurations = useTaskStore((state) => state.settings.gtd?.pomodoro?.customDurations);
   const linkTaskEnabled = useTaskStore((state) => state.settings.gtd?.pomodoro?.linkTask === true);
   const liveTasks = useTaskStore((state) => state.tasks);
+  const actionableTasksById = useMemo(
+    () => new Map(liveTasks.filter(isTaskActionable).map((task) => [task.id, task])),
+    [liveTasks]
+  );
   const autoStartBreaks = useTaskStore((state) => state.settings.gtd?.pomodoro?.autoStartBreaks === true);
   const autoStartFocus = useTaskStore((state) => state.settings.gtd?.pomodoro?.autoStartFocus === true);
   const autoStartOptions = useMemo<PomodoroAutoStartOptions>(
@@ -40,10 +45,8 @@ export function PomodoroPanel({
   );
   const pomodoro = useMobilePomodoroControllerState();
   const { durations, timerState, selectedTaskId, lastEvent, sessionHistory } = pomodoro;
-  // Presentation only, and deliberately device-local: a phone folding the card
-  // away should not fold it away on the desktop too, so this lives in
-  // AsyncStorage rather than synced settings (#946, matching desktop's #875).
-  // Starts expanded so an update never hides a timer someone was already using.
+
+
   const [collapsed, setCollapsed] = useState(false);
   const isHydratingSession = pomodoro.isHydrating;
   const [isTaskPickerOpen, setIsTaskPickerOpen] = useState(false);
@@ -58,14 +61,15 @@ export function PomodoroPanel({
       return;
     }
     if (!selectedTaskId) return;
-    if (liveTasks.some((task) => task.id === selectedTaskId)) return;
-    mobilePomodoroController.setSelectedTaskId(undefined);
-  }, [linkTaskEnabled, liveTasks, selectedTaskId]);
+    if (actionableTasksById.has(selectedTaskId)) return;
+    mobilePomodoroController.setSelectedTaskId(undefined, autoStartOptions);
+  }, [actionableTasksById, autoStartOptions, linkTaskEnabled, selectedTaskId]);
 
-  const selectedTask = useMemo(
-    () => (linkTaskEnabled && selectedTaskId ? liveTasks.find((task) => task.id === selectedTaskId) : undefined),
-    [linkTaskEnabled, liveTasks, selectedTaskId]
-  );
+  const selectedTask = linkTaskEnabled && selectedTaskId ? actionableTasksById.get(selectedTaskId) : undefined;
+  const pickerTasks = useMemo(() => tasks.flatMap((task) => {
+    const liveTask = actionableTasksById.get(task.id);
+    return liveTask ? [liveTask] : [];
+  }), [actionableTasksById, tasks]);
   const presetOptions = useMemo(() => getPomodoroPresetOptions(customDurations), [customDurations]);
 
   const cardTitle = tFallback(t, 'pomodoro.mobileTitle', 'Pomodoro Timer');
@@ -131,7 +135,7 @@ export function PomodoroPanel({
   const handleMarkDone = () => {
     if (!selectedTask) return;
     onMarkDone(selectedTask.id);
-    mobilePomodoroController.clearLastEvent();
+    mobilePomodoroController.clearLastEvent(autoStartOptions);
   };
 
   const collapseLabel = tFallback(t, 'pomodoro.collapse', 'Collapse timer');
@@ -153,8 +157,8 @@ export function PomodoroPanel({
   );
 
   if (collapsed) {
-    // The session state and its timers live above this branch, so folding the
-    // card away never stops the run — the clock here is the same one.
+
+
     return (
       <View style={[styles.card, styles.collapsedCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
         <View style={styles.collapsedRow}>
@@ -329,23 +333,28 @@ export function PomodoroPanel({
                 accessibilityRole="button"
                 accessibilityState={{ selected: !selectedTaskId }}
                 onPress={() => {
-                  mobilePomodoroController.setSelectedTaskId(undefined);
+                  mobilePomodoroController.setSelectedTaskId(undefined, autoStartOptions);
                   setIsTaskPickerOpen(false);
                 }}
                 style={[
                   styles.taskPickerOption,
                   {
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 6,
                     borderColor: !selectedTaskId ? tc.tint : tc.border,
+                    borderWidth: !selectedTaskId ? 2 : 1,
                     backgroundColor: !selectedTaskId ? `${tc.tint}18` : tc.filterBg,
                   },
                 ]}
               >
-                <Text style={[styles.taskPickerOptionText, { color: !selectedTaskId ? tc.tint : tc.text }]}>
+                <Text style={[styles.taskPickerOptionText, { flex: 1, color: !selectedTaskId ? tc.tint : tc.text }]}>
                   {timerOnlyLabel}
                 </Text>
+                {!selectedTaskId && <Check size={16} color={tc.tint} strokeWidth={2.5} />}
               </Pressable>
               <FlatList
-                data={tasks}
+                data={pickerTasks}
                 renderItem={({ item: task }) => {
                   const selected = task.id === selectedTaskId;
                   return (
@@ -353,23 +362,28 @@ export function PomodoroPanel({
                       accessibilityRole="button"
                       accessibilityState={{ selected }}
                       onPress={() => {
-                        mobilePomodoroController.setSelectedTaskId(task.id);
+                        mobilePomodoroController.setSelectedTaskId(task.id, autoStartOptions);
                         setIsTaskPickerOpen(false);
                       }}
                       style={[
                         styles.taskPickerOption,
                         {
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 6,
                           borderColor: selected ? tc.tint : tc.border,
+                          borderWidth: selected ? 2 : 1,
                           backgroundColor: selected ? `${tc.tint}18` : tc.filterBg,
                         },
                       ]}
                     >
                       <Text
-                        style={[styles.taskPickerOptionText, { color: selected ? tc.tint : tc.text }]}
+                        style={[styles.taskPickerOptionText, { flex: 1, color: selected ? tc.tint : tc.text }]}
                         numberOfLines={2}
                       >
                         {task.title}
                       </Text>
+                      {selected && <Check size={16} color={tc.tint} strokeWidth={2.5} />}
                     </Pressable>
                   );
                 }}

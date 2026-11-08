@@ -162,8 +162,8 @@ test("Android releases use the isolated, repository-locked EAS CLI", () => {
   );
   expect(workflow).not.toContain("npm install -g eas-cli");
 
-  const ci = read(".github/workflows/ci.yml");
-  expect(ci).toContain(
+
+  expect(read("scripts/ci/governance.sh")).toContain(
     "npm ci --prefix tools/eas-cli --ignore-scripts --legacy-peer-deps --dry-run",
   );
 });
@@ -220,7 +220,7 @@ test("Flathub generation is locked and credential-free until publication", () =>
   expect(tokenReferences).toHaveLength(1);
 
   expect(workflow).toContain(
-    "uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0",
+    "uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
   );
   expect(workflow).toContain("python-version: '3.12.14'");
   expect(workflow).toContain(

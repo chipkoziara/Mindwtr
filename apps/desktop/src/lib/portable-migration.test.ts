@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Attachment, Task } from '@mindwtr/core';
+import { runStoreCommand, runSyncStoreSave, type Attachment, type Task } from '@mindwtr/core';
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const updateTaskMock = vi.hoisted(() => vi.fn());
@@ -40,8 +40,7 @@ const setTauriRuntime = (enabled: boolean) => {
     });
 };
 
-// Attachment file names are `<id>.<ext>` — the property platform.rs's
-// normalize_open_path relies on to re-home a stale URI (#1038).
+
 const fileAttachment = (id: string, dir: string): Attachment => ({
     id,
     kind: 'file',
@@ -95,8 +94,8 @@ describe('migratePortableAttachments', () => {
             taskWith('task-2', [fileAttachment('att-2', LEGACY_DIR)]),
         ];
         invokeMock.mockResolvedValue(migrationResult(['att-1.pdf', 'att-2.pdf']));
-        // Write through to the fixture store so the assertions below see the
-        // real half-migrated state, not just the calls that were attempted.
+
+
         updateTaskMock.mockImplementation(async (taskId: string, patch: Partial<Task>) => {
             if (taskId === 'task-2') throw new Error('write failed');
             storeState._allTasks = storeState._allTasks.map((task) => (
@@ -104,7 +103,7 @@ describe('migratePortableAttachments', () => {
             ));
         });
 
-        // A rejected rewrite must not take down app startup.
+
         await expect(migratePortableAttachments()).resolves.toBeUndefined();
 
         expect(logWarnMock).toHaveBeenCalledWith(
@@ -114,14 +113,35 @@ describe('migratePortableAttachments', () => {
         const rewritten = (storeState._allTasks[0] as Task).attachments?.[0] as Attachment;
         expect(rewritten.uri).toBe(`${MANAGED_DIR}/att-1.pdf`);
 
-        // The files are already moved, so every attachment the loop did not
-        // reach still points at the legacy dir. Those stay openable only
-        // because the recorded file name is `<attachment id>.<ext>` and
-        // platform.rs's normalize_open_path retries that name in the managed
-        // attachments dir (#1038) — the coupling this asserts.
+
         const stranded = (storeState._allTasks[1] as Task).attachments?.[0] as Attachment;
         expect(stranded.uri).toBe(`${LEGACY_DIR}/att-2.pdf`);
         expect(stranded.uri.split('/').pop()).toBe(`${stranded.id}.pdf`);
+    });
+
+    it('rewrites the attachment list a sync save published while the rewrite waited', async () => {
+        storeState._allTasks = [taskWith('task-1', [fileAttachment('att-1', LEGACY_DIR)])];
+        invokeMock.mockResolvedValue(migrationResult(['att-1.pdf']));
+
+        updateTaskMock.mockImplementation((taskId: string, patch: Partial<Task>) => runStoreCommand(async () => {
+            storeState._allTasks = storeState._allTasks.map((task) => ((task as Task).id === taskId ? { ...(task as Task), ...patch } : task));
+        }));
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+
+        const save = runSyncStoreSave(async () => {
+            await held;
+            storeState._allTasks = [taskWith('task-1', [fileAttachment('att-1', LEGACY_DIR), fileAttachment('att-sib', MANAGED_DIR)])];
+        });
+        const migrated = migratePortableAttachments();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        release();
+        await save;
+        await migrated;
+
+        expect(((storeState._allTasks[0] as Task).attachments ?? []).map((item) => item.uri)).toEqual([
+            `${MANAGED_DIR}/att-1.pdf`, `${MANAGED_DIR}/att-sib.pdf`,
+        ]);
     });
 
     it('does nothing when the install is not portable', async () => {

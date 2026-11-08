@@ -6,15 +6,19 @@ import {
     commitProcessInboxWorkflowEvent,
     createTaskSimilarityIndex,
     DEFAULT_PROJECT_COLOR,
+    generateUUID,
+    isSandboxMode,
+    parseAttachmentLinkBatch,
     enterProcessInboxStep,
     getPersonOptionNames,
     findSimilarTasks,
     goBackProcessInboxStep,
     isSelectableProjectForTaskAssignment,
+    isDueForReview,
     isProcessInboxReturningTask,
-    mergeParsedProcessInboxFields,
     parseProcessInboxTitleInput,
-    prepareProcessInboxDecision,
+    saveTaskDraftOntoLatest,
+    prepareProcessInboxCommit,
     setTaskViewSectionId,
     startProcessInboxSession,
     tFallback,
@@ -23,7 +27,6 @@ import {
     type Area,
     type Project,
     type ProcessInboxDecision,
-    type ProcessInboxDecisionDraft,
     type ProcessInboxWorkflowFields,
     type StoreActionResult,
     type Task,
@@ -46,7 +49,7 @@ import {
 import { useInboxProcessingState } from './useInboxProcessingState';
 import { createSomedaySection } from '../../../lib/someday-section-actions';
 
-/** Organization picks a finished session must not hand to the next one. */
+
 const CLEARED_ON_SESSION_END = ['contexts', 'tags', 'energyLevel', 'assignedTo', 'priority', 'timeEstimate'] as const;
 
 type UseInboxProcessingControllerParams = {
@@ -93,6 +96,8 @@ export function useInboxProcessingController({
     const allTasks = useTaskStore((state) => state._allTasks);
     const people = useTaskStore((state) => state.people);
     const addPerson = useTaskStore((state) => state.addPerson);
+    const sections = useTaskStore((state) => state.sections);
+    const addSection = useTaskStore((state) => state.addSection);
     const personOptions = useMemo(() => getPersonOptionNames(people, tasks), [people, tasks]);
     const {
         processInboxPlan,
@@ -111,6 +116,8 @@ export function useInboxProcessingController({
         setQuickExecutionChoice,
         draft,
         setField,
+        pendingLinks,
+        setPendingLinks,
         delegateWho,
         setDelegateWho,
         delegateFollowUp,
@@ -144,6 +151,7 @@ export function useInboxProcessingController({
         remainingInboxCount,
         resetProcessingSession,
         hydrateProcessingTask,
+        processingBaseRef,
         suggestedContexts,
         suggestedTags,
         scheduleDate,
@@ -184,9 +192,26 @@ export function useInboxProcessingController({
         () => parseProcessingTitle(draft.title),
         [draft.title, parseProcessingTitle],
     );
+    const addLinks = useCallback((value: string): boolean => {
+        if (isSandboxMode()) {
+            showToast(t('sandbox.unavailable'), 'error');
+            return false;
+        }
+        const batch = parseAttachmentLinkBatch(value, true);
+        if (batch.invalidLine !== null || batch.entries.length === 0) return false;
+        const now = new Date().toISOString();
+        setPendingLinks((current) => [...current, ...batch.entries.map((entry) => ({
+            ...entry,
+            id: generateUUID(),
+            createdAt: now,
+            updatedAt: now,
+        }))]);
+        return true;
+    }, [setPendingLinks, showToast, t]);
+    const linkAttachments = useMemo(() => [...(processingTask?.attachments ?? []), ...pendingLinks], [processingTask, pendingLinks]);
     const isReturningItem = Boolean(processingTask && isProcessInboxReturningTask(processingTask));
-    // The draft holds the raw token text; the commit path needs the parsed
-    // lists, keyed on the text so callbacks keep their identity between edits.
+
+
     const selectedContexts = useMemo(() => parseContextsInput(draft.contexts), [draft.contexts]);
     const selectedTags = useMemo(() => parseTagsInput(draft.tags), [draft.tags]);
     const similarityIndex = useMemo(
@@ -227,8 +252,8 @@ export function useInboxProcessingController({
         addBreadcrumb('inbox:done');
         setProcessingSession(nextSession);
         setIsProcessing(false);
-        // Queue drained: drop the organization picks so they cannot leak into a
-        // later session (closing also resets the whole draft one tick later).
+
+
         for (const field of CLEARED_ON_SESSION_END) setField(field, '');
     }, [
         eligibleInboxTasks,
@@ -277,115 +302,75 @@ export function useInboxProcessingController({
         ],
     );
 
-    const buildDecisionFields = useCallback((
-        overrides: ProcessInboxWorkflowFields = {},
-    ): ProcessInboxWorkflowFields => ({
-        projectId: draft.projectId || undefined,
-        areaId: draft.areaId || undefined,
-        contexts: selectedContexts,
-        tags: selectedTags,
-        priority: draft.priority || undefined,
-        energyLevel: draft.energyLevel || undefined,
-        assignedTo: draft.assignedTo.trim() || undefined,
-        timeEstimate: draft.timeEstimate || undefined,
-        ...buildScheduleUpdates(),
-        ...overrides,
-    }), [
-        buildScheduleUpdates,
-        draft.areaId,
-        draft.assignedTo,
-        draft.energyLevel,
-        draft.priority,
-        draft.projectId,
-        draft.timeEstimate,
-        selectedContexts,
-        selectedTags,
-    ]);
-
-    const prepareProcessingEdits = useCallback((
-        titleInput: string = draft.title,
-        fallbackTitle?: string,
-    ): {
-        taskUpdates: Partial<Task>;
-        parsedFields: ProcessInboxWorkflowFields;
-        explicitDateFields: ProcessInboxDecisionDraft['explicitDateFields'];
-    } | null => {
-        if (!processingTask) return null;
-        const parsed = titleInput === draft.title ? parsedTitle : parseProcessingTitle(titleInput);
-        const { invalidDateCommands } = parsed;
-        if (invalidDateCommands && invalidDateCommands.length > 0) {
-            showToast(`${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`, 'error');
-            return null;
-        }
-        const trimmedTitle = parsed.title.trim();
-        const title = trimmedTitle.length > 0 ? trimmedTitle : (fallbackTitle ?? processingTask.title);
-        const description = [draft.description.trim(), parsed.props.description?.trim()]
-            .filter(Boolean)
-            .join('\n');
-        return {
-            taskUpdates: {
-                title,
-                description: description.length > 0 ? description : undefined,
-                ...(parsed.props.attachments
-                    ? { attachments: [...(processingTask.attachments ?? []), ...parsed.props.attachments] }
-                    : {}),
-                ...(parsed.props.isFocusedToday ? { isFocusedToday: true } : {}),
-            },
-            parsedFields: parsed.props,
-            explicitDateFields: {
-                ...(parsed.props.startTime ? { startTime: parsed.props.startTime } : {}),
-                ...(parsed.props.dueDate ? { dueDate: parsed.props.dueDate } : {}),
-                ...(parsed.props.reviewAt ? { reviewAt: parsed.props.reviewAt } : {}),
-            },
-        };
-    }, [draft.description, draft.title, parseProcessingTitle, parsedTitle, processingTask, showToast, t]);
-
     const applyWorkflowDecision = useCallback(async (
         decision: ProcessInboxDecision,
         options: {
             fields?: ProcessInboxWorkflowFields;
             titleInput?: string;
             fallbackTitle?: string;
+            clearStaleReviewAt?: boolean;
             advance?: boolean;
         } = {},
     ): Promise<boolean> => {
         if (!processingTask) return false;
-        const edits = decision.type === 'discard'
-            ? undefined
-            : prepareProcessingEdits(options.titleInput, options.fallbackTitle);
-        if (decision.type !== 'discard' && !edits) return false;
-        const fields = mergeParsedProcessInboxFields(
-            buildDecisionFields(options.fields),
-            edits?.parsedFields ?? {},
-        );
-        const dateControlFields: ProcessInboxDecisionDraft['dateControlFields'] = {
-            ...(dirtyScheduleFieldKeys.has('start') ? { startTime: fields.startTime } : {}),
-            ...(dirtyScheduleFieldKeys.has('due') ? { dueDate: fields.dueDate } : {}),
-            ...(dirtyScheduleFieldKeys.has('review') ? { reviewAt: fields.reviewAt } : {}),
-        };
-        const prepared = prepareProcessInboxDecision({
+
+
+        const prepared = prepareProcessInboxCommit({
             task: processingTask,
-            draft: {
-                fields,
-                explicitDateFields: edits?.explicitDateFields,
-                dateControlFields,
-                taskUpdates: edits?.taskUpdates,
-            },
-            decision,
             plan: processInboxPlan,
+            decision,
+            title: draft.title,
+            description: draft.description,
+            parseTitle: (input) => (input === draft.title ? parsedTitle : parseProcessingTitle(input)),
+            selection: {
+                projectId: draft.projectId || null,
+                sectionId: draft.sectionId || null,
+                areaId: draft.areaId || null,
+                contexts: selectedContexts,
+                tags: selectedTags,
+                priority: draft.priority || undefined,
+                energyLevel: draft.energyLevel || undefined,
+                assignedTo: draft.assignedTo,
+                timeEstimate: draft.timeEstimate || undefined,
+            },
+            scheduleUpdates: buildScheduleUpdates(),
+            dirtyScheduleFields: new Set([
+                ...(dirtyScheduleFieldKeys.has('start') ? ['startTime' as const] : []),
+                ...(dirtyScheduleFieldKeys.has('due') ? ['dueDate' as const] : []),
+                ...(dirtyScheduleFieldKeys.has('review') ? ['reviewAt' as const] : []),
+            ]),
+            options: {
+                fields: options.fields,
+                titleOverride: options.titleInput,
+                fallbackTitle: options.fallbackTitle,
+                clearStaleReviewAt: options.clearStaleReviewAt,
+            },
         });
         if (!prepared.ok) {
-            if (prepared.reason === 'later-start-required') {
+            if (prepared.reason === 'invalid-date-command') {
+                showToast(`${t('quickAdd.invalidDateCommand')}: ${prepared.invalidDateCommands.join(', ')}`, 'error');
+            } else if (prepared.reason === 'later-start-required') {
                 showToast(tFallback(t, 'process.laterStartRequired', 'Choose a start date for Later.'), 'error');
             }
             return false;
         }
+
+
+        const base = processingBaseRef.current?.id === processingTask.id ? processingBaseRef.current : processingTask;
+        const updateTaskFromDraft = (id: string, updates: Partial<Task>) => saveTaskDraftOntoLatest(id, base, {
+            ...updates,
+            ...(decision.type !== 'skip' && pendingLinks.length > 0 ? { attachments: [...(updates.attachments ?? base.attachments ?? []), ...pendingLinks] } : {}),
+        }, {
+            write: (taskId, merged): Promise<StoreActionResult> | StoreActionResult => (Object.keys(merged).length > 0
+                ? updateTask(taskId, merged) : { success: true, id: taskId }),
+            keepUntouched: true,
+        });
         try {
             const outcome = await commitProcessInboxWorkflowEvent(
                 processingSession,
                 eligibleInboxTasks,
                 prepared.event,
-                { deleteTask, updateTask },
+                { deleteTask, updateTask: updateTaskFromDraft },
                 {
                     entryStep: 'refine',
                     taskUpdates: prepared.taskUpdates,
@@ -405,14 +390,26 @@ export function useInboxProcessingController({
         }
     }, [
         applySessionTransition,
-        buildDecisionFields,
+        buildScheduleUpdates,
         deleteTask,
         dirtyScheduleFieldKeys,
+        draft.areaId,
+        draft.assignedTo,
+        draft.description,
+        draft.energyLevel,
+        draft.priority,
+        draft.projectId,
+        draft.timeEstimate,
+        draft.title,
         eligibleInboxTasks,
+        parseProcessingTitle,
+        parsedTitle,
+        pendingLinks,
         processInboxPlan,
-        prepareProcessingEdits,
         processingSession,
         processingTask,
+        selectedContexts,
+        selectedTags,
         showToast,
         t,
         updateTask,
@@ -459,7 +456,10 @@ export function useInboxProcessingController({
             goToStep('someday');
             return;
         }
-        await applyWorkflowDecision({ type: 'someday' }, { fields: buildSomedayFields() });
+        await applyWorkflowDecision({ type: 'someday' }, {
+            fields: buildSomedayFields(),
+            clearStaleReviewAt: isDueForReview(processingTask.reviewAt),
+        });
     }, [
         applyWorkflowDecision,
         buildSomedayFields,
@@ -479,7 +479,10 @@ export function useInboxProcessingController({
 
     const handleConfirmSomeday = useCallback(async () => {
         if (!processingTask) return;
-        await applyWorkflowDecision({ type: 'someday' }, { fields: buildSomedayFields() });
+        await applyWorkflowDecision({ type: 'someday' }, {
+            fields: buildSomedayFields(),
+            clearStaleReviewAt: isDueForReview(processingTask.reviewAt),
+        });
     }, [applyWorkflowDecision, buildSomedayFields, processingTask]);
 
     const handleIncubate = useCallback(async () => {
@@ -609,8 +612,8 @@ export function useInboxProcessingController({
         ];
         const body = bodyParts.join('\n');
         const subject = `Delegation: ${title}`;
-        // The saved person's mailto: reference doubles as the recipient; the
-        // shell-open scope also requires one (a bare "mailto:?..." is refused).
+
+
         const email = resolveDelegateEmail(people, who);
         const mailto = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
         if (!isTauriRuntime()) {
@@ -623,7 +626,7 @@ export function useInboxProcessingController({
                 await open(mailto);
                 return;
             } catch {
-                // No mail handler (or scope refusal) — fall through to the clipboard.
+
             }
         }
         try {
@@ -752,9 +755,7 @@ export function useInboxProcessingController({
             );
             if (!project) return;
 
-            // Extra actions are independent durable writes. Commit and remove
-            // each one before moving the original Inbox task, so a failure can
-            // be retried without losing or duplicating actions already saved.
+
             const extraActions = extraActionDrafts
                 .map((draftValue) => ({ draftValue, title: draftValue.trim() }))
                 .filter(({ title }) => Boolean(title));
@@ -819,6 +820,23 @@ export function useInboxProcessingController({
         if (!person) showToast(tFallback(t, 'task.addFailed', 'Failed to add task'), 'error');
     }, [addPerson, showToast, t]);
 
+
+    const handleCreateSection = useCallback(async (title: string) => {
+        const trimmed = title.trim();
+        if (!trimmed || !draft.projectId) return null;
+        const existing = sections.find((section) => (
+            section.projectId === draft.projectId && !section.deletedAt
+            && section.title.toLowerCase() === trimmed.toLowerCase()
+        ));
+        if (existing) return existing.id;
+        try {
+            return (await addSection(draft.projectId, trimmed))?.id ?? null;
+        } catch (error) {
+            reportError('Failed to create a project section during Inbox Processing', error);
+            return null;
+        }
+    }, [addSection, draft.projectId, sections]);
+
     const handleCreateSomedaySection = useCallback(async (title: string) => {
         try {
             return await createSomedaySection(title);
@@ -880,6 +898,7 @@ export function useInboxProcessingController({
 
     const options = useMemo<InboxProcessingOptionLists>(() => ({
         projects,
+        sections,
         areas: activeAreas,
         allContexts,
         allTags,
@@ -893,6 +912,7 @@ export function useInboxProcessingController({
         allTags,
         personOptions,
         projects,
+        sections,
         suggestedContexts,
         suggestedTags,
         timeEstimateOptions,
@@ -906,6 +926,8 @@ export function useInboxProcessingController({
             draft,
             setField,
             similarTasks,
+            linkAttachments,
+            onAddLinks: addLinks,
             visibility,
             options,
             settings,
@@ -929,6 +951,7 @@ export function useInboxProcessingController({
             onSendDelegateRequest: handleSendDelegateRequest,
             onCreatePerson: handleCreatePerson,
             onCreateSomedaySection: handleCreateSomedaySection,
+            onCreateSection: handleCreateSection,
             toggleContext,
             toggleTag,
             convertToProject,
@@ -952,6 +975,8 @@ export function useInboxProcessingController({
         draft,
         setField,
         similarTasks,
+        linkAttachments,
+        onAddLinks: addLinks,
         visibility,
         options,
         setIsProcessing,
@@ -982,6 +1007,7 @@ export function useInboxProcessingController({
         handleConfirmSomeday,
         onCreatePerson: handleCreatePerson,
         onCreateSomedaySection: handleCreateSomedaySection,
+        onCreateSection: handleCreateSection,
         customContext,
         setCustomContext,
         addCustomContext,

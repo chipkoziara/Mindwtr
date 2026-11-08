@@ -1,4 +1,6 @@
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { DOMParser } from '@xmldom/xmldom';
 import { parseWebdavAttachmentInventory } from '../../../packages/core/src/webdav-attachment-inventory';
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -63,8 +65,12 @@ describe('URL Polyfill Shim', () => {
             document: new DOMParser().parseFromString(source, 'application/xml') as unknown as Document,
         }));
         expect(parse(inventory())).toEqual([]);
+
+        expect(parse('<d:multistatus xmlns:d="DAV:">' + response(path.slice(0, -1), true)
+            + response(path + 'example.pdf') + '</d:multistatus>')).toEqual(['attachments/example.pdf']);
         expect(parse(inventory(path + 'example.pdf'))).toEqual(['attachments/example.pdf']);
-        for (const child of ['example.pdf', base + 'example.pdf', './example.pdf']) {
+        for (const child of ['example.pdf', base + 'example.pdf', './example.pdf',
+            'https://DAV.example.test:443' + path + 'example.pdf']) {
             expect(parse(inventory(child))).toEqual(['attachments/example.pdf']);
         }
         for (const child of ['../outside.pdf', '%2e%2e/outside.pdf', '/elsewhere/example.pdf',
@@ -74,12 +80,22 @@ describe('URL Polyfill Shim', () => {
         }
     });
 
+    test('fallback accepts Synology mod_dav namespaces and root-relative audio paths (#1342)', () => {
+        const xml = readFileSync(fileURLToPath(new originalURL('./__fixtures__/synology-webdav-inventory.xml', import.meta.url).href), 'utf8');
+        globalThis.URL = undefined as unknown as typeof URL;
+        loadFreshUrlPolyfill();
+        expect(parseWebdavAttachmentInventory(xml,
+            'https://nas.example.test:5006/DataUser/__Mindwtr/attachments/',
+            source => ({ document: new DOMParser().parseFromString(source, 'application/xml') as unknown as Document }),
+        )).toEqual([
+            'attachments/11111111-1111-4111-8111-111111111111.m4a',
+            'attachments/22222222-2222-4222-8222-222222222222.wav',
+        ]);
+    });
+
     test('fallback URL resolves an absolute path against the bases expo-router uses', async () => {
-        // expo-router parses every navigation path with `new URL(path, 'file:')`
-        // and resolves hrefs against `exp://host`. A shim revision that derived
-        // the base href with a trailing "/" turned '/focus' into '//focus', so no
-        // route ever matched and the root navigator reset in a loop (Expo Go
-        // flashed black with "Refreshing..."; bisected to the #1132 commit).
+
+
         vi.resetModules();
         const OriginalURL = globalThis.URL;
         // @ts-expect-error simulate a runtime without a native URL
@@ -99,8 +115,8 @@ describe('URL Polyfill Shim', () => {
     });
 
     test('fallback search params read a value as WHATWG does: all after the first "=", and "+" as a space', () => {
-        // The app's URL is FallbackURL (Metro aliases every URL polyfill here), so a capture link such as
-        // mindwtr:///capture?title=a=b lost everything after its second "=", and "Buy+milk" kept its "+".
+
+
         const { URLSearchParams: WhatwgSearchParams } = nodeRequire('node:url') as typeof import('node:url');
         const OriginalURL = globalThis.URL;
         const OriginalSearchParams = globalThis.URLSearchParams;
@@ -133,13 +149,13 @@ describe('URL Polyfill Shim', () => {
     });
 
     test('shimmed URL has createObjectURL that is safe (mocked environment)', async () => {
-        // 1. Reset modules to ensure fresh execution of shim logic
+
         vi.resetModules();
 
-        // 2. Mock global URL to simulate Hermes (no createObjectURL)
+
         const OriginalURL = globalThis.URL;
 
-        // We need a class that extends or mimics URL but definitely has no createObjectURL static method
+
         // @ts-ignore - MockURL matching OriginalURL structure for tests
         class MockURL extends OriginalURL {
             // @ts-ignore - Intentionally removing static method to simulate Hermes
@@ -148,17 +164,17 @@ describe('URL Polyfill Shim', () => {
             static revokeObjectURL = undefined;
         }
 
-        // Temporarily replace global URL
+
         globalThis.URL = MockURL as unknown as typeof URL;
 
-        // 3. Re-import and call setupURLPolyfill
+
         const shimModule = await import('./url-polyfill');
         shimModule.setupURLPolyfill();
 
-        // 4. Verify it was patched on globalThis
+
         expect(typeof globalThis.URL.createObjectURL).toBe('function');
 
-        // 5. Test safety behavior (returns string, warns)
+
         const result = globalThis.URL.createObjectURL({} as any);
         expect(result).toBe('');
 
@@ -170,13 +186,13 @@ describe('URL Polyfill Shim', () => {
             );
         }
 
-        // Cleanup
+
         globalThis.URL = OriginalURL;
     });
 
     test('shimmed URL has revokeObjectURL', () => {
         expect(typeof shim.URL.revokeObjectURL).toBe('function');
-        // Should not throw
+
         shim.URL.revokeObjectURL('some-url');
     });
 
@@ -189,9 +205,8 @@ describe('URL Polyfill Shim', () => {
     });
 
     test('fallback URL exposes origin and host fields for the Expo location polyfill', async () => {
-        // @expo/metro-runtime builds window.location from this class and Expo's
-        // split-bundle loader joins location.origin with the chunk path, so an
-        // undefined origin breaks every dynamic import() in a dev client.
+
+
         const OriginalURL = globalThis.URL;
         try {
             vi.resetModules();

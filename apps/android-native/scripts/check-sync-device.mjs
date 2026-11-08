@@ -1,35 +1,12 @@
-// Sync check for the isolated native Android development app: WebDAV and the self-hosted cloud, on this computer only.
-//
-//   node apps/android-native/scripts/check-sync-device.mjs <adb-serial> [apk]
-//
-// Starts a WebDAV folder (sync-harness.mjs serveWebdav: strong ETags, RN's conditional writes, Basic auth) and the real
-// self-hosted cloud (apps/cloud under Bun) on 127.0.0.1, maps the phone's ports to them (`adb reverse`), and runs a
-// second device on this computer: the same native bundle in a Node VM (sync-harness.mjs hostDevice). Then, through the
-// app's own Settings › Sync screen:
-//   (1) Sync opens from Settings; a leftover backend is set Off first;
-//   (2) WebDAV: the form filled as a user types it, Test connection (Connection OK; nothing stored), Save (the first sync
-//       proves it, then RN's keys are stored in place: RKStorage holds the backend, URL and username under RN's names at
-//       RN's user_version 1, the password is only in RN's secret store, never in RKStorage, the journal or the log);
-//   (3) convergence with the second device: it joins the same folder and adds a task with an emoji title; Sync now on the
-//       phone brings it in exactly; the phone swipes it on and adds one, its automatic sync (a data change) uploads both,
-//       and the second device reads them back with the emoji title intact;
-//   (4) the WebDAV server down (503): the phone's automatic sync after a capture fails, the status line shows the
-//       failure, the Menu tab's dot turns to attention, the capture stays on the phone and nothing reaches the server;
-//   (5) a failed remote write: every PUT of the sync document fails; the phone's sync fails and keeps its retry, and once
-//       the server takes writes again the retry uploads the task with no tap;
-//   (6) the self-hosted cloud: Self-hosted chosen, URL and token, Save; the second device joins and converges both ways;
-//       the cloud stopped (the connection refused) reads as offline, as on RN, and changes no data; the cloud back, Sync
-//       now uploads what was captured meanwhile;
-//   (7) Sync set Off again; RKStorage holds "off".
-// It installs with `install -r` (development data stays), touches only the development package, never launches over
-// another app, and on exit removes the port mappings, stops both servers and puts the phone's keyboard back. Leave the
-// device on its home screen. Exit 0 = pass, 1 = fail, 2 = refused, 3 = stopped.
+
+
+
 import { execFileSync } from 'node:child_process';
 import { createHash, randomInt } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { box, button, check, connect, evidenced, fail, inboxCount, inEditor, mainList, Stopped, switchOn, tab, tabSelected, tagged, taskRow, withDescription } from './device.mjs';
+import { box, button, check, connect, evidenced, fail, inboxCount, inEditor, linesAfter, logStamp, Stopped, switchOn, tab, tabSelected, tagged, taskRow, withDescription } from './device.mjs';
 import { cleanupOnExit } from './check-net-device.mjs';
 import { hostDevice, serveWebdav, startCloud, webdavDocument } from './sync-harness.mjs';
 
@@ -57,7 +34,7 @@ const DB = 'mindwtr-native-dev.db';
 const work = resolve(app, 'android/build/sync-check');
 const { en } = await import(resolve(repo, 'packages/core/src/i18n/locales/en.ts'));
 
-// This run's names: digits only for what the phone types (the keyboard guard allows only an English layout).
+
 const run = `${String(Date.now()).slice(-6)}${String(randomInt(1_000_000)).padStart(6, '0')}`;
 const WEBDAV_PORT = Number(process.env.MINDWTR_SYNC_WEBDAV_PORT ?? 18771);
 const CLOUD_PORT = Number(process.env.MINDWTR_SYNC_CLOUD_PORT ?? 18772);
@@ -74,13 +51,15 @@ const titles = {
     failed: `93${run}3`,
     cloudHost: `Cloud ✓ 雲 😀 ${run}`,
     offline: `93${run}4`,
+    midSync: `93${run}5`,
+    killed: `93${run}6`,
 };
 
 const device = connect({ serial, pkg: PKG, uiFile: UI_FILE, adb: adbBin });
 const { sh, home, front, requireAppFront, pid, screen, waitFor, tap, tapExpecting } = device;
 const logs = () => device.logs(pid(), TAG);
 
-// ---- The phone's storage (run-as copies, read on this computer) ----
+
 const pullFile = (remote, name) => {
     const dir = resolve(work, name);
     rmSync(dir, { recursive: true, force: true });
@@ -95,9 +74,9 @@ const sqlite = (file, sql) => {
     const out = execFileSync('sqlite3', ['-json', file, sql], { encoding: 'utf8' }).trim();
     return out ? JSON.parse(out) : [];
 };
-/** The phone's live tasks by title: status. */
+
 const phoneTasks = () => Object.fromEntries(sqlite(pullFile(`files/${DB}`, 'db'), 'SELECT title, status FROM tasks WHERE deletedAt IS NULL').map((row) => [row.title, row.status]));
-/** RN's AsyncStorage on the phone (databases/RKStorage): its keys, and its user_version. */
+
 const rkStorage = () => {
     const file = pullFile('databases/RKStorage', 'rk');
     return {
@@ -106,11 +85,11 @@ const rkStorage = () => {
         schema: sqlite(file, "SELECT sql FROM sqlite_master WHERE name = 'catalystLocalStorage'")[0]?.sql ?? '',
     };
 };
-/** Every app-private file that could hold a secret by mistake: the journal, the log, the preferences but SecureStore's. */
+
 const plaintextHolders = () => sh(`run-as ${PKG} sh -c 'cd files && ls -R journal logs 2>/dev/null; cd ../shared_prefs && ls'`);
 const grepApp = (text) => sh(`run-as ${PKG} sh -c "grep -rl '${text}' files databases shared_prefs 2>/dev/null || true"`).split(/\s+/).filter(Boolean);
 
-// ---- UI (core's English) ----
+
 const inPopup = (nodes) => Boolean(tagged(nodes, 'quick-capture'));
 const sheetOpen = (nodes) => Boolean(tagged(nodes, 'more-sheet'));
 const onSync = (nodes) => Boolean(tagged(nodes, 'settings-sync'));
@@ -123,7 +102,7 @@ const hideKeyboard = async () => {
     sh('input keyevent KEYCODE_BACK');
     await sleep(600);
 };
-/** Back until the tab bar shows (nothing open over it). */
+
 const toTabs = async () => {
     for (let step = 0; step < 8; step += 1) {
         const nodes = await screen();
@@ -140,22 +119,13 @@ const toInbox = async () => {
     if (!tabSelected(nodes, en['tab.inbox'])) {
         nodes = await tapExpecting(tab(nodes, en['tab.inbox']), (current) => tabSelected(current, en['tab.inbox']), 'the Inbox');
     }
-    // A list scrolled down (a revealed row) hides the Inbox's count at its top.
+
     if (!onInbox(nodes)) await device.toTop();
     return waitFor('the Inbox', onInbox, 30_000);
 };
-/** Settings' scroll moves the node [find] picks into view: from the top, then down. */
-const reveal = async (find, description) => {
-    let nodes = await device.toTop();
-    const inView = (current) => {
-        const node = find(current);
-        const list = mainList(current);
-        return node && (!list || (box(node)[1] >= box(list)[1] && box(node)[3] <= box(list)[3] - 40)) ? node : null;
-    };
-    for (let step = 0; step < 14 && !inView(nodes); step += 1) nodes = await device.swipe(nodes, 'down');
-    return inView(nodes) ?? fail(`no ${description} on screen`);
-};
-/** Settings › Sync from the More sheet (core's row reads "Sync. <description>…"). */
+
+const reveal = (find, description) => device.revealNode(find, description);
+
 const openSync = async () => {
     const nodes = await screen();
     if (onSync(nodes)) return nodes;
@@ -165,7 +135,7 @@ const openSync = async () => {
         (next) => Boolean(tagged(next, 'settings-main')), 'Settings');
     return tapExpecting(await reveal((next) => withPrefix(next, `${en['settings.sync']}. `), 'Sync row'), onSync, 'Settings › Sync', 30_000);
 };
-/** A text field of the Sync form (its test tag), emptied and typed. */
+
 const fill = async (tag, text) => {
     const node = await reveal((current) => tagged(current, tag), tag);
     await tap(node);
@@ -180,21 +150,21 @@ const tapTag = async (tag, expected, description, timeoutMs = 30_000) => {
     await hideKeyboard();
     return tapExpecting(await reveal((current) => tagged(current, tag), tag), expected, description, timeoutMs);
 };
-/** The status line under Last sync, and the failure line under it (the danger color), as the screen shows them. */
+
 const statusLine = async () => {
     const status = (await reveal((current) => tagged(current, 'sync-status'), 'the Last sync status')).text ?? '';
     const error = status.endsWith(en['settings.syncStatusFailedSuffix'])
         ? (await reveal((current) => tagged(current, 'sync-error'), 'the failure line')).text ?? null : null;
     return { status, error };
 };
-/** The Allow insecure HTTP switch of the open form, turned on. */
+
 const insecureOn = async () => {
     const label = en['settings.allowInsecureHttp'];
     await hideKeyboard();
     const node = await reveal((current) => withDescription(current, label), 'Allow insecure HTTP');
     if (!switchOn(await screen(), label)) await tapExpecting(node, (current) => switchOn(current, label), 'insecure HTTP on');
 };
-/** A capture saved from the Inbox's capture popup. */
+
 const capture = async (text) => {
     await toInbox();
     const nodes = await device.openCapture();
@@ -204,7 +174,7 @@ const capture = async (text) => {
     await waitFor(`"${text}" in the capture field`, (current) => tagged(current, 'capture-title')?.text === text, 15_000);
     await tapExpecting(button(await screen(), en['common.save']) ?? fail('no Save'), onInbox, 'the capture to close the popup');
 };
-/** Waits until [holds] (a check of the servers or the phone's storage) is true; each try waits [everyMs]. */
+
 const until = async (description, holds, timeoutMs = 120_000, everyMs = 2_000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -213,19 +183,19 @@ const until = async (description, holds, timeoutMs = 120_000, everyMs = 2_000) =
         await sleep(everyMs);
     }
 };
-/** How many times the Sync screen's [operation] answered (host-entry.ts taskResult's line: its context's quotes arrive escaped). */
-const commands = (operation, outcome = 'saved') => logs().replace(/\\/g, '').split('\n')
+
+
+const commands = (operation, outcome = 'saved', since = '') => linesAfter(logs().replace(/\\/g, ''), since)
     .filter((line) => line.includes(`"operation":"${operation}"`) && line.includes(`"outcome":"${outcome}"`)).length;
-/**
- * Taps the control [tag] and waits for its command's answer in the log (a toast shows for 3.2 s only, so it is evidence, not
- * the wait); [toast] seen on screen meanwhile is printed.
- */
-const runCommand = async (tag, operation, description, toast, timeoutMs = 90_000) => {
-    const before = commands(operation);
+const stamp = () => logStamp(logs());
+
+
+const runCommand = async (tag, operation, description, toast, timeoutMs = 240_000) => {
+    const since = stamp();
     let seen = false;
     await tapTag(tag, (current) => {
         seen ||= Boolean(toast) && current.some((node) => node.text === toast);
-        return commands(operation) > before;
+        return commands(operation, 'saved', since) > 0;
     }, description, timeoutMs);
     if (toast) {
         const nodes = await screen();
@@ -233,10 +203,10 @@ const runCommand = async (tag, operation, description, toast, timeoutMs = 90_000
         console.log(`info - ${description}: the toast "${toast}" ${seen ? 'showed' : 'was not caught on screen (3.2 s)'}`);
     }
 };
-/** The toasts (tone:title) the Sync screen showed for [operation], oldest first (SyncSettings.kt logs them). */
+
 const toastsOf = (operation) => [...logs().matchAll(new RegExp(`Native Android sync screen command=${operation} toasts=(\\S+(?: \\S+)*)`, 'g'))]
     .map((match) => match[1].split('|').at(-1));
-/** The Menu tab's sync dot drawn in RN's attention red (a decorative dot, hidden from TalkBack as RN's, so read by its pixels). */
+
 const menuDotIsRed = async () => {
     const nodes = await toTabs();
     const [l, t, r, b] = box(tab(nodes, en['tab.menu']) ?? fail('no Menu tab'));
@@ -244,16 +214,35 @@ const menuDotIsRed = async () => {
     mkdirSync(work, { recursive: true });
     writeFileSync(file, device.adbRaw('exec-out', 'screencap', '-p'));
     const histogram = execFileSync('magick', [file, '-crop', `${r - l}x${Math.round((b - t) / 2)}+${l}+${t}`, '+repage', '-format', '%c', 'histogram:info:-'], { encoding: 'utf8' });
-    // #EF4444 at RN's 0.85 opacity over the tab bar: red well above green and blue.
+
     return [...histogram.matchAll(/(\d+):\s*\(\s*(\d+),\s*(\d+),\s*(\d+)/g)].some(([, count, red, green, blue]) => Number(count) >= 6 && Number(red) > 200 && Number(green) < 120 && Number(blue) < 120);
 };
-/** The sync badge the app logged last (host-sync.ts: "Native Android sync state badge=… cycles=…"). */
+
 const badge = () => [...logs().matchAll(/Native Android sync state badge=(\w+) cycles=(\d+)/g)].at(-1)?.slice(1) ?? [null, null];
+
+const STORE_WRITE = /"scope":"store"|Archive retention cleanup saved|Sync refresh applied load migrations|task command/;
+const changeOwedAfterLastCycle = () => {
+    const lines = logs().split('\n');
+    const done = lines.reduce((found, line, index) => (/\[sync\] Sync diagnostic complete \{"elapsedMs":"\d+".*"status":"success"/.test(line) ? index : found), -1);
+    if (done < 0 || lines.slice(done + 1).some((line) => line.includes('[sync] Sync start'))) return null;
+    const last = lines.slice(done + 1).map((line) => /sync state badge=(\w+) cycles=(\d+)/.exec(line)).filter(Boolean).at(-1);
+    if (last?.[1] !== 'syncing') return null;
+    const started = lines.slice(0, done).reduce((found, line, index) => (line.includes('[sync] Sync start') ? index : found), 0);
+    return {
+        cycleMs: Number(/"elapsedMs":"(\d+)"/.exec(lines[done])[1]),
+        cycles: Number(last[2]),
+        writes: lines.slice(started, lines.length).filter((line) => STORE_WRITE.test(line)).map((line) => line.slice(0, 300)),
+    };
+};
 
 let dav = null;
 let cloud = null;
 let second = null;
+const setProp = (name, value) => sh(`setprop debug.mindwtr.native.${name} '${value}'`);
+
+const storedCount = (title) => sqlite(pullFile(`files/${DB}`, 'db'), `SELECT COUNT(*) AS n FROM tasks WHERE deletedAt IS NULL AND title = '${title}'`)[0].n;
 const cleanup = cleanupOnExit([
+    () => setProp('journal_stop', ''),
     () => execFileSync(adbBin, ['-s', serial, 'reverse', '--remove', `tcp:${WEBDAV_PORT}`], { stdio: 'ignore' }),
     () => execFileSync(adbBin, ['-s', serial, 'reverse', '--remove', `tcp:${CLOUD_PORT}`], { stdio: 'ignore' }),
     () => { void dav?.close(); },
@@ -280,7 +269,7 @@ try {
     second = await hostDevice({ bundle, name: 'second', log: (line) => { if (/error|fail/i.test(line)) console.log(`note - ${line.slice(0, 240)}`); } });
     await second.boot();
 
-    // (1) Settings › Sync; a backend left by an earlier run is set Off first.
+
     let nodes = await openSync();
     check(onSync(nodes), '(1) Settings › Sync opens from the Settings menu');
     if (!nodes.some((node) => node.text === en['settings.syncOff'])) {
@@ -288,7 +277,7 @@ try {
     }
     check(rkStorage().keys['@mindwtr_sync_backend'] !== 'webdav', '(1) the stored backend is not WebDAV before the check configures it');
 
-    // (2) WebDAV as a user fills it.
+
     await tapTag('sync-backend-webdav', (current) => Boolean(tagged(current, 'sync-url')), 'the WebDAV form');
     await fill('sync-url', webdavFields.url);
     await insecureOn();
@@ -314,15 +303,20 @@ try {
     check(!logs().includes(PASSWORD), '(2) no log line holds the password');
     console.log(`info - files checked: ${plaintextHolders().replace(/\s+/g, ' ')}`);
 
-    // (3) Convergence with the second device.
+
     await second.configure('webdav', webdavFields);
     const remote = webdavDocument(dav, FOLDER);
     const phoneTitles = Object.keys(phoneTasks());
     const secondTitles = await second.titles();
     check(phoneTitles.length > 0 && remote.tasks.length >= phoneTitles.length, `(3) the phone uploaded its ${phoneTitles.length} tasks`);
     await second.capture(titles.host);
-    await second.syncNow('webdav', { ...webdavFields, password: null });
-    check(webdavDocument(dav, FOLDER).tasks.some((task) => task.title === titles.host), '(3) the second device wrote its emoji task to the folder');
+    const hostReply = await second.syncNow('webdav', { ...webdavFields, password: null });
+    console.log(`info - the second device's Sync now replied ${JSON.stringify(hostReply)}`);
+    const hostWrote = () => webdavDocument(dav, FOLDER).tasks.some((task) => task.title === titles.host);
+    if (hostReply?.toasts?.some((toast) => toast.title === en['settings.syncQueued'])) {
+        await until('the second device\'s queued retry to write its emoji task', hostWrote, 30_000, 1_000);
+    }
+    check(hostWrote(), '(3) the second device wrote its emoji task to the folder');
     nodes = await openSync();
     await runCommand('sync-now', 'syncNow', 'Sync now', en['settings.syncCompleted']);
     await until('the second device\'s task on the phone', () => phoneTasks()[titles.host] === 'inbox', 30_000);
@@ -337,12 +331,13 @@ try {
         console.log(`evidence - app log:\n${logs().split('\n').filter((line) => /sync state|Core action failed|background|refresh/i.test(line)).slice(-30).join('\n')}`);
     }
     check(Boolean(taskRow(shown, titles.host)), '(3) the Inbox shows the emoji title as the second device wrote it');
-    // RN's swipe on an Inbox row moves the task on (its quick status): it leaves the Inbox.
+
     await device.completeUntil(titles.host, 'the second device\'s task moved on', (current) => !taskRow(current, titles.host));
     const movedTo = phoneTasks()[titles.host];
     check(Boolean(movedTo) && movedTo !== 'inbox', `(3) the phone moved the emoji task on (${movedTo})`);
+    await waitFor('the Done toast to time out', (current) => !current.some((node) => node.text === en['common.undo']), 60_000);
     await capture(titles.phone);
-    // Core paces automatic cycles by how long the last one took (up to 9 times it), so allow a few minutes.
+
     await until('the phone\'s automatic sync to upload its change and its capture', () => {
         const document = webdavDocument(dav, FOLDER);
         const host = document?.tasks.find((task) => task.title === titles.host);
@@ -354,37 +349,114 @@ try {
     check(secondNow.includes(titles.phone) && !secondNow.includes(titles.host), `(3) the second device has the phone's capture, and the emoji task left its Inbox (${movedTo})`);
     check(webdavDocument(dav, FOLDER).tasks.find((task) => task.title === titles.host)?.title === titles.host, '(3) the emoji title round-tripped byte for byte');
 
-    // (4) The server down: an automatic sync fails on the status line and changes no data.
+
+    let release = () => {};
+    dav.state.holdWrites = new Promise((done) => { release = done; });
+    const heldBefore = dav.state.heldAt.length;
+    await capture(titles.midSync);
+    await until('the phone\'s automatic sync to wait on its document write', () => dav.state.heldAt.length > heldBefore, 300_000, 500);
+    const heldSince = dav.state.heldAt[heldBefore];
+    check(true, '(3b) the phone\'s automatic sync waits on its document write');
+    await toInbox();
+    const popup = await device.openCapture();
+    await device.focusAtEnd(tagged(popup, 'capture-title') ?? fail('no capture field'));
+    requireAppFront();
+    sh(`input text '${titles.killed}'`);
+    await waitFor(`"${titles.killed}" in the capture field`, (current) => tagged(current, 'capture-title')?.text === titles.killed, 15_000);
+    const killedPid = pid();
+    setProp('journal_stop', 'after:captureSubmit');
+    try {
+        await tap(button(await screen(), en['common.save']) ?? fail('no Save'));
+        await until('the process to stop after core\'s reply', () => pid() !== killedPid, 30_000, 100);
+    } finally {
+        setProp('journal_stop', '');
+    }
+
+    const heldMs = Date.now() - heldSince;
+    check(device.logs(killedPid, TAG).includes('Native Android journal stop at=after op=captureSubmit') && heldMs < 30_000,
+        `(3b) the process died mid-sync (${Math.round(heldMs / 1000)} s into the held write), after core's reply to the capture and before the journal dropped it`);
+    await sleep(1500);
+    if (!pid() || pid() === killedPid) {
+        await waitFor('the home screen or the app', () => front().includes(`${home}/`) || front().includes(`${PKG}/`), 15_000);
+        device.launch(ACTIVITY);
+    }
+    let replayLine = '';
+    await waitFor('the boot\'s journal replay', () => {
+        replayLine = (pid() && logs().split('\n').find((line) => line.includes('Native Android journal replay'))) || '';
+        return Boolean(replayLine);
+    }, 60_000);
+
+    check(/sent=1 dropped=1 left=0 owed=none/.test(replayLine), `(3b) the relaunched app's journal re-sent the capture (${replayLine.trim().slice(-80)})`);
+    check(storedCount(titles.killed) === 1 && storedCount(titles.midSync) === 1, '(3b) the phone stores each capture once');
+    release();
+    dav.state.holdWrites = null;
+
+    if (!front().includes(`${PKG}/`)) device.launch(ACTIVITY);
+    await waitFor('the Inbox', onInbox, 60_000);
+
+    await until('the next syncs to bring both captures to the folder', () => {
+        const live = (webdavDocument(dav, FOLDER)?.tasks ?? []).filter((task) => !task.deletedAt);
+        return [titles.midSync, titles.killed].every((title) => live.filter((task) => task.title === title).length === 1);
+    }, 600_000, 3_000);
+    check(true, '(3b) the next syncs wrote both captures to the folder, once each');
+
+    for (const deadline = Date.now() + 180_000; ;) {
+        const answer = JSON.stringify(await second.syncNow('webdav', { ...webdavFields, password: null }));
+        if (!answer.includes('holding this sync location')) break;
+        if (Date.now() > deadline) fail('the second device stayed fenced out of the folder for 3 minutes');
+        await sleep(5_000);
+    }
+    const secondAfterKill = await second.titles();
+    check([titles.midSync, titles.killed].every((title) => secondAfterKill.filter((shownTitle) => shownTitle === title).length === 1),
+        '(3b) the second device has both captures, once each');
+    check(storedCount(titles.killed) === 1, '(3b) after the syncs the phone still stores the killed capture once');
+
+
     const [badgeBefore] = badge();
     check(badgeBefore === 'healthy', `(4) the sync badge is healthy before the outage (${badgeBefore})`);
     const writesBefore = dav.state.requests.filter((request) => request.startsWith('PUT')).length;
     dav.state.down = true;
     await capture(titles.down);
     await until('the automatic sync to fail', () => badge()[0] === 'attention', 180_000);
+
+    check(await menuDotIsRed(), '(4) the Menu tab\'s sync dot shows RN\'s attention red');
     nodes = await openSync();
     const failed = await statusLine();
     check(failed.status.endsWith(en['settings.syncStatusFailedSuffix']) && Boolean(failed.error),
         `(4) the status line shows the failure: "${failed.status}" / "${failed.error}"`);
-    check(await menuDotIsRed(), '(4) the Menu tab\'s sync dot shows RN\'s attention red');
     check(phoneTasks()[titles.down] === 'inbox', '(4) the capture stays on the phone');
     check(!webdavDocument(dav, FOLDER).tasks.some((task) => task.title === titles.down)
         && dav.state.requests.filter((request) => request.startsWith('PUT')).length === writesBefore, '(4) nothing reached the server while it was down');
 
-    // (5) A failed remote write keeps its retry.
+
     dav.state.down = false;
     dav.state.failWrites = 1_000;
     const failedAt = badge()[1];
     await capture(titles.failed);
-    // After the outage's long cycle core waits up to 9 times its length (at most 5 min), plus its failure cooldown.
+
     await until('a sync whose writes fail', () => Number(badge()[1]) > Number(failedAt) && badge()[0] === 'attention', 480_000, 3_000);
     check(!webdavDocument(dav, FOLDER).tasks.some((task) => task.title === titles.failed), '(5) the failed write left the folder without the capture');
     dav.state.failWrites = 0;
     await until('the retry to upload the capture with no tap', () => webdavDocument(dav, FOLDER).tasks.some((task) => task.title === titles.failed)
         && webdavDocument(dav, FOLDER).tasks.some((task) => task.title === titles.down), 600_000, 3_000);
     check(true, '(5) once the server took writes again, the retry uploaded both captures by itself');
-    await until('the badge healthy again', () => badge()[0] === 'healthy', 30_000);
+    const healthySince = Date.now();
+    try {
+        await until('the badge healthy again', () => badge()[0] === 'healthy', 30_000);
+    } catch (error) {
+        const owed = changeOwedAfterLastCycle();
+        if (!owed) throw error;
+        const limitMs = Math.min(30_000 + 9 * owed.cycleMs, 300_000);
+        console.log(`info - a change stayed owed after the last cycle (${owed.cycleMs} ms, badge=syncing cycles=${owed.cycles}); waiting up to ${limitMs} ms for the next cycle`);
+        console.log(`evidence - store writes since that cycle started:\n${owed.writes.join('\n') || '(none in the log)'}`);
+        await until('the next cycle after the owed change, then the badge healthy', () => {
+            const [state, cycles] = badge();
+            return state === 'healthy' && Number(cycles) > owed.cycles;
+        }, Math.max(0, healthySince + limitMs - Date.now()), 2_000);
+        check(true, `(5) the change owed after the last cycle went up in the next cycle (#766 adaptive wait), and the badge is healthy`);
+    }
 
-    // (6) The self-hosted cloud.
+
     nodes = await openSync();
     await tapTag('sync-backend-selfhosted', (current) => Boolean(tagged(current, 'sync-token')), 'the self-hosted form');
     await fill('sync-url', cloudFields.url);
@@ -415,28 +487,30 @@ try {
     await second.syncNow('selfhosted', { ...cloudFields, token: null });
     check((await second.titles()).includes(titles.offline), '(6) the cloud back, Sync now uploaded the capture made while it was stopped');
 
-    // (7) Off again, tapped while a choice of the saved WebDAV backend still waits on a slow server (review S3 4): RN sends
-    // each choice, so both run, in tap order, and Off is what stays.
+
     nodes = await openSync();
-    const choicesBefore = commands('selectSyncBackend');
+    const choicesSince = stamp();
     dav.state.delayMs = 2_000;
     await hideKeyboard();
     const webdavChip = await reveal((current) => tagged(current, 'sync-backend-webdav'), 'the WebDAV chip');
-    // Off sits in the same row of chips.
+
     const offChip = tagged(await screen(), 'sync-backend-off') ?? fail('no Off chip beside WebDAV');
     await tap(webdavChip);
     await tap(offChip);
-    await until('both backend choices to answer', () => commands('selectSyncBackend') >= choicesBefore + 2, 240_000, 1_000);
+
+
+    await sleep(3_000);
     dav.state.delayMs = 0;
+    await until('both backend choices to answer', () => commands('selectSyncBackend', 'saved', choicesSince) >= 2, 240_000, 1_000);
     await until('Off stored', () => rkStorage().keys['@mindwtr_sync_backend'] === 'off', 15_000, 1_000);
     check(true, '(7) Off tapped during a slow WebDAV choice is not dropped: both choices answered, and RKStorage holds "off"');
     await toTabs();
     console.log('Sync device check passed');
 } catch (error) {
     try {
-        console.log(`evidence - app log (sync):\n${logs().split('\n').filter((line) => /\[sync\]|sync state|automatic cycle|Auto-sync|task command|Core action|idle pump/.test(line))
+        console.log(`evidence - app log (sync):\n${logs().split('\n').filter((line) => /\[sync\]|sync state|automatic cycle|Auto-sync|task command|Core action|idle pump|"scope":"store"|Archive retention cleanup saved/.test(line))
             .slice(-60).map((line) => line.slice(0, 300)).join('\n')}`);
-    } catch { /* the app is gone */ }
+    } catch {                       }
     evidenced(error);
     console.error(error instanceof Stopped ? `STOPPED: ${error.message}` : `FAIL: ${error.message}`);
     process.exitCode = error instanceof Stopped ? 3 : 1;

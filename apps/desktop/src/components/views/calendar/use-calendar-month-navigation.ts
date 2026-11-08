@@ -1,11 +1,6 @@
-/**
- * Which dates the calendar is looking at: the current month, the selected day,
- * the view mode, and everything derived from them (the month grid, the timeline
- * days, the header labels, the month picker).
- *
- * It owns the URL round-trip too — the view mode and dates survive a reload
- * through `?calendarView=`/`?calendarDate=`/`?calendarMonth=`.
- */
+
+
+
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     addDays,
@@ -20,9 +15,11 @@ import {
 } from 'date-fns';
 import {
     addCalendarMonths as addCalendarSystemMonths,
+    coerceCalendarViewMode,
     endOfCalendarMonth,
     getCalendarYear,
     isSameCalendarMonth,
+    needsCalendarSelectedDate,
     setCalendarMonthIndex,
     setCalendarYear,
     startOfCalendarMonth,
@@ -45,20 +42,14 @@ import {
 } from './calendar-primitives';
 import { getWorkspaceCache } from '../../../lib/workspace-cache';
 
-/**
- * How many days the week timeline shows. A layout choice about this screen, so
- * it lives beside the other device-local calendar preferences instead of in
- * synced settings — a wide desktop and a laptop should not fight over it.
- */
+
 const CALENDAR_TIMELINE_DAY_COUNT_STORAGE_KEY = 'mindwtr.calendar.timelineDayCount';
 
 export type CalendarMonthNavigationOptions = {
     calendarLocale: string;
     calendarSystem: CalendarSystemSetting;
-    /**
-     * Runs on every explicit navigation (and when the selected day is closed),
-     * so the selected-day panel can drop its transient search/edit state.
-     */
+
+
     onNavigate: () => void;
     weekStartsOn: WeekStartsOnIndex;
 };
@@ -78,21 +69,13 @@ const parseCalendarDateParam = (value: string | null): Date | null => {
     return next;
 };
 
-const parseCalendarViewMode = (value: string | null): CalendarViewMode => (
-    value === 'day' || value === 'week' || value === 'schedule' ? value : 'month'
-);
-
-const needsCalendarSelectedDate = (viewMode: CalendarViewMode): boolean => (
-    viewMode === 'day' || viewMode === 'week' || viewMode === 'schedule'
-);
-
 const readStoredTimelineDayCount = (): number => {
     if (typeof window === 'undefined') return CALENDAR_TIMELINE_DAY_COUNT_DEFAULT;
     try {
         const stored = getWorkspaceCache()?.getItem(CALENDAR_TIMELINE_DAY_COUNT_STORAGE_KEY);
         if (stored == null) return CALENDAR_TIMELINE_DAY_COUNT_DEFAULT;
-        // Anything unparseable — a hand-edited value, an older format — coerces
-        // back to a whole week rather than leaving the timeline with no columns.
+
+
         return coerceCalendarTimelineDayCount(Number.parseInt(stored, 10));
     } catch {
         return CALENDAR_TIMELINE_DAY_COUNT_DEFAULT;
@@ -104,7 +87,7 @@ const getInitialCalendarState = (fallback: Date): { currentMonth: Date; selected
         return { currentMonth: fallback, selectedDate: null, viewMode: 'month' };
     }
     const params = new URLSearchParams(window.location.search);
-    const viewMode = parseCalendarViewMode(params.get(CALENDAR_VIEW_PARAM));
+    const viewMode = coerceCalendarViewMode(params.get(CALENDAR_VIEW_PARAM));
     const selectedDate = parseCalendarDateParam(params.get(CALENDAR_DATE_PARAM))
         ?? (needsCalendarSelectedDate(viewMode) ? new Date(fallback) : null);
     const monthDate = parseCalendarDateParam(`${params.get(CALENDAR_MONTH_PARAM) ?? ''}-01`);
@@ -135,7 +118,7 @@ export function useCalendarMonthNavigation({
         try {
             getWorkspaceCache()?.setItem(CALENDAR_TIMELINE_DAY_COUNT_STORAGE_KEY, String(next));
         } catch {
-            // A blocked or full store only costs the preference on next launch.
+
         }
     }, []);
 
@@ -162,8 +145,8 @@ export function useCalendarMonthNavigation({
         start: calendarStart,
         end: calendarEnd,
     });
-    // A full week keeps the configured week boundary. Shorter timelines are
-    // contiguous rolling windows, so paging by their size never hides a day.
+
+
     const timelineStart = useMemo(
         () => timelineDayCount === CALENDAR_DAYS_IN_WEEK
             ? startOfWeek(currentMonth, { weekStartsOn })
@@ -229,7 +212,7 @@ export function useCalendarMonthNavigation({
             setCurrentMonth(date);
         }
     };
-    /** Brings a date the user just acted on into view, and selects it. */
+
     const revealDate = useCallback((date: Date) => {
         setSelectedDate(date);
         setCurrentMonth(date);

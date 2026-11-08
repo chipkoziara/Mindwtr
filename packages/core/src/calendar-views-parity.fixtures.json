@@ -55,7 +55,10 @@
   "timedDeadlineNote": "Recaptured from the React Native Calendar screen for issue #1328 timed deadline markers in the uncommitted issue-1328-timed-deadlines worktree. Frozen inputs and original capture provenance are unchanged. Only presentation observations changed: Submit report moves from all-day to the deadline marker rail with its exact due clock, month preview and details include its due clock, and affected Day/Week style hashes reflect the reserved marker rail.",
   "timedDeadlineRecaptureCommand": "cd apps/mobile && MINDWTR_CAPTURE_CALENDAR_VIEWS=1 rtk proxy bunx vitest run --config ../../.orchestrator/tasks/mobile/vitest.config.ts components/views/calendar-view.parity.test.tsx -t \"replays every scenario\" --maxWorkers=1",
   "timedDeadlineFinalRefinementNote": "Recaptured again from the real React Native screen after the issue-1328 readability refinement: deadline weeks use at least 260pt columns in the existing horizontal scroller, making existing task/event ranges visible; marker labels put the exact clock before the translated Due label, and marker rows no longer scroll horizontally. Only 20 marker text labels, 78 existing week range labels, and 20 corresponding style observations changed; frozen inputs and all non-presentation observations remain unchanged.",
-  "timedDeadlineMonthPrefixNote": "Final compact month rows put exact clock and translated Due before the title, so truncating a long task title preserves the deadline clock. Real RN recapture changed only three Work-area month preview titles from Submit report · Due 3:00 PM to 3:00 PM · Due · Submit report. All other observations, including style hashes, remain unchanged."
+  "timedDeadlineMonthPrefixNote": "Final compact month rows put exact clock and translated Due before the title, so truncating a long task title preserves the deadline clock. Real RN recapture changed only three Work-area month preview titles from Submit report · Due 3:00 PM to 3:00 PM · Due · Submit report. All other observations, including style hashes, remain unchanged.",
+  "estimateHelpNote": "Recaptured from the React Native Calendar screen at 57432f209 after #1358 (a3b4de291) added /estimate:45m to quickAdd.help. Only the 20 composer help lines changed; inputs, style hashes and every other observation are unchanged.",
+  "estimateHelpRecaptureCommand": "cd apps/mobile && MINDWTR_CAPTURE_CALENDAR_VIEWS=1 TZ=UTC bunx vitest run components/views/calendar-view.parity.test.tsx -t \"replays every scenario\"",
+  "estimateFlagNote": "Recaptured from the React Native Calendar screen with the commit that gates the estimate quick-add syntax on Time estimates (#1358): only the 2 composer help lines of \"day: time estimates off\" changed (they drop /estimate:45m). Inputs, style hashes and every other observation are unchanged."
  },
  "timeZone": "America/New_York",
  "now": "2026-10-28T14:00:00.000Z",
@@ -1230,6 +1233,24 @@
     [
      "press",
      "Today"
+    ]
+   ]
+  },
+  {
+   "name": "day: all-day overflow expands and folds",
+   "settings": "day",
+   "actions": [
+    [
+     "press",
+     "Next day"
+    ],
+    [
+     "press",
+     "+1 more"
+    ],
+    [
+     "press",
+     "Less"
     ]
    ]
   },
@@ -4917,7 +4938,7 @@
      "Office closed",
      "Fix sink",
      "Hear back from vendor",
-     "Trip ideas",
+     "+1 more",
      "12 AM",
      "1 AM",
      "2 AM",
@@ -4960,7 +4981,7 @@
       ""
      ]
     ],
-    "styles": "a40e8e5ad95ff1ee",
+    "styles": "7fa267d5d31e6407",
     "editor": null,
     "writes": [
      [
@@ -5251,7 +5272,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -5385,7 +5406,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -5519,7 +5540,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -5653,7 +5674,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -5788,7 +5809,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -5922,7 +5943,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -6056,7 +6077,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -6191,7 +6212,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -6325,7 +6346,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -6459,7 +6480,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -6519,7 +6540,7 @@
      "Office closed",
      "Fix sink",
      "Hear back from vendor",
-     "Trip ideas",
+     "+1 more",
      "12 AM",
      "1 AM",
      "2 AM",
@@ -6562,7 +6583,7 @@
       ""
      ]
     ],
-    "styles": "dd1fce43e934e16b",
+    "styles": "d4a11e1d1fe82048",
     "editor": null,
     "writes": [
      [
@@ -6820,7 +6841,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -6934,7 +6955,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -7026,7 +7047,7 @@
       ""
      ]
     ],
-    "styles": "da499798c5a57f4e",
+    "styles": "187ae9457eb9e2c8",
     "editor": null,
     "writes": [
      [
@@ -7316,7 +7337,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -8026,7 +8047,7 @@
       ""
      ]
     ],
-    "styles": "1937da8316e03aa0",
+    "styles": "e4d8d262ffe9cce1",
     "editor": null,
     "writes": [
      [
@@ -10864,9 +10885,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -10927,7 +10950,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "281465d5e403791b",
+    "styles": "34c1d23430eb1c2c",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11004,7 +11027,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "00e2de8876dacd62",
+    "styles": "8a7fc48b7c7ed5ab",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11077,7 +11100,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "dc583ed6a84dd3cf",
+    "styles": "c70ed9c90f7203a5",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11154,7 +11177,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "00e2de8876dacd62",
+    "styles": "8a7fc48b7c7ed5ab",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11198,9 +11221,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -11261,7 +11286,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "281465d5e403791b",
+    "styles": "34c1d23430eb1c2c",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11307,9 +11332,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -11370,7 +11397,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "281465d5e403791b",
+    "styles": "34c1d23430eb1c2c",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11414,9 +11441,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -11477,7 +11506,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "2c76f72b63958120",
+    "styles": "fd56573dbf19e356",
     "editor": null,
     "writes": [
      [
@@ -11526,9 +11555,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -11589,7 +11620,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "1a4bdc6d7e7cb6dc",
+    "styles": "6ed0830ca62d8a80",
     "editor": null,
     "writes": [
      [
@@ -11638,9 +11669,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -11704,7 +11737,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -11735,7 +11768,7 @@
       "8:30 AM"
      ]
     ],
-    "styles": "183083e01b2b9eb7",
+    "styles": "7d826021176e0274",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11774,9 +11807,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -11837,7 +11872,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "1a4bdc6d7e7cb6dc",
+    "styles": "6ed0830ca62d8a80",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -11876,9 +11911,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -11939,7 +11976,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "1a4bdc6d7e7cb6dc",
+    "styles": "6ed0830ca62d8a80",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12005,9 +12042,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -12068,7 +12107,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "1a4bdc6d7e7cb6dc",
+    "styles": "6ed0830ca62d8a80",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12107,9 +12146,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -12170,7 +12211,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "1a4bdc6d7e7cb6dc",
+    "styles": "6ed0830ca62d8a80",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12228,9 +12269,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -12291,7 +12334,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "1a4bdc6d7e7cb6dc",
+    "styles": "6ed0830ca62d8a80",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12330,9 +12373,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -12393,7 +12438,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "1a4bdc6d7e7cb6dc",
+    "styles": "6ed0830ca62d8a80",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12501,9 +12546,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "Weekend retreat",
@@ -12567,7 +12614,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "c262547ef1152a87",
+    "styles": "69bb8a031b7a6b62",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12642,7 +12689,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "30f21ab0d9fd7720",
+    "styles": "ea2f4ac3dc8111d4",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12714,7 +12761,7 @@
       ""
      ]
     ],
-    "styles": "13d27536ed602fe0",
+    "styles": "34a4d423450f750e",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12743,7 +12790,7 @@
      "Office closed",
      "Fix sink",
      "Hear back from vendor",
-     "Trip ideas",
+     "+1 more",
      "12 AM",
      "1 AM",
      "2 AM",
@@ -12785,7 +12832,7 @@
       ""
      ]
     ],
-    "styles": "5cba22d9b494bf46",
+    "styles": "e381af8e3b7c9233",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12846,7 +12893,7 @@
       ""
      ]
     ],
-    "styles": "fa397f780cefbec7",
+    "styles": "65846045952e5d06",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12901,7 +12948,7 @@
       ""
      ]
     ],
-    "styles": "7ddbbf650e6df856",
+    "styles": "1f2e7b8e6ab2992a",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -12956,7 +13003,7 @@
       ""
      ]
     ],
-    "styles": "7ddbbf650e6df856",
+    "styles": "1f2e7b8e6ab2992a",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -13022,7 +13069,7 @@
       ""
      ]
     ],
-    "styles": "7ddbbf650e6df856",
+    "styles": "1f2e7b8e6ab2992a",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -13083,7 +13130,7 @@
       ""
      ]
     ],
-    "styles": "fa397f780cefbec7",
+    "styles": "65846045952e5d06",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -13107,7 +13154,7 @@
      "Office closed",
      "Fix sink",
      "Hear back from vendor",
-     "Trip ideas",
+     "+1 more",
      "12 AM",
      "1 AM",
      "2 AM",
@@ -13149,7 +13196,7 @@
       ""
      ]
     ],
-    "styles": "5cba22d9b494bf46",
+    "styles": "e381af8e3b7c9233",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -13214,7 +13261,278 @@
       ""
      ]
     ],
-    "styles": "13d27536ed602fe0",
+    "styles": "34a4d423450f750e",
+    "editor": null,
+    "writes": [],
+    "toasts": [],
+    "alerts": [],
+    "fetches": [],
+    "opened": []
+   }
+  ],
+  "day: all-day overflow expands and folds": [
+   {
+    "texts": [
+     "‹",
+     "Wed, October 28 · Today",
+     "Today",
+     "›",
+     "Month",
+     "Day",
+     "Week",
+     "Schedule",
+     "Completed",
+     "All day",
+     "Plan week",
+     "Pay rent",
+     "12 AM",
+     "1 AM",
+     "2 AM",
+     "3 AM",
+     "4 AM",
+     "5 AM",
+     "6 AM",
+     "7 AM",
+     "8 AM",
+     "9 AM",
+     "10 AM",
+     "11 AM",
+     "12 PM",
+     "1 PM",
+     "2 PM",
+     "3 PM",
+     "4 PM",
+     "5 PM",
+     "6 PM",
+     "7 PM",
+     "8 PM",
+     "9 PM",
+     "10 PM",
+     "11 PM",
+     "12 AM",
+     "Team sync",
+     "9:15 AM-10:00 AM",
+     "Lunch",
+     "12:00 PM-1:00 PM",
+     "Standup prep",
+     "Deep work",
+     "1:00 PM-3:00 PM",
+     "Review PR",
+     "1:30 PM-2:30 PM",
+     "Night deploy"
+    ],
+    "inputs": [
+     [
+      "Search tasks to schedule...",
+      "Search tasks to schedule...",
+      ""
+     ]
+    ],
+    "styles": "34a4d423450f750e",
+    "editor": null,
+    "writes": [],
+    "toasts": [],
+    "alerts": [],
+    "fetches": [
+     [
+      "2026-10-01T04:00:00.000Z",
+      "2026-11-01T03:59:59.999Z"
+     ]
+    ],
+    "opened": []
+   },
+   {
+    "texts": [
+     "‹",
+     "Thu, October 29",
+     "Today",
+     "›",
+     "Month",
+     "Day",
+     "Week",
+     "Schedule",
+     "Completed",
+     "All day",
+     "Inbox idea",
+     "Office closed",
+     "Fix sink",
+     "Hear back from vendor",
+     "+1 more",
+     "12 AM",
+     "1 AM",
+     "2 AM",
+     "3 AM",
+     "4 AM",
+     "5 AM",
+     "6 AM",
+     "7 AM",
+     "8 AM",
+     "9 AM",
+     "10 AM",
+     "11 AM",
+     "12 PM",
+     "1 PM",
+     "2 PM",
+     "3 PM",
+     "4 PM",
+     "5 PM",
+     "6 PM",
+     "7 PM",
+     "8 PM",
+     "9 PM",
+     "10 PM",
+     "11 PM",
+     "12 AM",
+     "",
+     "4:00 PM-5:00 PM",
+     "Red-eye flight",
+     "10:00 PM-12:00 AM",
+     "Dentist form",
+     "◆",
+     "Submit report",
+     "3:00 PM · Due"
+    ],
+    "inputs": [
+     [
+      "Search tasks to schedule...",
+      "Search tasks to schedule...",
+      ""
+     ]
+    ],
+    "styles": "e381af8e3b7c9233",
+    "editor": null,
+    "writes": [],
+    "toasts": [],
+    "alerts": [],
+    "fetches": [],
+    "opened": []
+   },
+   {
+    "texts": [
+     "‹",
+     "Thu, October 29",
+     "Today",
+     "›",
+     "Month",
+     "Day",
+     "Week",
+     "Schedule",
+     "Completed",
+     "All day",
+     "Inbox idea",
+     "Office closed",
+     "Fix sink",
+     "Hear back from vendor",
+     "Trip ideas",
+     "Less",
+     "12 AM",
+     "1 AM",
+     "2 AM",
+     "3 AM",
+     "4 AM",
+     "5 AM",
+     "6 AM",
+     "7 AM",
+     "8 AM",
+     "9 AM",
+     "10 AM",
+     "11 AM",
+     "12 PM",
+     "1 PM",
+     "2 PM",
+     "3 PM",
+     "4 PM",
+     "5 PM",
+     "6 PM",
+     "7 PM",
+     "8 PM",
+     "9 PM",
+     "10 PM",
+     "11 PM",
+     "12 AM",
+     "",
+     "4:00 PM-5:00 PM",
+     "Red-eye flight",
+     "10:00 PM-12:00 AM",
+     "Dentist form",
+     "◆",
+     "Submit report",
+     "3:00 PM · Due"
+    ],
+    "inputs": [
+     [
+      "Search tasks to schedule...",
+      "Search tasks to schedule...",
+      ""
+     ]
+    ],
+    "styles": "6c070877d45e2c69",
+    "editor": null,
+    "writes": [],
+    "toasts": [],
+    "alerts": [],
+    "fetches": [],
+    "opened": []
+   },
+   {
+    "texts": [
+     "‹",
+     "Thu, October 29",
+     "Today",
+     "›",
+     "Month",
+     "Day",
+     "Week",
+     "Schedule",
+     "Completed",
+     "All day",
+     "Inbox idea",
+     "Office closed",
+     "Fix sink",
+     "Hear back from vendor",
+     "+1 more",
+     "12 AM",
+     "1 AM",
+     "2 AM",
+     "3 AM",
+     "4 AM",
+     "5 AM",
+     "6 AM",
+     "7 AM",
+     "8 AM",
+     "9 AM",
+     "10 AM",
+     "11 AM",
+     "12 PM",
+     "1 PM",
+     "2 PM",
+     "3 PM",
+     "4 PM",
+     "5 PM",
+     "6 PM",
+     "7 PM",
+     "8 PM",
+     "9 PM",
+     "10 PM",
+     "11 PM",
+     "12 AM",
+     "",
+     "4:00 PM-5:00 PM",
+     "Red-eye flight",
+     "10:00 PM-12:00 AM",
+     "Dentist form",
+     "◆",
+     "Submit report",
+     "3:00 PM · Due"
+    ],
+    "inputs": [
+     [
+      "Search tasks to schedule...",
+      "Search tasks to schedule...",
+      ""
+     ]
+    ],
+    "styles": "e381af8e3b7c9233",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -13559,7 +13877,7 @@
       ""
      ]
     ],
-    "styles": "a519ffd23680b4d6",
+    "styles": "700fac52c7d190e8",
     "editor": null,
     "writes": [
      [
@@ -13779,7 +14097,7 @@
       ""
      ]
     ],
-    "styles": "13d27536ed602fe0",
+    "styles": "34a4d423450f750e",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -13846,7 +14164,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -13882,7 +14200,7 @@
       "5:30 AM"
      ]
     ],
-    "styles": "b3da0285b960d417",
+    "styles": "96143f349642a238",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -13944,7 +14262,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -13980,7 +14298,7 @@
       "5:30 AM"
      ]
     ],
-    "styles": "15ba115126c7f149",
+    "styles": "24bae5b8ef67ea63",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14046,7 +14364,7 @@
       ""
      ]
     ],
-    "styles": "4b54b4cbd71b5ce8",
+    "styles": "01df9b2242d3542a",
     "editor": null,
     "writes": [
      [
@@ -14130,7 +14448,7 @@
       ""
      ]
     ],
-    "styles": "a2fb0221f515c458",
+    "styles": "284a96eb2c938689",
     "editor": null,
     "writes": [
      [
@@ -14204,7 +14522,7 @@
       ""
      ]
     ],
-    "styles": "a2fb0221f515c458",
+    "styles": "284a96eb2c938689",
     "editor": null,
     "writes": [],
     "toasts": [
@@ -14277,7 +14595,7 @@
       ""
      ]
     ],
-    "styles": "a2fb0221f515c458",
+    "styles": "284a96eb2c938689",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14368,7 +14686,7 @@
       ""
      ]
     ],
-    "styles": "10efbd609666fac7",
+    "styles": "25d6dca16084835b",
     "editor": null,
     "writes": [
      [
@@ -14441,7 +14759,7 @@
       ""
      ]
     ],
-    "styles": "10efbd609666fac7",
+    "styles": "25d6dca16084835b",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14528,7 +14846,7 @@
       ""
      ]
     ],
-    "styles": "10efbd609666fac7",
+    "styles": "25d6dca16084835b",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14595,7 +14913,7 @@
       ""
      ]
     ],
-    "styles": "13d27536ed602fe0",
+    "styles": "34a4d423450f750e",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14668,7 +14986,7 @@
       "chapter"
      ]
     ],
-    "styles": "fb77370bd133e6ca",
+    "styles": "487d63a086908078",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14770,7 +15088,7 @@
       "6:00 PM"
      ]
     ],
-    "styles": "084cd4d553eab58e",
+    "styles": "64bba4099dd8053a",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14835,7 +15153,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -14871,7 +15189,7 @@
       "6:00 PM"
      ]
     ],
-    "styles": "d19f7d7c9085ad07",
+    "styles": "3bd38fc322147de1",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -14936,7 +15254,7 @@
      "×",
      "New task",
      "Existing task",
-     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
+     "Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %\"Full Name\"). Due dates stay date-only unless you include a time.",
      "Start",
      "End",
      "5m",
@@ -14972,7 +15290,7 @@
       "6:00 PM"
      ]
     ],
-    "styles": "4a9a6dd776001e65",
+    "styles": "16000f176bdd2fac",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -15039,7 +15357,7 @@
       ""
      ]
     ],
-    "styles": "76b3f40f98dbf48f",
+    "styles": "d16c8960deebe826",
     "editor": null,
     "writes": [
      [
@@ -15124,7 +15442,7 @@
       ""
      ]
     ],
-    "styles": "13d27536ed602fe0",
+    "styles": "34a4d423450f750e",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -15153,7 +15471,7 @@
      "Office closed",
      "Fix sink",
      "Hear back from vendor",
-     "Trip ideas",
+     "+1 more",
      "00:00",
      "01:00",
      "02:00",
@@ -15195,7 +15513,7 @@
       ""
      ]
     ],
-    "styles": "26865311362db1e2",
+    "styles": "520fdfc765d45b54",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -15234,9 +15552,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "00:00",
@@ -15297,7 +15617,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "96c22f9a9697827a",
+    "styles": "9bcc277ab8f709dd",
     "editor": null,
     "writes": [
      [
@@ -15488,7 +15808,7 @@
       ""
      ]
     ],
-    "styles": "4e4af7df18562a0b",
+    "styles": "1a922e1a1e7bbfdf",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -15589,7 +15909,7 @@
       "8:50 AM"
      ]
     ],
-    "styles": "46fd0953691ef9d8",
+    "styles": "cf62dedbfd9ffb8f",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -15685,7 +16005,7 @@
       "10:20 AM"
      ]
     ],
-    "styles": "1c465f95f05806f1",
+    "styles": "ef3738a4faddf134",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -15748,7 +16068,7 @@
       ""
      ]
     ],
-    "styles": "4e4af7df18562a0b",
+    "styles": "1a922e1a1e7bbfdf",
     "editor": null,
     "writes": [],
     "toasts": [],
@@ -16206,7 +16526,7 @@
       ""
      ]
     ],
-    "styles": "bb24d2f10631a498",
+    "styles": "9f5a020cfd476247",
     "editor": null,
     "writes": [
      [
@@ -16931,7 +17251,7 @@
       ""
      ]
     ],
-    "styles": "13d27536ed602fe0",
+    "styles": "34a4d423450f750e",
     "editor": null,
     "writes": [
      [
@@ -16979,9 +17299,11 @@
      "Inbox idea",
      "Office closed",
      "Fix sink",
+     "+2 more",
      "Call bank",
      "Order parts",
      "Renew visa",
+     "+1 more",
      "Weekend retreat",
      "Water plants · Projected · Oct 31",
      "12 AM",
@@ -17042,7 +17364,7 @@
      "7"
     ],
     "inputs": [],
-    "styles": "281465d5e403791b",
+    "styles": "34c1d23430eb1c2c",
     "editor": null,
     "writes": [
      [

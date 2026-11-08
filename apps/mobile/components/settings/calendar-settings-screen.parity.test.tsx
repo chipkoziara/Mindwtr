@@ -1,27 +1,6 @@
-/**
- * React Native's Settings › Advanced › Calendar screen, replayed against the
- * frozen parity fixture (packages/core/src/calendar-settings-parity.fixtures.json)
- * that core's calendar settings model and the native host contract are tested
- * against.
- *
- * To recapture, keep every file under apps/ at HEAD except this one, then run
- *   MINDWTR_CAPTURE_CALENDAR_SETTINGS=1 TZ=UTC bunx vitest run components/settings/calendar-settings-screen.parity.test.tsx
- * The capture refuses to run while any other file under apps/ differs from HEAD,
- * so the provenance always names the React Native code that ran. After a
- * recorded React Native fix, MINDWTR_DUMP_CALENDAR_SETTINGS=<file> writes this
- * run's observations, to replace only the ones the fix changes (see
- * provenance.recaptured).
- *
- * Each scenario renders the real screen (Android) with the real core store and
- * the real calendar libraries (lib/external-calendar.ts, lib/calendar-push-sync.ts),
- * drives it through its own controls, and records what a user sees, what the
- * store is asked to write, what the device keeps (AsyncStorage), every write to
- * the device calendars, the calendar permission prompts, the alert and the
- * toasts. The device is stubbed: expo-calendar answers from the scenario's
- * calendars and events, `fetch` and local files answer the scenario's feeds, and
- * the document picker answers the scenario's picks. New feed ids come from a
- * counter, as UUIDs.
- */
+
+
+
 import React from 'react';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -78,7 +57,7 @@ const translate = (key: string) => harness.strings[harness.language]?.[key] || h
 
 vi.mock('react-native', async (importOriginal) => {
   const actual = await importOriginal<Record<string, any>>();
-  // calendar-push-sync reads the platform when it loads.
+
   actual.Platform.OS = 'android';
   return {
     ...actual,
@@ -153,7 +132,7 @@ vi.mock('expo-calendar', () => {
     createCalendarAsync: async (details: Record<string, unknown>) => {
       harness.nextCalendar += 1;
       const id = `created-${harness.nextCalendar}`;
-      // The internal name carries a random install marker (mindwtr:<uuid>); it is recorded as <marker>.
+
       harness.calendarWrites.push(['createCalendar', { ...details, ...(typeof details.name === 'string' ? { name: details.name.replace(/[0-9a-f-]{36}$/, '<marker>') } : {}) }]);
       harness.calendars.push({ ...(details as DeviceCalendar), id, allowsModifications: true });
       return id;
@@ -219,7 +198,7 @@ vi.mock('@/hooks/use-theme-colors', () => {
 vi.mock('@/hooks/use-filled-button-colors', () => ({
   useFilledButtonColors: () => ({ backgroundColor: '#3b82f6', textColor: undefined }),
 }));
-// The app's toast context is stable across renders; the screen's load effects depend on it.
+
 vi.mock('@/contexts/toast-context', () => {
   const toast = {
     showToast: (entry: { title?: string; message: string; tone?: string; durationMs?: number }) => {
@@ -230,8 +209,6 @@ vi.mock('@/contexts/toast-context', () => {
   return { useToast: () => toast };
 });
 
-// ---------------------------------------------------------------------------
-// Scenario data.
 
 const at = (day: string) => `2026-${day}T12:00:00.000Z`;
 const area = (id: string, name: string, order: number, extra: Partial<Area> = {}): Area => ({
@@ -303,12 +280,8 @@ type Device = {
   failEvents?: boolean;
   picks?: ({ name: string; uri: string } | null)[];
 };
-/**
- * Actions: ['press', label, nth?] a control (its accessibility label, its text,
- * or its first text; 'k:<key>' is that key's translation; nth picks among
- * several matches); ['switch', index] flips a switch; ['type', index, text] edits
- * a text field; ['alert', label] presses the alert's button.
- */
+
+
 type Scenario = { name: string; settings: string; device: Device; actions: [string, ...unknown[]][] };
 
 const systemSettings = (value: Record<string, unknown>) => JSON.stringify(value);
@@ -386,9 +359,9 @@ const scenarios: Scenario[] = [
       ['switch', 2],
       ['switch', 3],
       ['press', 'k:settings.calendarShowInAreas', 1],
-      ['press', '☐ Work'],
-      ['press', '☐ Home'],
-      ['press', '☑ Work'],
+      ['press', 'Work'],
+      ['press', 'Home'],
+      ['press', 'Work'],
       ['press', 'k:settings.calendarShowInAreas', 1],
       ['switch', 1],
     ],
@@ -428,7 +401,7 @@ const scenarios: Scenario[] = [
       ['press', 'Team #DB2777'],
       ['press', 'Team k:taskEdit.textDirection.auto'],
       ['press', 'k:settings.calendarShowInAreas', 0],
-      ['press', '☐ Home'],
+      ['press', 'Home'],
       ['press', 'k:settings.calendarShowInAreas', 1],
       ['press', 'k:settings.externalCalendarRemove', 0],
     ],
@@ -469,8 +442,6 @@ const scenarios: Scenario[] = [
   },
 ];
 
-// ---------------------------------------------------------------------------
-// The store: real data, recorded writes.
 
 const writeLog: unknown[][] = [];
 const normalize = (value: unknown): unknown => JSON.parse(JSON.stringify(value, (_key, entry) => (
@@ -520,8 +491,6 @@ function setDevice(device: Device) {
   writeLog.length = 0;
 }
 
-// ---------------------------------------------------------------------------
-// Reading the rendered screen.
 
 const deepText = (node: ReactTestInstance | string | number | null | undefined | boolean): string => {
   if (node === null || node === undefined || typeof node === 'boolean') return '';
@@ -539,7 +508,7 @@ function hosts(root: ReactTestInstance, type: string): ReactTestInstance[] {
   return out;
 }
 
-/** The visible text, one entry per outermost Text, in screen order. */
+
 function textsIn(root: ReactTestInstance): string[] {
   const out: string[] = [];
   const walk = (node: ReactTestInstance) => {
@@ -555,7 +524,7 @@ function textsIn(root: ReactTestInstance): string[] {
 
 const controlLabel = (node: ReactTestInstance) => node.props.accessibilityLabel ?? textsIn(node).join('|');
 
-/** Whether a control shows as chosen: its accessibility state (selected or checked), else a check mark. */
+
 function controlSelected(node: ReactTestInstance): boolean | null {
   const state = node.props.accessibilityState;
   if (typeof state?.selected === 'boolean') return state.selected;
@@ -596,8 +565,6 @@ function observe(root: ReactTestInstance, seen: Seen) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Driving the screen.
 
 async function run(what: string, fn: (() => unknown) | undefined) {
   if (!fn) throw new Error(`Nothing to do for ${what}`);
@@ -712,7 +679,7 @@ describe('React Native Calendar settings screen parity fixture', () => {
   it('replays every scenario exactly as frozen', async () => {
     const captured: Record<string, unknown> = {};
     for (const scenario of scenarios) captured[scenario.name] = await runScenario(scenario);
-    // Writes this run's observations to a file, to replace only the ones a fix changes.
+
     if (process.env.MINDWTR_DUMP_CALENDAR_SETTINGS) writeFileSync(process.env.MINDWTR_DUMP_CALENDAR_SETTINGS, JSON.stringify(captured));
     if (CAPTURE) {
       writeFileSync(FIXTURE_PATH, `${JSON.stringify({ provenance: captureProvenance(), ...inputs(), observations: captured }, null, 1)}\n`);
@@ -724,4 +691,29 @@ describe('React Native Calendar settings screen parity fixture', () => {
     }
     expect(Object.keys(observations)).toEqual(Object.keys(captured));
   }, 180_000);
+
+  it('announces the Area choice state without reading the check glyphs (#1305)', async () => {
+    const scenario = scenarios.find((entry) => entry.name === 'device calendars: turn on, grant, choose calendars and areas')!;
+    await seedStore(scenario);
+    setDevice(scenario.device);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<CalendarSettingsScreen />);
+    });
+    await settle();
+
+    for (const action of scenario.actions.slice(0, 5)) {
+      await perform(renderer, action);
+      await settle();
+    }
+    const showInAreas = labelText('k:settings.calendarShowInAreas');
+    const toggles = hosts(renderer.root, 'TouchableOpacity').filter((node) => matches(node, showInAreas));
+    expect(toggles.map((node) => node.props.accessibilityState?.expanded)).toEqual([false, true, false]);
+    const options = hosts(renderer.root, 'TouchableOpacity').filter((node) => node.props.accessibilityRole === 'checkbox');
+    expect(options.map((node) => [node.props.accessibilityLabel, node.props.accessibilityState?.checked]))
+      .toEqual([['Work', false], ['Home', false]]);
+    await act(async () => { renderer.unmount(); });
+    stopCalendarPushSync();
+    await flushPendingSave();
+  }, 60_000);
 });

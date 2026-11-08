@@ -1,4 +1,4 @@
-import { Area, Project, projectTagsForIntent, translateWithFallback, type TranslateFn, tFallback, useTaskStore } from '@mindwtr/core';
+import { Area, Project, projectTagsForIntent, runStoreCommand, translateWithFallback, type TranslateFn, tFallback, useTaskStore } from '@mindwtr/core';
 import { ActionSheetIOS, Alert, Keyboard, Platform } from 'react-native';
 
 import type { ToastOptions } from '@/contexts/toast-context';
@@ -43,19 +43,23 @@ export const applyLiveProjectUpdate = ({
         onBlocked?.();
         return false;
     }
-    const patch = typeof updates === 'function' ? updates(project) : updates;
-    if (!patch) return false;
-    updateProject(project.id, patch);
-    setSelectedProject({ ...project, ...patch });
+    if (typeof updates !== 'function') {
+        updateProject(project.id, updates);
+        setSelectedProject({ ...project, ...updates });
+        return true;
+    }
+
+    void runStoreCommand(async () => {
+        const latest = getLiveMutableProject(projectId, getProjectById);
+        const patch = latest ? updates(latest) : null;
+        if (!latest || !patch) return;
+        setSelectedProject({ ...latest, ...patch });
+        await updateProject(latest.id, patch);
+    });
     return true;
 };
 
-/**
- * Spoken/printed labels for the area swatches, used by the iOS action sheets
- * (which list colors as text rows, not dots). Keyed by the exact hex in
- * AREA_PRESET_COLORS — a preset missing here falls back to its raw hex, so
- * every new swatch needs a row.
- */
+
 export const AREA_COLOR_DISPLAY_BY_HEX: Record<string, AreaColorMeta> = {
     '#3b82f6': { nameKey: 'projects.colorBlue' },
     '#10b981': { nameKey: 'projects.colorGreen' },
@@ -72,9 +76,8 @@ export const AREA_COLOR_DISPLAY_BY_HEX: Record<string, AreaColorMeta> = {
 };
 
 const areaColorLabel = (t: TranslateFn, color: string): string => {
-    // The name alone: a native action sheet cannot draw a colour dot, and emoji circles stood
-    // in badly (two colours shared one circle, and the newer ones are empty boxes on iOS
-    // before 16.4).
+
+
     const nameKey = AREA_COLOR_DISPLAY_BY_HEX[color]?.nameKey;
     return nameKey ? t(nameKey) : color.toUpperCase();
 };

@@ -1,11 +1,11 @@
 import React from 'react';
 import renderer from 'react-test-renderer';
-import { Modal, ScrollView, TouchableOpacity } from 'react-native';
+import { Modal, ScrollView, Text, TouchableOpacity } from 'react-native';
 import { describe, expect, it, vi } from 'vitest';
 
 import { GeneralSettingsScreen } from './general-settings-screen';
 
-// Core's General model runs for real; only the store is the test's.
+
 vi.mock('@mindwtr/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@mindwtr/core')>()),
   shallow: Object.is,
@@ -39,12 +39,13 @@ vi.mock('@/lib/mobile-app-lock', () => ({
   authenticateWithDeviceLock: async () => ({ success: false }),
   getMobileAppLockErrorKey: () => 'appLock.failed',
 }));
+vi.mock('@/modules/system-date-format', () => ({ getSystemDateFormat: () => 'dd.MM.yyyy' }));
 
 vi.mock('react-native-safe-area-context', () => ({
   SafeAreaView: (props: any) => React.createElement('SafeAreaView', props, props.children),
 }));
 
-// Persian shows the calendar system picker too.
+
 vi.mock('./settings.hooks', () => ({
   useSettingsLocalization: () => ({ language: 'fa', tr: (key: string) => key, t: (key: string) => key, setLanguage: vi.fn() }),
   useSettingsScrollContent: () => ({}),
@@ -55,15 +56,24 @@ vi.mock('./settings.shell', () => ({
 }));
 
 describe('GeneralSettingsScreen pickers', () => {
+  it('previews the actual native System date pattern even with an explicit format selected', () => {
+    let tree!: renderer.ReactTestRenderer;
+    renderer.act(() => { tree = renderer.create(<GeneralSettingsScreen />); });
+    const today = new Date();
+    const sample = `${String(today.getDate()).padStart(2, '0')}.${String(today.getMonth() + 1).padStart(2, '0')}.${today.getFullYear()}`;
+    expect(tree.root.findAllByType(Text).some((node) => node.props.children === `settings.dateFormatSystem (${sample})`)).toBe(true);
+    renderer.act(() => tree.unmount());
+  });
+
   it('tells a screen reader each option is a choice and which one is chosen', () => {
     let tree!: renderer.ReactTestRenderer;
     renderer.act(() => {
       tree = renderer.create(<GeneralSettingsScreen />);
     });
 
-    // Closed modals still render their options in the test shim.
+
     const pickers = tree.root.findAllByType(Modal).map((modal) => modal.findByType(ScrollView).findAllByType(TouchableOpacity));
-    // Theme, quick access, language, week start, date format, calendar system, time format.
+
     expect(pickers).toHaveLength(7);
     for (const options of pickers) {
       for (const option of options) {

@@ -21,7 +21,7 @@ import {
     type LucideIcon,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { isSandboxMode, shallow, useTaskStore, resolveFeatureFlags, safeFormatDate, tFallback, isAllowedInsecureUrl, formatTaskMovedMessage, isSyncFileLockUnavailableError } from '@mindwtr/core';
+import { isSandboxMode, shallow, useTaskStore, resolveFeatureFlags, safeFormatDate, tFallback, formatTaskMovedMessage, isSyncFileLockUnavailableError } from '@mindwtr/core';
 import type { StoreActionResult, TaskStatus } from '@mindwtr/core';
 import { showUndoToast } from '../lib/undo-registry';
 import { undoTaskCompletion } from '../lib/undo-task-completion';
@@ -34,11 +34,13 @@ import { ToastHost } from './ToastHost';
 import { areaFilterSelectionToFilters, isTaskVisibleInInbox, resolveAreaFilterSelection, type AreaFilterSelection } from '@mindwtr/core';
 import { SyncService } from '../lib/sync-service';
 import { SidebarAreaFilter } from './ui/SidebarAreaFilter';
+import { SidebarWorkspaceSwitcher } from './workspaces/SidebarWorkspaceSwitcher';
 import { getCalendarTaskDragTaskId, hasCalendarTaskDragData } from '../lib/calendar-task-drag';
 import { stageCalendarDropLanding } from '../lib/calendar-view-params';
 import { SandboxBanner } from './sandbox/SandboxBanner';
 import { getWorkspaceCache } from '../lib/workspace-cache';
 import { TASK_STATUS_ICONS } from '../lib/task-status-icons';
+import { dismissCleartextSyncWarning, getCleartextSyncDestination, isCleartextSyncDismissed } from '../lib/cleartext-sync-warning';
 
 interface LayoutProps {
     children: React.ReactNode;
@@ -64,22 +66,16 @@ type NavSection = {
     items: NavItem[];
 };
 
-// Safety net only: drop and dragend clear the highlight immediately in every
-// ordinary case, so this just catches a drag that ended without either (a source
-// unmounted mid-drag). Kept well above the ~350ms browsers idle between dragover
-// events on a stationary pointer, so the cue never flickers off mid-drag.
+
 const TASK_DRAG_IDLE_MS = 1_000;
 
-// Sidebar entries a dragged task can be dropped on to reclassify it. Only lists
-// that ARE a status qualify: Focus is a flag rather than a status, Projects and
-// the views below it are not destinations, and Trash is deliberately absent so a
-// stray drag can never delete a task.
+
 const NAV_DROP_STATUSES: Record<string, TaskStatus> = {
     inbox: 'inbox',
     someday: 'someday',
     waiting: 'waiting',
     reference: 'reference',
-    // Done and Archived share the History entry; it opens on Done, so a drop files there.
+
     history: 'done',
 };
 const SECTION_COLLAPSE_STORAGE_KEY = 'mindwtr:sidebar:collapsedSections';
@@ -97,8 +93,8 @@ function loadCollapsedSections(): Set<string> {
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return createDefaultCollapsedSections();
         const stored = new Set(parsed.filter((v): v is string => typeof v === 'string'));
-        // The old Archive section became part of More. Preserve an explicit
-        // legacy collapse instead of resetting it during the regrouping.
+
+
         if (stored.has('archive')) stored.add('secondary');
         return stored;
     } catch {
@@ -111,7 +107,7 @@ function saveCollapsedSections(keys: Set<string>) {
     try {
         getWorkspaceCache()?.setItem(SECTION_COLLAPSE_STORAGE_KEY, JSON.stringify(Array.from(keys)));
     } catch {
-        // storage unavailable — fall back to in-memory only
+
     }
 }
 
@@ -145,12 +141,13 @@ export function Layout({
     const hiddenSidebarViews = useUiStore((state) => state.hiddenSidebarViews);
     const showToast = useUiStore((state) => state.showToast);
     const isObsidianEnabled = useObsidianStore((state) => state.config.enabled);
-    // Timeline is opt-in (#1111): hidden from navigation until it is switched on.
+
     const isTimelineEnabled = resolveFeatureFlags(settings).timeline;
     const [syncStatus, setSyncStatus] = useState(() => SyncService.getSyncStatus());
     const [isManualSyncing, setIsManualSyncing] = useState(false);
     const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
-    const [cleartextSyncWarning, setCleartextSyncWarning] = useState<string | null>(null);
+    const [cleartextSyncWarning, setCleartextSyncWarning] = useState<{ destination: string; message: string } | null>(null);
+    const dismissedCleartextDestinations = useRef(new Set<string>());
     const searchShortcutHint = useMemo(() => (
         typeof navigator !== 'undefined' && /mac/i.test(navigator.platform) ? '⌘K' : 'Ctrl+K'
     ), []);
@@ -166,8 +163,7 @@ export function Layout({
         : persistedLastSyncError;
     const lastSyncStats = settings?.lastSyncStats;
 
-    // Compute sync freshness bucket on a 60-second timer instead of every render
-    // to prevent idle re-render flicker from Date.now() changing each frame.
+
     const getSyncFreshnessBucket = useCallback((syncAt: string | undefined): 'fresh' | 'stale' | 'old' | 'none' => {
         if (!syncAt) return 'none';
         const ageMs = Math.max(0, Date.now() - Date.parse(syncAt));
@@ -178,6 +174,7 @@ export function Layout({
     const [syncFreshness, setSyncFreshness] = useState(() => getSyncFreshnessBucket(lastSyncAt));
     const lastSyncAtRef = useRef(lastSyncAt);
     const shownConflictToastKeyRef = useRef<string | null>(null);
+    const initialSyncResultAtRef = useRef(syncStatus.lastResultAt);
     lastSyncAtRef.current = lastSyncAt;
     useEffect(() => {
         setSyncFreshness(getSyncFreshnessBucket(lastSyncAt));
@@ -218,26 +215,23 @@ export function Layout({
         return `${countParts.join('|')}:ids:${conflictIds.join(',')}:samples:${conflictSamples.join(',')}`;
     }, [lastSyncAt, lastSyncStats, lastSyncStatus]);
     useEffect(() => {
-        // Wait until the backend is known, and stay quiet when sync is off — a
-        // persisted conflict status can never be cleared by a sync that will
-        // never run again, so it would re-toast at every launch (#1001).
+
+
         if (syncStatus.backend === null || syncStatus.backend === 'off') return;
+
+        if (syncStatus.inFlight || syncStatus.lastResult !== 'success'
+            || syncStatus.lastResultAt === initialSyncResultAtRef.current) return;
         if (lastSyncStatus !== 'conflict' || !syncConflictToastKey) return;
         if (shownConflictToastKeyRef.current === syncConflictToastKey) return;
         shownConflictToastKeyRef.current = syncConflictToastKey;
         showToast(syncConflictNotice, 'info', 6000);
-    }, [lastSyncStatus, showToast, syncConflictNotice, syncConflictToastKey, syncStatus.backend]);
+    }, [lastSyncStatus, showToast, syncConflictNotice, syncConflictToastKey,
+        syncStatus.backend, syncStatus.inFlight, syncStatus.lastResult, syncStatus.lastResultAt]);
 
-    // A sync cycle that queues a follow-up drops inFlight between runs while queued stays
-    // true. Reading inFlight alone made the footer flicker on every hand-off — the status dot
-    // stopped pulsing, the Sync now button re-enabled (swapping its cursor and hover
-    // background), and re-adding animate-spin restarted the spinner from 0deg, which reads as
-    // the icon jumping about while you hover it. Queued work is still sync work, so treat it
-    // as busy and the footer stays put for the whole cycle.
+
     const syncBusy = syncStatus.inFlight || syncStatus.queued;
-    // Sync affordances disappear entirely while sync is off (#1001). `null`
-    // means "not read yet"; keep the footer visible then so it doesn't blink
-    // in a heartbeat later for the common sync-enabled case.
+
+
     const syncOff = sandboxMode || syncStatus.backend === 'off';
     const syncFreshnessDotClass = syncBusy
         ? 'bg-info'
@@ -405,7 +399,7 @@ export function Layout({
         saveCollapsedSections(collapsedSections);
     }, [collapsedSections]);
 
-    // Auto-expand the section containing the active view so it's never hidden.
+
     useEffect(() => {
         const activeSection = navSections.find((section) => section.items.some(
             (item) => item.id === currentView || item.activeIds?.includes(currentView),
@@ -435,26 +429,16 @@ export function Layout({
 
     useEffect(() => clearCalendarDragNavTimeout, [clearCalendarDragNavTimeout]);
 
-    // This nav item is the only place a task dragged out of a list can be dropped,
-    // and nothing pointed at it: the row-wide grab cursor in lists without manual
-    // ordering read as "reorder me" and the capability was undiscoverable (#867).
-    // The drag starts on a task row anywhere in the app, so the flag comes from a
-    // document listener rather than being threaded through every list view.
+
     const [taskDragActive, setTaskDragActive] = useState(false);
     const [dragOverNavId, setDragOverNavId] = useState<string | null>(null);
-    // A folded group hides its drop targets. Opening it for the length of the drag
-    // is kept out of `collapsedSections`, which is saved as the user's fold choice.
+
+
     const [dragOpenedSectionKey, setDragOpenedSectionKey] = useState<string | null>(null);
 
     useEffect(() => {
-        // Neither end-of-drag signal is trustworthy on the path this highlight
-        // exists for. Dropping on the calendar grid stops propagation, so a
-        // bubbling `drop` listener never sees it; and the spring-loaded jump to
-        // the calendar unmounts the list the drag started in, so `dragend` fires
-        // on a detached node that no longer reaches the document. Left relying on
-        // those two, the highlight stayed lit for the rest of the session. Hence
-        // capture-phase listeners (which beat stopPropagation) plus a heartbeat:
-        // once `dragover` goes quiet the drag is over however it ended.
+
+
         let idleTimer: number | null = null;
         const endDrag = () => {
             if (idleTimer !== null) {
@@ -478,11 +462,8 @@ export function Layout({
             if (!hasCalendarTaskDragData(event.dataTransfer)) return;
             keepAlive();
         };
-        // dragstart listens on the BUBBLE phase on purpose: the task row populates
-        // the transfer in its own dragstart handler, so a capture listener runs
-        // first and sees an empty dataTransfer — the drag then goes unrecognised
-        // and no target ever lights up. Only the endings need capture, to beat the
-        // calendar grid's stopPropagation.
+
+
         document.addEventListener('dragstart', handleDragStart);
         document.addEventListener('dragover', handleDragOver, true);
         document.addEventListener('dragend', endDrag, true);
@@ -501,9 +482,8 @@ export function Layout({
         event.preventDefault();
         event.dataTransfer.dropEffect = 'move';
         setDragOverNavId(navId);
-        // Spring-loading is calendar-only: dropping on a status list finishes the
-        // job where you are, so yanking the view out from under the pointer would
-        // just lose your place in the list you were working through.
+
+
         if (navId !== 'calendar') return;
         if (currentView === 'calendar' || calendarDragNavTimeoutRef.current !== null) return;
         calendarDragNavTimeoutRef.current = window.setTimeout(() => {
@@ -553,10 +533,8 @@ export function Layout({
                     throw new Error(outcome.error || 'Failed to change task status');
                 }
                 showUndoToast(formatTaskMovedMessage(t, title, nextStatus), () => {
-                    // A drop on History completes the task, and completion has side
-                    // effects (the next occurrence of a repeating task, the Today
-                    // star), so undoing it goes through the shared core rule — the
-                    // same branch the status chord uses.
+
+
                     if (nextStatus === 'done') {
                         void undoTaskCompletion(taskId, previousStatus, wasFocusedToday)
                             .catch((error) => reportError('Failed to undo task status change', error));
@@ -665,8 +643,8 @@ export function Layout({
 
     useEffect(() => {
         if (areas.length === 0) return;
-        // Write back the normalized selection whenever the stored one differs —
-        // seeds the default and drops ids whose area was deleted.
+
+
         const stored = settings?.filters;
         const next = areaFilterSelectionToFilters(resolvedAreaFilter);
         if (stored?.areaId === next.areaId
@@ -687,54 +665,42 @@ export function Layout({
         };
     }, []);
 
-    // Loopback HTTP never leaves the machine, so the cleartext banner would nag
-    // about a setup the app itself auto-allows (base-options
-    // isAllowedInsecureUrl admits exactly https and loopback http). LAN HTTP
-    // keeps the banner: that traffic really does cross a network.
-    const isCleartextNetworkUrl = useCallback((rawUrl: string): boolean => {
-        const url = rawUrl.trim().toLowerCase();
-        return url.startsWith('http://') && !isAllowedInsecureUrl(url);
-    }, []);
 
-    // Pure derivation from an already-known configuration snapshot: no lock,
-    // no native call. Drives both the synchronous first-frame seed and the
-    // refresh after a configuration commit (PERF-02) — the 30s poll this
-    // replaced re-read the locked, persisted configuration on a timer with no
-    // in-flight guard, so its ticks queued behind whole sync cycles (tens of
-    // seconds on WebDAV) and drained as a burst of lock acquisitions.
     const applyCleartextWarningFromConfiguration = useCallback((
         configuration: ReturnType<typeof SyncService.getLastKnownSyncSelection>['configuration'],
     ) => {
         if (!configuration) return;
-        if (configuration.backend === 'webdav' && isCleartextNetworkUrl(configuration.webdav.url)) {
-            setCleartextSyncWarning(tFallback(t,
-                'settings.cleartextSyncWarningWebdav',
-                'WebDAV sync is using HTTP. Data is unencrypted; use it only on a trusted network.'
-            ));
+        const destination = configuration.backend === 'webdav'
+            ? getCleartextSyncDestination('webdav', configuration.webdav.url)
+            : configuration.backend === 'cloud' && configuration.cloudProvider === 'selfhosted'
+                ? getCleartextSyncDestination('cloud', configuration.cloud.url)
+                : null;
+        if (!destination || dismissedCleartextDestinations.current.has(destination) || isCleartextSyncDismissed(destination)) {
+            setCleartextSyncWarning(null);
             return;
         }
-        if (
-            configuration.backend === 'cloud'
-            && configuration.cloudProvider === 'selfhosted'
-            && isCleartextNetworkUrl(configuration.cloud.url)
-        ) {
-            setCleartextSyncWarning(tFallback(t,
+        if (configuration.backend === 'webdav') {
+            setCleartextSyncWarning({ destination, message: tFallback(t,
+                'settings.cleartextSyncWarningWebdav',
+                'WebDAV sync is using HTTP. Data is unencrypted; use it only on a trusted network.'
+            ) });
+            return;
+        }
+        if (configuration.backend === 'cloud') {
+            setCleartextSyncWarning({ destination, message: tFallback(t,
                 'settings.cleartextSyncWarningCloud',
                 'Self-hosted sync is using HTTP. Data is unencrypted; use it only on a trusted network.'
-            ));
+            ) });
             return;
         }
         setCleartextSyncWarning(null);
-    }, [isCleartextNetworkUrl, t]);
+    }, [t]);
 
     useEffect(() => {
         if (sandboxMode) return;
         void SyncService.refreshSyncBackendStatus();
-        // refreshSyncBackendStatus() runs at the end of every
-        // commitProvenSyncConfiguration (sync-service.ts), so this
-        // subscription doubles as the "a configuration actually committed"
-        // signal — re-deriving the banner here needs no extra lock read,
-        // getLastKnownSyncSelection() is already fresh by the time it fires.
+
+
         return SyncService.subscribeSyncStatus((status) => {
             setSyncStatus(status);
             applyCleartextWarningFromConfiguration(SyncService.getLastKnownSyncSelection().configuration);
@@ -750,9 +716,7 @@ export function Layout({
         return () => mediaQuery.removeEventListener?.('change', updateCompactViewport);
     }, []);
 
-    // Full (locked) read, kept only for events that can reflect a change this
-    // session did not itself make — another window or process editing the
-    // sync configuration on disk.
+
     const refreshCleartextSyncWarning = useCallback(async () => {
         try {
             const configuration = await SyncService.getPersistedSyncConfigurationSnapshot();
@@ -764,9 +728,8 @@ export function Layout({
 
     useEffect(() => {
         if (sandboxMode) return;
-        // Synchronous first-frame seed — no lock, no wait behind a sync cycle —
-        // painted immediately, then corrected (usually a no-op) by the queued
-        // read below once it resolves.
+
+
         applyCleartextWarningFromConfiguration(SyncService.getLastKnownSyncSelection().configuration);
         void refreshCleartextSyncWarning();
         const handleStorage = () => void refreshCleartextSyncWarning();
@@ -797,11 +760,11 @@ export function Layout({
             >
                 {tFallback(t, 'accessibility.skipToContent', 'Skip to content')}
             </a>
-            {/* Sidebar */}
+            {             }
             {!isFocusMode && (
                 <aside className={cn(
                     "border-r border-border bg-card flex flex-col",
-                    isCollapsed ? "w-16 p-2" : "w-64 px-3 pt-5 pb-3"
+                    isCollapsed ? "w-16 shrink-0 p-2" : "w-64 shrink-0 px-3 pt-5 pb-3"
                 )}>
                 <div className={cn(
                     "flex items-center gap-2 px-1.5 mb-6",
@@ -830,7 +793,7 @@ export function Layout({
                     </div>
                 </div>
 
-                {/* Search Button */}
+                {                   }
                 <button
                     onClick={triggerSearch}
                     className={cn(
@@ -968,13 +931,8 @@ export function Layout({
                                             itemWeightClass,
                                             isActiveItem ? "bg-primary/5 text-primary" : inactiveItemClass,
                                             isCollapsed ? "h-10 justify-center px-2" : "h-9 justify-between px-2.5",
-                                            // Last so they win the merge: the drop target has to read as
-                                            // available even on the active item's own tinted background.
-                                            // Every destination reads as available at a glance, and the one
-                                            // under the pointer is unmistakably the one that will take the
-                                            // drop. A dashed edge is the conventional "drop zone" cue and
-                                            // distinguishes an available target from the solid ring the
-                                            // focused item already uses.
+
+
                                             isDropTarget && taskDragActive && "outline-dashed outline-2 -outline-offset-2 outline-primary/50 bg-primary/10 text-primary",
                                             isDropTarget && dragOverNavId === item.id && "outline outline-2 -outline-offset-2 outline-primary bg-primary/25 text-primary"
                                         )}
@@ -1006,7 +964,8 @@ export function Layout({
                 </div>
 
                 <div className="mt-auto border-t border-border/60 px-2 py-1.5" data-sidebar-footer>
-                    <div className={cn("pb-1.5", isCollapsed && "flex justify-center")}>
+                    <div className={cn("pb-1.5", isCollapsed && "flex flex-col items-center")}>
+                        <SidebarWorkspaceSwitcher collapsed={isCollapsed} />
                         <SidebarAreaFilter
                             areas={sortedAreas}
                             selection={resolvedAreaFilter}
@@ -1079,16 +1038,8 @@ export function Layout({
                                     type="button"
                                     onClick={handleManualSyncNow}
                                     disabled={manualSyncBusy}
-                                    // overflow-hidden matters on engines where the spinner still turns on
-                                    // the compositor (no `@property`; see `.animate-spin` in index.css).
-                                    // Elsewhere the spinner has no layer at all and this is a no-op.
-                                    // There (#1251): Chromium cannot bound a running rotate animation, so
-                                    // it assumes the spinner may reach
-                                    // anywhere inside its nearest clip. With no clip that was the whole
-                                    // window: every positioned box painted after the sidebar (each task
-                                    // row) was lifted into its own transparent layer for "overlap", and
-                                    // text in a transparent layer drops from ClearType to grey
-                                    // antialiasing. Clipping here keeps the spinner's reach to the button.
+
+
                                     className={cn(
                                         "inline-flex shrink-0 items-center justify-center overflow-hidden rounded-md text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-60",
                                         "hover:bg-accent/70 hover:text-accent-foreground",
@@ -1106,12 +1057,11 @@ export function Layout({
                 </aside>
             )}
 
-            {/* Main Content */}
+            {                  }
             <main
                 id="main-content"
-                // tabIndex=-1 makes this a programmatic focus target for the
-                // "enter list" fallback; it is never keyboard-tabbable, so it
-                // must not paint a focus ring around the whole list (#890).
+
+
                 className="flex-1 overflow-auto focus:outline-none"
                 data-main-content
                 tabIndex={-1}
@@ -1119,19 +1069,13 @@ export function Layout({
                 aria-label={tFallback(t, 'accessibility.mainContent', 'Main content')}
             >
                 <div className={cn(
-                    // No bottom padding: this box is `h-full`, so a `pb-*` here
-                    // is a dead band below every view that scrolls inside it and
-                    // is skipped entirely by every view that overflows it. Each
-                    // view puts LIST_END_GAP on its own scrolled content instead
-                    // (#977).
-                    "mx-auto h-full px-4 pt-4 lg:px-6 lg:pt-6 2xl:px-8 2xl:pt-8",
+                    (contentView === 'projects' || contentView === 'contexts') ? "mx-auto h-full" : "mx-auto h-full px-4 pt-4 lg:px-6 lg:pt-6 2xl:px-8 2xl:pt-8",
                     isFocusMode
                         ? "max-w-[800px]"
                         : isFullWidthView
                             ? "w-full max-w-none"
-                            // The week/month grids want more room than a list does, but going
-                            // edge-to-edge looks wrong, so the calendar keeps its side margins (#966).
-                            // The timeline is the same shape of chart and takes the same box (#1111).
+
+
                             : contentView === 'calendar' || contentView === 'timeline'
                             ? "w-full max-w-screen-2xl"
                             : isWideView
@@ -1161,7 +1105,18 @@ export function Layout({
                             className="mb-4 flex items-start gap-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground"
                         >
                             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden="true" />
-                            <span>{cleartextSyncWarning}</span>
+                            <span className="flex-1">{cleartextSyncWarning.message}</span>
+                            <button
+                                type="button"
+                                className="shrink-0 underline underline-offset-2 hover:text-muted-foreground"
+                                onClick={() => {
+                                    dismissedCleartextDestinations.current.add(cleartextSyncWarning.destination);
+                                    dismissCleartextSyncWarning(cleartextSyncWarning.destination);
+                                    setCleartextSyncWarning(null);
+                                }}
+                            >
+                                {tFallback(t, 'settings.cleartextSyncDismiss', 'Dismiss for this sync destination')}
+                            </button>
                         </div>
                     )}
                     {children}

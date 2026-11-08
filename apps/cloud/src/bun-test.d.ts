@@ -9,6 +9,7 @@ declare module 'bun:test' {
         toBe(expected: unknown): void;
         toEqual(expected: unknown): void;
         toMatch(expected: string | RegExp): void;
+        toMatchObject(expected: object): void;
         toContain(expected: unknown): void;
         toHaveLength(expected: number): void;
         toBeGreaterThan(expected: number | bigint): void;
@@ -31,8 +32,8 @@ declare module 'bun:test' {
     }
 
     export const describe: (name: string, callback: TestCallback) => void;
-    // bun's runtime accepts a per-test timeout as the third argument (the mcp-server
-    // shim declares the same); two-process tests need more than the 5 s default.
+
+
     export const test: (name: string, callback: TestCallback, timeoutMs?: number) => void;
     export const beforeEach: (callback: TestCallback) => void;
     export const afterEach: (callback: TestCallback) => void;

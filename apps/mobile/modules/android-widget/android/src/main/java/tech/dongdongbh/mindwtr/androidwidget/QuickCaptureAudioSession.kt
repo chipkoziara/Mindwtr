@@ -1,16 +1,23 @@
 package tech.dongdongbh.mindwtr.androidwidget
 
-/**
- * Retained state machine for one quick-capture dialog. Android recreation may
- * replace the Activity, but it must not replace the in-flight recorder/draft,
- * typed prefix, or publication retry state.
- */
+
 internal class QuickCaptureAudioSession(
   private val startRecorder: ((QuickCaptureAudioRecorder.Outcome) -> Unit) -> RecordingControl,
-  private val publishAudio: (QuickCaptureAudioDraft, String, (Boolean) -> Unit) -> Unit,
+  private val publishAudio: (QuickCaptureAudioDraft, String, String, (Boolean) -> Unit) -> Unit,
   private val discardAudio: (QuickCaptureAudioDraft) -> Unit,
   private val onTerminal: () -> Unit = {},
+  val defaultStatus: String = "inbox",
+  initialCaptureStatus: String? = null,
+  initialTitle: String = "",
 ) {
+  var captureStatus: String? = PendingCaptureWriter.creationStatus(initialCaptureStatus)
+    private set
+
+  fun selectCaptureStatus(value: String) {
+    if (state == State.SAVING || state == State.SAVED || state == State.CLOSED) return
+    captureStatus = PendingCaptureWriter.creationStatus(value) ?: return
+    notifyChanged()
+  }
   internal interface RecordingControl {
     val id: String?
     fun stop()
@@ -24,6 +31,7 @@ internal class QuickCaptureAudioSession(
     val state: State,
     val status: Status,
     val title: String,
+    val note: String,
     val hasDraft: Boolean,
   ) {
     val canSaveText: Boolean get() = state == State.IDLE && title.isNotBlank()
@@ -32,7 +40,8 @@ internal class QuickCaptureAudioSession(
 
   private var state = State.IDLE
   private var status = Status.RECORD
-  private var title = ""
+  private var title = initialTitle
+  private var note = ""
   private var recorder: RecordingControl? = null
   private var draft: QuickCaptureAudioDraft? = null
   private var saveWhenReady = false
@@ -45,7 +54,7 @@ internal class QuickCaptureAudioSession(
   private var observerToken: Any? = null
   private var observer: ((Snapshot) -> Unit)? = null
 
-  val snapshot: Snapshot get() = Snapshot(state, status, title, draft != null)
+  val snapshot: Snapshot get() = Snapshot(state, status, title, note, draft != null)
 
   val activeIds: Set<String>
     get() = listOfNotNull(recorder?.id, draft?.id).toSet()
@@ -70,6 +79,11 @@ internal class QuickCaptureAudioSession(
 
   fun updateTitle(nextTitle: String) {
     title = nextTitle
+    notifyChanged()
+  }
+
+  fun updateNote(nextNote: String) {
+    note = nextNote
     notifyChanged()
   }
 
@@ -126,7 +140,7 @@ internal class QuickCaptureAudioSession(
     recorder?.stop()
   }
 
-  /** Stop visible recording and persist a usable result without an Activity. */
+
   fun onHostStopped() {
     if (discardRequested) return
     when (state) {
@@ -147,29 +161,30 @@ internal class QuickCaptureAudioSession(
     status = Status.READY
     notifyChanged()
     try {
-      publishAudio(ready, title, ::onPublicationFinished)
+      publishAudio(ready, title, note, ::onPublicationFinished)
     } catch (_: Exception) {
       onPublicationFinished(false)
     }
   }
 
-  /** Returns true only once so Inbox count/toast side effects cannot duplicate. */
+
   fun consumeSaved(): Boolean {
     if (state != State.SAVED || savedConsumed) return false
     savedConsumed = true
     return true
   }
 
-  /** Ends the retained session after the legacy text writer has durably queued. */
+
   fun completeTextCapture() {
     if (state != State.IDLE) return
     title = ""
+    note = ""
     state = State.CLOSED
     onTerminal()
     notifyChanged()
   }
 
-  /** Returns true when the dialog should close; otherwise only audio was cancelled. */
+
   fun cancelAudioOrClose(): Boolean {
     if (state == State.SAVING) return false
     val activeRecorder = recorder
@@ -184,7 +199,7 @@ internal class QuickCaptureAudioSession(
 
     discardRequested = true
     saveWhenReady = false
-    keepTextAfterCancel = title.isNotBlank()
+    keepTextAfterCancel = title.isNotBlank() || note.isNotBlank()
     if (readyDraft != null) {
       draft = null
       discardAudio(readyDraft)
@@ -204,9 +219,8 @@ internal class QuickCaptureAudioSession(
     ownerCleared = true
     observer = null
     observerToken = null
-    // noHistory may clear the Activity after Home/onStop. That is an
-    // interruption, not explicit Cancel: let the retained callbacks finish the
-    // same stop/publish sequence even though no UI owner remains.
+
+
     when (state) {
       State.PERMISSION -> {
         activePermissionRequestId = null
@@ -282,7 +296,7 @@ internal class QuickCaptureAudioSession(
   }
 }
 
-/** Activity-local permission delivery state with an explicit STARTED gate. */
+
 internal class QuickCapturePermissionOwner {
   private var requestId: Long? = null
   private var started = false
@@ -311,25 +325,24 @@ internal class QuickCapturePermissionOwner {
   }
 }
 
-/**
- * A noHistory Activity loses its ViewModelStore after Home. Retain only its
- * small in-process session so a failed publication remains reachable on the
- * next native quick-capture open; terminal sessions remove themselves.
- */
+
 internal object QuickCaptureAudioSessionStore {
-  private var retained: QuickCaptureAudioSession? = null
+  private val retained = mutableMapOf<String, QuickCaptureAudioSession>()
 
   @Synchronized
-  fun acquire(factory: () -> QuickCaptureAudioSession): QuickCaptureAudioSession =
-    retained ?: factory().also { retained = it }
+  fun acquire(owner: String = "standalone", factory: () -> QuickCaptureAudioSession): QuickCaptureAudioSession =
+    retained.getOrPut(owner, factory)
 
   @Synchronized
   fun release(session: QuickCaptureAudioSession) {
-    if (retained === session) retained = null
+    retained.entries.removeAll { it.value === session }
   }
 
   @Synchronized
+  fun activeIds(): Set<String> = retained.values.flatMap { it.activeIds }.toSet()
+
+  @Synchronized
   fun clearForTests() {
-    retained = null
+    retained.clear()
   }
 }

@@ -6,7 +6,7 @@ import { useUiStore } from '../store/ui-store';
 
 export const isUpNoteHref = (href: string): boolean => /^upnote:\/\//i.test(href);
 
-/** An explicit click only; never normalize or decode an app's URI. */
+
 export async function openExternalLink(href: string, surface: 'markdown' | 'attachment'): Promise<void> {
     if (isSandboxMode()) throw new Error('Unavailable in sandbox.');
     const upnote = isUpNoteHref(href);
@@ -16,21 +16,21 @@ export async function openExternalLink(href: string, surface: 'markdown' | 'atta
                 await open(href);
                 if (upnote) void logInfo('UpNote link handed to the OS', {
                     scope: 'links', force: true,
-                    extra: { releaseCheck: 'v1.3.4/upnote-links', outcome: 'opened', surface, scheme: 'upnote' },
+                    extra: { outcome: 'opened', surface, scheme: 'upnote' },
                 });
                 return;
             } catch (error) {
-                // A browser fallback cannot establish whether the external app exists.
+
                 if (upnote) throw error;
             }
         }
-        // With noopener browsers can return null even after opening the target.
-        // Browser custom-protocol handoffs also have no acceptance acknowledgement.
+
+
         window.open(href, '_blank', 'noopener,noreferrer');
     } catch (error) {
         if (upnote) void logWarn('UpNote link handoff failed', {
             scope: 'links', force: true,
-            extra: { releaseCheck: 'v1.3.4/upnote-links', outcome: 'failed', surface, scheme: 'upnote' },
+            extra: { outcome: 'failed', surface, scheme: 'upnote' },
         });
         throw error;
     }

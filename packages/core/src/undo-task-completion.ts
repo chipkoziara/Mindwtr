@@ -1,14 +1,14 @@
 import { normalizeFocusTaskLimit } from './focus-utils';
 import { formatI18nTemplate, translateWithFallback } from './i18n';
+import { logInfo } from './logger';
 import { useTaskStore } from './store';
+import { logStaleWriteRefused } from './store-latest-updates';
+import { runStoreCommand } from './store-write-gate';
 import type { Task, TaskStatus } from './types';
 
 type TranslateFn = (key: string) => string;
 
-// One copy of the completion/move toast text for every surface that completes a
-// task on either platform: keyboard scopes, the row's own done button, the status
-// chord, mobile search. The copies had already drifted, one of them untranslated.
-// The single/double brace split follows the keys as they already ship.
+
 export function formatTaskMarkedDoneMessage(t: TranslateFn, title: string): string {
     return formatI18nTemplate(translateWithFallback(t, 'task.markedDone', '{title} marked Done'), { title });
 }
@@ -20,15 +20,42 @@ export function formatTaskMovedMessage(t: TranslateFn, title: string, status: Ta
     });
 }
 
-// Completing a task force-clears its Today star (applyTaskUpdates), so
-// undoing a completion must restore the star along with the status. The star
-// only comes back while the focus cap has room — same rule as starring by hand.
-export async function undoTaskCompletion(
+const STALE_RESTORE = 'STALE_REVISION: The task changed on another device after this action; it was not undone';
+
+
+const changedElsewhere = (taskId: string): boolean => {
+    const state = useTaskStore.getState();
+    const task = state._tasksById.get(taskId);
+    const deviceId = state.settings.deviceId;
+    const changed = Boolean(task?.revBy && deviceId && task.revBy !== deviceId);
+    if (changed) logStaleWriteRefused('undo-restore');
+    return changed;
+};
+
+
+export function restoreTaskSnapshot(taskId: string, restoreUpdates: Partial<Task>) {
+    return runStoreCommand(async () => (changedElsewhere(taskId)
+        ? { success: false, error: STALE_RESTORE }
+        : useTaskStore.getState().updateTask(taskId, restoreUpdates)));
+}
+
+
+export function undoTaskCompletion(
     taskId: string,
     previousStatus: TaskStatus,
     wasFocusedToday: boolean,
     options: { restoreUpdates?: Partial<Task> } = {},
 ): Promise<void> {
+    return runStoreCommand(() => undoTaskCompletionNow(taskId, previousStatus, wasFocusedToday, options));
+}
+
+async function undoTaskCompletionNow(
+    taskId: string,
+    previousStatus: TaskStatus,
+    wasFocusedToday: boolean,
+    options: { restoreUpdates?: Partial<Task> },
+): Promise<void> {
+    if (options.restoreUpdates && changedElsewhere(taskId)) throw new Error(STALE_RESTORE);
     const state = useTaskStore.getState();
     const completedTask = state._allTasks.find((task) => task.id === taskId);
     const recurrence = completedTask?.recurrence;
@@ -48,7 +75,15 @@ export async function undoTaskCompletion(
         ))
         : undefined;
 
-    if (generatedOccurrence) {
+
+    const editedOccurrence = Boolean(generatedOccurrence && generatedOccurrence.updatedAt !== generatedOccurrence.createdAt);
+    if (editedOccurrence) {
+        logInfo('Completion Undo kept an edited next occurrence', {
+            scope: 'undo', force: true, context: { releaseCheck: 'v1.3.8/undo-keeps-edited-occurrence' },
+        });
+    }
+
+    if (generatedOccurrence && !editedOccurrence) {
         const deleteResult = await Promise.resolve(state.deleteTask(generatedOccurrence.id));
         if (!deleteResult.success) {
             throw new Error(deleteResult.error || 'Failed to remove recurring follow-up');
@@ -69,7 +104,7 @@ export async function undoTaskCompletion(
         }))
         : await Promise.resolve(state.moveTask(taskId, previousStatus));
     if (!moveResult.success) {
-        if (generatedOccurrence) {
+        if (generatedOccurrence && !editedOccurrence) {
             await Promise.resolve(useTaskStore.getState().restoreTask(generatedOccurrence.id));
         }
         throw new Error(moveResult.error || 'Failed to restore task status');

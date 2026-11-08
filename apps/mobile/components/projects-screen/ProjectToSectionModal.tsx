@@ -1,9 +1,10 @@
+import { getProjectAccentColor } from '@mindwtr/core';
 import React from 'react';
 import { Modal, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import {
+    createProjectToSectionPreviewer,
     formatI18nTemplate,
     prepareProjectToSection,
-    previewProjectToSection,
     tFallback,
     useTaskStore,
     type PreparedProjectToSection,
@@ -42,9 +43,16 @@ export function ProjectToSectionModal({ visible, source, projects, onClose, onSu
         setRetryOnly(false);
         setError(null);
     }, [visible, source?.id, source?.title]);
-    const preview = source && destinationId
-        ? previewProjectToSection(useTaskStore.getState(), source.id, destinationId)
-        : null;
+
+    const { _allProjects, _allSections, _allTasks } = useTaskStore.getState();
+    const sourceId = source?.id;
+    const previewDestination = React.useMemo(() => sourceId
+        ? createProjectToSectionPreviewer({ _allProjects, _allSections, _allTasks }, sourceId)
+        : null, [_allProjects, _allSections, _allTasks, sourceId]);
+    const destinations = React.useMemo(() => previewDestination
+        ? projects.filter((project) => previewDestination(project.id).ok)
+        : [], [projects, previewDestination]);
+    const preview = previewDestination && destinationId ? previewDestination(destinationId) : null;
     const shownPreview: ProjectToSectionPreview | null = prepared?.preview ?? (preview?.ok ? preview : null);
     const destination = prepared?.destination ?? projects.find((project) => project.id === destinationId);
     const sourceForSummary = prepared?.source.before ?? source;
@@ -84,9 +92,10 @@ export function ProjectToSectionModal({ visible, source, projects, onClose, onSu
             <View style={[styles.linkModalCard, { backgroundColor: tc.cardBg, borderColor: tc.border, maxHeight: '85%' }]}>
                 <Text accessibilityRole="header" style={[styles.linkModalTitle, { color: tc.text }]}>{tFallback(t, 'projects.convertToSection', 'Convert to section…')}</Text>
                 <ScrollView keyboardShouldPersistTaps="handled">
+                    {sourceForSummary?.isSequential && <Text style={{ color: tc.secondaryText }}>{tFallback(t, 'projects.convertBlocked.destination-section-sequence', 'Choose a destination set to Sequential → Within sections. The new section keeps its task sequence; other sections keep progressing independently.')}</Text>}
                     {!prepared ? <>
                         <Text style={{ color: tc.text, marginBottom: 8 }}>{tFallback(t, 'projects.convertDestination', 'Destination project')}</Text>
-                        {projects.filter((project) => source && previewProjectToSection(useTaskStore.getState(), source.id, project.id).ok).map((project) =>
+                        {destinations.map((project) =>
                             <TouchableOpacity key={project.id} accessibilityRole="radio" accessibilityState={{ selected: destinationId === project.id }} onPress={() => { setDestinationId(project.id); setError(null); }} style={{ paddingVertical: 10 }}>
                                 <Text style={{ color: destinationId === project.id ? tc.tint : tc.text }}>{project.title}</Text>
                             </TouchableOpacity>)}
@@ -103,7 +112,7 @@ export function ProjectToSectionModal({ visible, source, projects, onClose, onSu
                         {prepared && <Text style={{ color: tc.text }}>{formatI18nTemplate(tFallback(t, 'projects.convertNamedSection', 'New section: {{name}}'), { name: prepared.section.title })}</Text>}
                         {sourceForSummary?.supportNotes ? <Text style={{ color: tc.secondaryText }}>{tFallback(t, 'projects.convertNotes', 'Project notes become section notes.')}</Text> : null}
                         <Text style={{ color: tc.secondaryText }}>{formatI18nTemplate(tFallback(t, 'projects.convertArea', 'Moved tasks use the destination Area: {{area}}.'), { area: destinationArea?.name ?? tFallback(t, 'projects.noArea', 'No Area') })}</Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}><View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: destinationArea?.color ?? destination?.color, borderColor: tc.border, borderWidth: 1 }} /><Text style={{ color: tc.secondaryText }}>{tFallback(t, 'projects.convertDestinationColor', 'Section follows the destination color.')}</Text></View>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}><View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: destination ? getProjectAccentColor(destination, new Map(destinationArea ? [[destinationArea.id, destinationArea]] : [])) : undefined, borderColor: tc.border, borderWidth: 1 }} /><Text style={{ color: tc.secondaryText }}>{tFallback(t, 'projects.convertDestinationColor', 'Section follows the destination color.')}</Text></View>
                         <Text style={{ color: tc.secondaryText }}>{tFallback(t, 'projects.convertColor', 'The source project color is not carried to the section.')}</Text>
                         <Text style={{ color: tc.secondaryText }}>{tFallback(t, 'projects.convertSettings', 'The new section uses the destination project’s settings.')}</Text>
                         <Text style={{ color: tc.secondaryText }}>{tFallback(t, 'projects.convertTrash', 'The source project moves to Trash. Already-deleted tasks stay in Trash.')}</Text>

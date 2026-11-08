@@ -1,8 +1,8 @@
 use crate::storage::{
     ensure_data_file, load_data_snapshot, mutate_project_rows_with_retries,
-    mutate_task_rows_with_retries, ProjectMutationReadScope, ProjectMutationRows,
-    TaskMutationReadScope, PROJECT_MUTATION_NEXT_ORDER_KEY, TASK_MUTATION_FOCUSED_COUNT_KEY,
-    TASK_MUTATION_PROJECT_NEXT_ORDERS_KEY,
+    mutate_task_rows_with_receipt_retries, mutate_task_rows_with_retries, ProjectMutationReadScope,
+    ProjectMutationRows, TaskCreateReceipt, TaskMutationReadScope, PROJECT_MUTATION_NEXT_ORDER_KEY,
+    TASK_MUTATION_FOCUSED_COUNT_KEY, TASK_MUTATION_PROJECT_NEXT_ORDERS_KEY,
 };
 use crate::{
     get_config_path, get_secrets_path, lock_config_read_modify_write, read_config,
@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
-use time::{Date, Month, OffsetDateTime};
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime};
 
 const LOCAL_API_HOST: &str = "127.0.0.1";
 pub(crate) const DEFAULT_LOCAL_API_PORT: u16 = 3456;
@@ -28,13 +28,9 @@ const MIN_LOCAL_API_PORT: u16 = 1024;
 const MAX_LOCAL_API_PORT: u16 = u16::MAX;
 const REQUEST_HEADER_LIMIT_BYTES: usize = 16 * 1024;
 const REQUEST_BODY_LIMIT_BYTES: usize = 1_000_000;
-// Generous for one desktop user's local integrations (a few concurrent
-// MCP/automation clients), small enough that an unbounded slow-drip flood
-// can't pin the whole thread pool (R-04).
+
 const MAX_LOCAL_API_CONNECTIONS: usize = 32;
-// Bounds total per-request wall time across every read, not just a single
-// read() syscall the way set_read_timeout does - closes the slow-drip gap
-// where a peer sends a few bytes just under that timeout, forever (R-04).
+
 const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 const LOCAL_API_TOKEN_BYTES: usize = 32;
 const LOCAL_API_REV_BY: &str = "desktop-local-api";
@@ -97,9 +93,6 @@ impl Drop for LocalApiHandle {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(join) = self.join.take() {
-            // The accept loop is nonblocking; a rejected peer's response has a
-            // five-second write timeout. Never let optional-server cleanup
-            // prevent the desktop from exiting even if the loop panics/stalls.
             let deadline = Instant::now() + Duration::from_secs(6);
             while !join.is_finished() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(10));
@@ -138,8 +131,7 @@ impl LocalApiAccess {
         write_lock: &'a Mutex<()>,
     ) -> Result<std::sync::MutexGuard<'a, ()>, String> {
         let guard = lock_recovering(write_lock);
-        // A request may have queued before stop/rotation. Re-check after it
-        // acquires the shared mutation lock, immediately before storage.
+
         self.ensure_write()?;
         Ok(guard)
     }
@@ -157,10 +149,6 @@ pub(crate) struct LocalApiServerState {
     write_lock: Arc<Mutex<()>>,
 }
 
-/// Poison-recovering lock. A panic in one request thread must not permanently 500 every
-/// future write while reads keep working: the write lock is a `Mutex<()>` (no state a panic
-/// could half-mutate) and the runtime holds two `Option`s that are only ever replaced
-/// wholesale. Same shape as `config.rs`'s `lock_dropbox_credential_state`.
 fn lock_recovering<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -271,13 +259,6 @@ fn read_local_api_config(app: &tauri::AppHandle) -> LocalApiConfig {
     }
 }
 
-// Sole chokepoint for local-API config writes (ensure_local_api_token and
-// set_local_api_server_config both route through here) — one held lock
-// across the whole read+mutate+write closes the race now that callers run
-// off the main thread (B2): two concurrent writers here (or in
-// clear_sync_path/set_desktop_rendering_config, which share the lock) could
-// otherwise each read the same base config and the second write clobbers the
-// first's unrelated field changes.
 fn write_local_api_config(app: &tauri::AppHandle, next: LocalApiConfig) -> Result<(), String> {
     let _config_guard = lock_config_read_modify_write()?;
     let mut config: AppConfigToml = read_config(app);
@@ -321,15 +302,15 @@ pub(crate) fn start_mcp_listener(
     state: &LocalApiServerState,
     port: u16,
     token: String,
-    allow_write: bool,
+    permissions: crate::mcp_server::McpPermissions,
 ) -> Result<LocalApiHandle, String> {
     start_runtime_with_access(
         app,
         port,
         token,
         state.write_lock.clone(),
-        allow_write,
-        true,
+        permissions.any_write(),
+        Some(permissions),
     )
 }
 
@@ -339,7 +320,7 @@ fn start_runtime(
     token: String,
     write_lock: Arc<Mutex<()>>,
 ) -> Result<LocalApiHandle, String> {
-    start_runtime_with_access(app, port, token, write_lock, true, false)
+    start_runtime_with_access(app, port, token, write_lock, true, None)
 }
 
 fn start_runtime_with_access(
@@ -348,14 +329,19 @@ fn start_runtime_with_access(
     token: String,
     write_lock: Arc<Mutex<()>>,
     allow_write: bool,
-    mcp: bool,
+    mcp_permissions: Option<crate::mcp_server::McpPermissions>,
 ) -> Result<LocalApiHandle, String> {
     ensure_data_file(&app)?;
     start_http_listener(port, allow_write, move |access, port, request| {
-        if mcp {
-            crate::mcp_server::handle_mcp_request(&token, access, port, request, |operation| {
-                execute_operation(&app, &write_lock, access, operation)
-            })
+        if let Some(permissions) = mcp_permissions {
+            crate::mcp_server::handle_mcp_request(
+                &token,
+                access,
+                permissions,
+                port,
+                request,
+                |operation| execute_operation(&app, &write_lock, access, operation),
+            )
         } else {
             handle_api_request(&app, &token, &write_lock, access, request)
         }
@@ -533,9 +519,6 @@ pub(crate) fn set_local_api_server_config(
     Ok(status_from_runtime(config, &runtime))
 }
 
-// Decrements the shared counter on drop, so a panic inside handle_connection
-// (unwinding through this guard) can't leak a permit the way a plain
-// fetch_sub call at the end of the function would (R-04).
 struct ConnectionSlotGuard(Arc<AtomicUsize>);
 
 impl Drop for ConnectionSlotGuard {
@@ -544,13 +527,6 @@ impl Drop for ConnectionSlotGuard {
     }
 }
 
-// Lifted out of the accept loop so the cap can be exercised with a real
-// loopback socket in tests, without a tauri::AppHandle (R-04, same pattern as
-// apply_task_action). The accept loop is the only incrementer (this function
-// only ever runs on that one thread), so a plain load-then-add has no TOCTOU
-// window that could let the count exceed the cap - a concurrent decrement
-// from a finishing handler can only make a borderline request wait, never
-// let the count overshoot.
 fn accept_or_reject(
     mut stream: TcpStream,
     active_connections: &Arc<AtomicUsize>,
@@ -572,6 +548,13 @@ fn handle_connection(
     handler: &impl Fn(&LocalApiAccess, u16, ApiRequest) -> ApiResponse,
     mut stream: TcpStream,
 ) {
+    if let Err(error) = stream.set_nonblocking(false) {
+        log::warn!(
+            "Local HTTP connection setup failed stage=blocking errorKind={:?}",
+            error.kind()
+        );
+        return;
+    }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let deadline = Instant::now() + REQUEST_DEADLINE;
     let response = match read_request(&mut stream, deadline) {
@@ -582,9 +565,6 @@ fn handle_connection(
     let _ = write_response(&mut stream, response);
 }
 
-// Generic over Read (R-05) so tests can drive it with an in-memory reader
-// instead of a real socket - TcpStream: Read, so the one call site in
-// handle_connection is unchanged.
 fn read_request(stream: &mut impl Read, deadline: Instant) -> Result<Option<ApiRequest>, String> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut temp = [0_u8; 1024];
@@ -703,16 +683,22 @@ fn parse_request_target(target: &str) -> (String, HashMap<String, String>) {
 }
 
 fn write_response(stream: &mut TcpStream, response: ApiResponse) -> Result<(), String> {
-    // Without this, write_all against a client that never reads its socket
-    // buffer (or a peer that vanished) blocks forever once the buffer fills.
-    // The shared write path for both handle_connection's real response and
-    // accept_or_reject's 503 rejection - that second one runs synchronously
-    // on the accept loop's own thread, so an unbounded block there would
-    // stop the server from accepting any connection at all, not just pin one
-    // of the capped slots (I3).
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let raw = http_response(&response);
-    stream.write_all(raw.as_bytes()).map_err(|e| e.to_string())
+    stream.write_all(raw.as_bytes()).map_err(|error| {
+        log::warn!(
+            "Local HTTP response write failed errorKind={:?}",
+            error.kind()
+        );
+        error.to_string()
+    })?;
+    if raw.len() >= 256 * 1024 {
+        log::info!(
+            "Local HTTP large response completed extra.releaseCheck=v1.3.8/local-api-large-response outcome=complete bytes={}",
+            raw.len()
+        );
+    }
+    Ok(())
 }
 
 fn http_response(response: &ApiResponse) -> String {
@@ -729,6 +715,7 @@ fn http_response(response: &ApiResponse) -> String {
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        412 => "Precondition Failed",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
         _ => "OK",
@@ -738,8 +725,15 @@ fn http_response(response: &ApiResponse) -> String {
     } else {
         serde_json::to_string_pretty(&response.body).unwrap_or_else(|_| "{}".to_string())
     };
+    let etag = response
+        .body
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|version| valid_task_version(version))
+        .map(|version| format!("ETag: \"{version}\"\r\n"))
+        .unwrap_or_default();
     format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\n{etag}Content-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response.status,
         status_text,
         body.len(),
@@ -754,11 +748,24 @@ fn handle_api_request(
     access: &LocalApiAccess,
     request: ApiRequest,
 ) -> ApiResponse {
+    handle_api_operation(token, access, request, |operation| {
+        execute_operation(app, write_lock, access, operation)
+    })
+}
+
+fn handle_api_operation(
+    token: &str,
+    access: &LocalApiAccess,
+    request: ApiRequest,
+    execute: impl FnOnce(LocalOperation) -> Result<Value, String>,
+) -> ApiResponse {
     if let Some(response) = authorize_api_request(&request, token, access) {
         return response;
     }
 
-    match route_api_request(app, write_lock, access, request) {
+    match route_api_operation(request, |operation| {
+        execute(operation.bind_credential(token))
+    }) {
         Ok(response) => response,
         Err(error) => api_error_response(error),
     }
@@ -786,11 +793,6 @@ fn authorize_api_request(
     None
 }
 
-// Constant-time over fixed-length digests rather than the raw header value:
-// loopback-only with a random token keeps the real-world severity low, but a
-// bare `==` still leaks the token length and a byte-by-byte early-out, so hash
-// both sides first (like apps/cloud/src/server-auth.ts's timingSafeEqual over
-// SHA-256 digests) and compare with no short-circuit.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -821,6 +823,23 @@ pub(crate) fn is_request_authorized(request: &ApiRequest, token: &str) -> bool {
 }
 
 pub(crate) fn api_error_response(error: String) -> ApiResponse {
+    if let Some((status, message)) = match error.as_str() {
+        "task_version_conflict" => Some((412, "Task version does not match")),
+        "idempotency_conflict" => Some((
+            409,
+            "Idempotency token was already used with a different request",
+        )),
+        "idempotency_capacity" => Some((
+            409,
+            "Idempotency receipt capacity reached; retry after receipts expire",
+        )),
+        _ => None,
+    } {
+        return ApiResponse {
+            status,
+            body: json!({"error": message, "code": error}),
+        };
+    }
     if error == RECURRENCE_REQUIRES_APP {
         return recurrence_completion_refusal_response();
     }
@@ -836,7 +855,11 @@ pub(crate) fn api_error_response(error: String) -> ApiResponse {
     ) {
         return ApiResponse::error(404, error);
     }
-    if error.starts_with("Task status conflict:") || error.starts_with("Project update conflict:") {
+    if error.starts_with("Task status conflict:")
+        || error.starts_with("Project update conflict:")
+        || error.starts_with("Area update conflict:")
+        || error.starts_with("Focus limit of ")
+    {
         return ApiResponse::error(409, error);
     }
     if error.starts_with("Invalid ")
@@ -850,8 +873,135 @@ pub(crate) fn api_error_response(error: String) -> ApiResponse {
     ApiResponse::error(500, error)
 }
 
-/// Validated transport adapters invoke these operations directly. Both endpoints
-/// retain the same storage transactions, mutation lock, and durable responses.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TaskMatchCondition {
+    Exists,
+    Versions(Vec<String>),
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut fields = object.iter().collect::<Vec<_>>();
+            fields.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            Value::Object(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| (name.clone(), canonical_json(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn json_digest(value: &Value) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(canonical_json(value).to_string().as_bytes())
+    )
+}
+
+pub(crate) fn task_version(task: &Value) -> String {
+    format!("sha256-{}", json_digest(task))
+}
+
+pub(crate) fn valid_task_version(version: &str) -> bool {
+    version.strip_prefix("sha256-").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+pub(crate) fn task_response(task: Value) -> Value {
+    json!({"version": task_version(&task), "task": task})
+}
+
+pub(crate) fn valid_task_response(response: &Value) -> bool {
+    let Some(task) = response.get("task").filter(|task| task.is_object()) else {
+        return false;
+    };
+    ["id", "title", "status", "createdAt", "updatedAt", "revBy"]
+        .iter()
+        .all(|field| {
+            task.get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+        && task
+            .get("rev")
+            .and_then(Value::as_i64)
+            .is_some_and(|rev| rev > 0)
+        && response.get("version").and_then(Value::as_str) == Some(task_version(task).as_str())
+}
+
+pub(crate) fn create_receipt(token: &str, payload: &Value) -> Result<TaskCreateReceipt, String> {
+    if token.is_empty()
+        || token.len() > 128
+        || !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err("Invalid Idempotency-Key; expected 1..128 visible ASCII characters".into());
+    }
+    Ok(TaskCreateReceipt {
+        credential_digest: None,
+        request_token: token.into(),
+        fingerprint: json_digest(payload),
+    })
+}
+
+fn parse_if_match(header: &str) -> Result<TaskMatchCondition, String> {
+    let invalid = || "Invalid If-Match header".to_string();
+    let header = header.trim_matches([' ', '\t']);
+    if header == "*" {
+        return Ok(TaskMatchCondition::Exists);
+    }
+    let mut remaining = header;
+    let mut versions = Vec::new();
+    loop {
+        let weak = remaining.starts_with("W/");
+        if weak {
+            remaining = &remaining[2..];
+        }
+        remaining = remaining.strip_prefix('"').ok_or_else(invalid)?;
+        let end = remaining.find('"').ok_or_else(invalid)?;
+        let opaque = &remaining[..end];
+        if !opaque
+            .bytes()
+            .all(|byte| byte == 0x21 || (0x23..=0x7e).contains(&byte))
+        {
+            return Err(invalid());
+        }
+        if !weak {
+            versions.push(opaque.to_string());
+        }
+        remaining = remaining[end + 1..].trim_start_matches([' ', '\t']);
+        if remaining.is_empty() {
+            break;
+        }
+        remaining = remaining
+            .strip_prefix(',')
+            .ok_or_else(invalid)?
+            .trim_start_matches([' ', '\t']);
+    }
+    Ok(TaskMatchCondition::Versions(versions))
+}
+
+fn ensure_task_version(
+    data: &Value,
+    id: &str,
+    condition: &TaskMatchCondition,
+) -> Result<(), String> {
+    let task = find_task(data, id).ok_or("task_version_conflict")?;
+    if matches!(condition, TaskMatchCondition::Versions(versions) if !versions.contains(&task_version(&task)))
+    {
+        return Err("task_version_conflict".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LocalOperation {
     Health,
@@ -869,9 +1019,23 @@ pub(crate) enum LocalOperation {
         restore: bool,
     },
     ListAreas,
+    GetArea(String),
+    PatchArea {
+        id: String,
+        body: Map<String, Value>,
+    },
     Search(String),
     GetTask(String),
     CreateTask(Map<String, Value>),
+    CreateTaskWithReceipt {
+        body: Map<String, Value>,
+        receipt: TaskCreateReceipt,
+    },
+    ConditionalPatchTask {
+        id: String,
+        body: Map<String, Value>,
+        condition: TaskMatchCondition,
+    },
     PatchTask {
         id: String,
         body: Map<String, Value>,
@@ -884,13 +1048,24 @@ pub(crate) enum LocalOperation {
 }
 
 impl LocalOperation {
+    pub(crate) fn bind_credential(mut self, credential: &str) -> Self {
+        if let Self::CreateTaskWithReceipt { receipt, .. } = &mut self {
+            receipt.credential_digest =
+                Some(format!("{:x}", Sha256::digest(credential.as_bytes())));
+        }
+        self
+    }
+
     pub(crate) fn writes(&self) -> bool {
         matches!(
             self,
             Self::CreateProject(_)
                 | Self::PatchProject { .. }
+                | Self::PatchArea { .. }
                 | Self::ProjectLifecycle { .. }
                 | Self::CreateTask(_)
+                | Self::CreateTaskWithReceipt { .. }
+                | Self::ConditionalPatchTask { .. }
                 | Self::PatchTask { .. }
                 | Self::DeleteTask(_)
                 | Self::TaskAction { .. }
@@ -901,10 +1076,16 @@ impl LocalOperation {
 pub(crate) fn operation_from_api_request(
     request: &ApiRequest,
 ) -> Result<Option<LocalOperation>, String> {
-    let segments = path_segments(&request.path);
+    let path = request
+        .path
+        .strip_prefix("/v1/tasks")
+        .filter(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        .map(|suffix| format!("/tasks{suffix}"))
+        .unwrap_or_else(|| request.path.clone());
+    let segments = path_segments(&path);
     let id = || segments[1].clone();
     let body = || parse_body_object(&request.body);
-    let operation = match (request.method.as_str(), request.path.as_str()) {
+    let operation = match (request.method.as_str(), path.as_str()) {
         ("GET", "/health") => LocalOperation::Health,
         ("GET", "/tasks") => LocalOperation::ListTasks(request.query.clone()),
         ("GET", "/projects") => LocalOperation::ListProjects,
@@ -912,13 +1093,37 @@ pub(crate) fn operation_from_api_request(
         ("GET", "/search") => {
             LocalOperation::Search(request.query.get("query").cloned().unwrap_or_default())
         }
-        ("POST", "/tasks") => LocalOperation::CreateTask(body()?),
+        ("POST", "/tasks") => {
+            let body = body()?;
+            match request.headers.get("idempotency-key") {
+                Some(token) => LocalOperation::CreateTaskWithReceipt {
+                    receipt: create_receipt(token, &Value::Object(body.clone()))?,
+                    body,
+                },
+                None => LocalOperation::CreateTask(body),
+            }
+        }
         ("POST", "/projects") => LocalOperation::CreateProject(body()?),
-        (method, _) if segments.len() == 2 && segments[0] == "tasks" => match method {
-            "GET" => LocalOperation::GetTask(id()),
-            "PATCH" => LocalOperation::PatchTask {
+        (method, _) if segments.len() == 2 && segments[0] == "areas" => match method {
+            "GET" => LocalOperation::GetArea(id()),
+            "PATCH" => LocalOperation::PatchArea {
                 id: id(),
                 body: body()?,
+            },
+            _ => return Ok(None),
+        },
+        (method, _) if segments.len() == 2 && segments[0] == "tasks" => match method {
+            "GET" => LocalOperation::GetTask(id()),
+            "PATCH" => match request.headers.get("if-match") {
+                Some(header) => LocalOperation::ConditionalPatchTask {
+                    id: id(),
+                    body: body()?,
+                    condition: parse_if_match(header)?,
+                },
+                None => LocalOperation::PatchTask {
+                    id: id(),
+                    body: body()?,
+                },
             },
             "DELETE" => LocalOperation::DeleteTask(id()),
             _ => return Ok(None),
@@ -958,24 +1163,24 @@ pub(crate) fn operation_from_api_request(
     Ok(Some(operation))
 }
 
-fn route_api_request(
-    app: &tauri::AppHandle,
-    write_lock: &Arc<Mutex<()>>,
-    access: &LocalApiAccess,
+fn route_api_operation(
     request: ApiRequest,
+    execute: impl FnOnce(LocalOperation) -> Result<Value, String>,
 ) -> Result<ApiResponse, String> {
     let Some(operation) = operation_from_api_request(&request)? else {
         return Ok(ApiResponse::error(404, "Not found"));
     };
     let created = matches!(
         operation,
-        LocalOperation::CreateTask(_) | LocalOperation::CreateProject(_)
+        LocalOperation::CreateTask(_)
+            | LocalOperation::CreateTaskWithReceipt { .. }
+            | LocalOperation::CreateProject(_)
     );
     let deleted = matches!(
         operation,
         LocalOperation::DeleteTask(_) | LocalOperation::ProjectLifecycle { restore: false, .. }
     );
-    let body = execute_operation(app, write_lock, access, operation)?;
+    let body = execute(operation)?;
     Ok(ApiResponse {
         status: if created { 201 } else { 200 },
         body: if deleted { json!({ "ok": true }) } else { body },
@@ -1078,6 +1283,7 @@ pub(crate) fn execute_operation(
                         projects: vec![project],
                         tasks,
                         sections,
+                        ..ProjectMutationRows::default()
                     },
                 ))
             })?;
@@ -1094,6 +1300,25 @@ pub(crate) fn execute_operation(
                 .collect::<Vec<_>>();
             return Ok(json!({ "areas": areas }));
         }
+        LocalOperation::GetArea(id) => {
+            let data = load_data_snapshot(app)?;
+            let area = live_project_area(&data, &id).ok_or("Area not found")?;
+            return Ok(json!({ "area": area }));
+        }
+        LocalOperation::PatchArea { id, body } => {
+            let _guard = access.lock_write(write_lock)?;
+            let (_, persisted) = mutate_project_rows_with_retries(
+                app,
+                ProjectMutationReadScope::area_update(&id),
+                |data| Ok(((), patch_area_in_data(data, &id, &body, &now_iso())?)),
+            )?;
+            log::info!(
+                "Desktop Local API area update persisted extra.releaseCheck=v1.3.5/local-api-area-update outcome=persisted"
+            );
+            let area =
+                live_project_area(&persisted, &id).ok_or("Area not found after persistence")?;
+            return Ok(json!({ "area": area }));
+        }
         LocalOperation::Search(query) => {
             let data = load_data_snapshot(app)?;
             return Ok(search_data(&data, &query));
@@ -1101,9 +1326,15 @@ pub(crate) fn execute_operation(
         LocalOperation::GetTask(id) => {
             let data = load_data_snapshot(app)?;
             let task = find_task(&data, &id).ok_or_else(|| "Task not found".to_string())?;
-            return Ok(json!({ "task": task }));
+            return Ok(task_response(task));
         }
-        LocalOperation::CreateTask(body) => {
+        operation @ (LocalOperation::CreateTask(_)
+        | LocalOperation::CreateTaskWithReceipt { .. }) => {
+            let (body, receipt) = match operation {
+                LocalOperation::CreateTask(body) => (body, None),
+                LocalOperation::CreateTaskWithReceipt { body, receipt } => (body, Some(receipt)),
+                _ => unreachable!(),
+            };
             let _guard = access.lock_write(write_lock)?;
             let props = body.get("props").and_then(Value::as_object);
             let scope = TaskMutationReadScope::create(
@@ -1122,45 +1353,78 @@ pub(crate) fn execute_operation(
                     == Some(true),
             );
             let operation = LocalOperation::CreateTask(body);
-            let (task_id, persisted) = mutate_task_rows_with_retries(app, scope, |data| {
-                mutate_task_operation(data, &operation)
-            })?;
-            let task = persisted_task(&persisted, &task_id)?;
+            let (response, persisted) =
+                mutate_task_rows_with_receipt_retries(app, scope, receipt.as_ref(), |data| {
+                    let (task_id, changed) = mutate_task_operation(data, &operation)?;
+                    Ok((task_response(persisted_task(data, &task_id)?), changed))
+                })?;
+            let response = if receipt.is_some() || persisted.is_null() {
+                response
+            } else {
+                let id = response["task"]["id"]
+                    .as_str()
+                    .ok_or("Task not found after persistence")?;
+                task_response(persisted_task(&persisted, id)?)
+            };
+            let task = response["task"].clone();
             let now = OffsetDateTime::now_utc();
-            if task.get("isFocusedToday").and_then(Value::as_bool) == Some(true)
-                && task
-                    .as_object()
-                    .is_some_and(|task| local_api_task_is_future_start(task, now))
+            if !persisted.is_null()
+                && task.get("isFocusedToday").and_then(Value::as_bool) == Some(true)
+                && task.as_object().is_some_and(|task| {
+                    local_api_task_is_future_start(task, now, &crate::local_query::local_wall)
+                })
             {
-                let count = local_api_focused_task_count(&persisted, now);
+                let count =
+                    local_api_focused_task_count(&persisted, now, &crate::local_query::local_wall);
                 log::info!(
                 "Desktop Local API scheduled Focus queued extra.releaseCheck=v1.3.3/local-api-scheduled-focus operation=create outcome=queued count={count}"
             );
             }
-            return Ok(json!({ "task": task }));
+            return Ok(response);
         }
-        LocalOperation::PatchTask { id, body } => {
+        operation @ (LocalOperation::PatchTask { .. }
+        | LocalOperation::ConditionalPatchTask { .. }) => {
+            let (id, body, condition) = match operation {
+                LocalOperation::PatchTask { id, body } => (id, body, None),
+                LocalOperation::ConditionalPatchTask {
+                    id,
+                    body,
+                    condition,
+                } => (id, body, Some(condition)),
+                _ => unreachable!(),
+            };
             let _guard = access.lock_write(write_lock)?;
             let is_triage = body.contains_key("status");
-            let scope = TaskMutationReadScope::patch(
-                &id,
-                body.get("projectId").and_then(Value::as_str),
-                body.get("sectionId").and_then(Value::as_str),
-                body.get("areaId").and_then(Value::as_str),
-            );
-            let operation = LocalOperation::PatchTask {
-                id: id.clone(),
-                body,
+            let scope = task_patch_read_scope(&id, &body);
+            let operation = match &condition {
+                Some(condition) => LocalOperation::ConditionalPatchTask {
+                    id: id.clone(),
+                    body,
+                    condition: condition.clone(),
+                },
+                None => LocalOperation::PatchTask {
+                    id: id.clone(),
+                    body,
+                },
             };
-            let (_, persisted) = mutate_task_rows_with_retries(app, scope, |data| {
-                mutate_task_operation(data, &operation)
+            let (changed, persisted) = mutate_task_rows_with_retries(app, scope, |data| {
+                let (_, changed) = mutate_task_operation(data, &operation)?;
+                Ok((!changed.is_empty(), changed))
             })?;
-            if is_triage {
+            if condition.is_some() || !changed {
+                let outcome = if changed {
+                    "conditional-write"
+                } else {
+                    "unchanged"
+                };
+                log::info!("Desktop Local API reliability completed extra.releaseCheck=v1.3.8/local-api-reliability outcome={outcome}");
+            }
+            if is_triage && changed {
                 log::info!(
                 "Desktop Local API task triage persisted extra.releaseCheck=v1.3.1/local-api-task-triage"
             );
             }
-            return Ok(json!({ "task": persisted_task(&persisted, &id)? }));
+            return Ok(task_response(persisted_task(&persisted, &id)?));
         }
         LocalOperation::DeleteTask(id) => {
             let _guard = access.lock_write(write_lock)?;
@@ -1217,9 +1481,25 @@ fn mutate_task_operation(
             ensure_array_mut(data, "tasks")?.push(task.clone());
             Ok((task_id, vec![task]))
         }
+        LocalOperation::ConditionalPatchTask {
+            id,
+            body,
+            condition,
+        } => {
+            ensure_task_version(data, id, condition)?;
+            mutate_task_operation(
+                data,
+                &LocalOperation::PatchTask {
+                    id: id.clone(),
+                    body: body.clone(),
+                },
+            )
+        }
         LocalOperation::PatchTask { id, body } => {
-            let task = patch_task_in_data(data, &id, &body)?;
-            Ok((id.clone(), vec![task]))
+            let before = find_task(data, id).ok_or("Task not found")?;
+            let task = patch_task_in_data(data, id, body)?;
+            let changed = if task == before { vec![] } else { vec![task] };
+            Ok((id.clone(), changed))
         }
         LocalOperation::DeleteTask(id) => {
             let device_id = device_id_from_data(data);
@@ -1234,7 +1514,14 @@ fn mutate_task_operation(
         }
         LocalOperation::TaskAction { id, action } => {
             let action = action.as_str();
-            if action == "complete" && recurrence_completion_refusal(data, &id).is_some() {
+            let now = now_iso();
+            if action == "complete" && recurrence_completion_refusal(data, &id, &now).is_some() {
+                if find_task(data, &id).is_some_and(|task| {
+                    task.as_object()
+                        .is_some_and(|task| recurrence_start_needs_catchup(task, &now))
+                }) {
+                    log::info!("Desktop Local API recurrence requires app extra.releaseCheck=v1.3.5/start-only-recurrence outcome=requires-app");
+                }
                 return Err(RECURRENCE_REQUIRES_APP.to_string());
             }
             let device_id = device_id_from_data(data);
@@ -1243,7 +1530,6 @@ fn mutate_task_operation(
             } else {
                 LiveContainers::default()
             };
-            let now = now_iso();
             let mut recurring_follow_up: Option<Map<String, Value>> = None;
             let task = update_task_in_data(data, &id, |task| {
                 let previous_status = task
@@ -1458,6 +1744,134 @@ fn live_project_area<'a>(data: &'a Value, area_id: &str) -> Option<&'a Value> {
     })
 }
 
+fn trim_area_name(name: &str) -> &str {
+    name.trim_matches(|character| {
+        matches!(character,
+        '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' |
+        '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' |
+        '\u{205f}' | '\u{3000}' | '\u{feff}')
+    })
+}
+
+fn patch_area_in_data(
+    data: &mut Value,
+    id: &str,
+    patch: &Map<String, Value>,
+    now: &str,
+) -> Result<ProjectMutationRows, String> {
+    let current = live_project_area(data, id).ok_or("Area not found")?.clone();
+    if patch.is_empty() {
+        return Err("Request patch must include at least one area field".to_string());
+    }
+    let mut sanitized = Map::new();
+    for (field, value) in patch {
+        let value = match field.as_str() {
+            "name" => {
+                let name = value
+                    .as_str()
+                    .map(trim_area_name)
+                    .filter(|name| !name.is_empty())
+                    .ok_or("Invalid area field: name")?;
+                Value::String(name.to_string())
+            }
+            "color" | "icon" if value.is_null() || value.is_string() => value.clone(),
+            "color" | "icon" => return Err(format!("Invalid area field: {field}")),
+            "order" => {
+                value
+                    .as_f64()
+                    .filter(|order| order.is_finite())
+                    .ok_or("Invalid area field: order")?;
+                value.clone()
+            }
+            _ => return Err(format!("Unsupported area field: {field}")),
+        };
+        sanitized.insert(field.clone(), value);
+    }
+    if let Some(name) = sanitized.get("name").and_then(Value::as_str) {
+        let normalized = name.to_lowercase();
+        if array_items(data, "areas").iter().any(|area| {
+            area.get("id").and_then(Value::as_str) != Some(id)
+                && !has_string_field(area, "deletedAt")
+                && area
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| trim_area_name(name).to_lowercase() == normalized)
+        }) {
+            return Err("Area update conflict: another live area has this name".to_string());
+        }
+    }
+    let name = sanitized
+        .get("name")
+        .or_else(|| current.get("name"))
+        .and_then(Value::as_str)
+        .ok_or("Invalid area name")?
+        .to_string();
+    let repaint = sanitized.contains_key("color");
+    let repair_title = repaint
+        || (sanitized.contains_key("name")
+            && name != trim_area_name(current["name"].as_str().unwrap_or_default()));
+    let color = sanitized
+        .get("color")
+        .and_then(Value::as_str)
+        .unwrap_or("#94a3b8");
+    let title = trim_area_name(&name);
+    let target_title = (!title.is_empty()).then_some(title);
+    let device_id = device_id_from_data(data);
+    let mut projects = Vec::new();
+    if repair_title {
+        for project in ensure_array_mut(data, "projects")? {
+            if project.get("areaId").and_then(Value::as_str) != Some(id) {
+                continue;
+            }
+            let wants_color = repaint
+                && project
+                    .get("colorOverride")
+                    .and_then(Value::as_str)
+                    .is_none()
+                && project.get("color").and_then(Value::as_str) != Some(color);
+            let wants_title = project.get("areaTitle").and_then(Value::as_str) != target_title;
+            if !wants_color && !wants_title {
+                continue;
+            }
+            let project = project.as_object_mut().ok_or("Invalid project")?;
+            if wants_color {
+                project.insert("color".to_string(), json!(color));
+            }
+            if wants_title {
+                if title.is_empty() {
+                    project.remove("areaTitle");
+                } else {
+                    project.insert("areaTitle".to_string(), json!(title));
+                }
+            }
+            project.insert("updatedAt".to_string(), json!(now));
+            bump_task_revision(project, &device_id);
+            projects.push(Value::Object(project.clone()));
+        }
+    }
+    let mut area = current.as_object().cloned().ok_or("Invalid area")?;
+    for (field, value) in sanitized {
+        if value.is_null() {
+            area.remove(&field);
+        } else {
+            area.insert(field, value);
+        }
+    }
+    area.insert("updatedAt".to_string(), json!(now));
+    bump_task_revision(&mut area, &device_id);
+    let area = Value::Object(area);
+    for item in ensure_array_mut(data, "areas")? {
+        if item.get("id").and_then(Value::as_str) == Some(id) {
+            *item = area.clone();
+        }
+    }
+    Ok(ProjectMutationRows {
+        areas: vec![area],
+        projects,
+        ..ProjectMutationRows::default()
+    })
+}
+
 pub(crate) fn sanitize_project_fields(
     fields: &Map<String, Value>,
     allow_title: bool,
@@ -1492,6 +1906,18 @@ pub(crate) fn sanitize_project_fields(
                         .ok_or_else(|| "Invalid project field: areaId".to_string())?;
                     Value::String(area_id.to_string())
                 }
+            }
+            "colorOverride" => {
+                if !value.is_null()
+                    && !value.as_str().is_some_and(|color| {
+                        color.len() == 7
+                            && color.starts_with('#')
+                            && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+                    })
+                {
+                    return Err("Invalid project field: colorOverride".to_string());
+                }
+                value.clone()
             }
             "color" => {
                 let color = value
@@ -1588,8 +2014,15 @@ fn create_project_from_body(
     project.insert(
         "color".to_string(),
         props
-            .get("color")
+            .get("colorOverride")
+            .filter(|value| value.is_string())
             .cloned()
+            .or_else(|| {
+                area.and_then(|area| area.get("color"))
+                    .filter(|value| value.is_string())
+                    .cloned()
+            })
+            .or_else(|| props.get("color").cloned())
             .unwrap_or_else(|| Value::String(DEFAULT_PROJECT_COLOR.to_string())),
     );
     project.insert(
@@ -1600,6 +2033,9 @@ fn create_project_from_body(
             .or_else(|| data.get(PROJECT_MUTATION_NEXT_ORDER_KEY).cloned())
             .unwrap_or_else(|| Value::Number(0.into())),
     );
+    if let Some(value) = props.get("colorOverride") {
+        project.insert("colorOverride".to_string(), value.clone());
+    }
     project.insert("tagIds".to_string(), Value::Array(Vec::new()));
     project.insert(
         "isSequential".to_string(),
@@ -2010,6 +2446,21 @@ pub(crate) fn patch_project_in_data(
             project.insert(key, value);
         }
     }
+    if patch.contains_key("areaId") || patch.contains_key("colorOverride") {
+        let color = project
+            .get("colorOverride")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                next_area_id
+                    .as_deref()
+                    .and_then(|id| live_project_area(data, id))
+                    .and_then(|area| area.get("color"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or(DEFAULT_PROJECT_COLOR)
+            .to_string();
+        project.insert("color".to_string(), json!(color));
+    }
     if area_changed && !patch.contains_key("order") {
         let order = data
             .get(PROJECT_MUTATION_NEXT_ORDER_KEY)
@@ -2066,9 +2517,6 @@ pub(crate) fn patch_project_in_data(
     Ok((Value::Object(project), changed_tasks, changed_sections))
 }
 
-/// Mirrors core project delete/restore: delete detaches live tasks instead of
-/// deleting them; restore only revives children from the same legacy cascade.
-/// Called on fresh transaction-scoped rows, never a stale whole-app snapshot.
 pub(crate) fn apply_project_delete_or_restore(
     data: &mut Value,
     project_id: &str,
@@ -2079,10 +2527,6 @@ pub(crate) fn apply_project_delete_or_restore(
     apply_project_delete_or_restore_at(data, project_id, restore, &now, &device_id)
 }
 
-/// The clock and device id are parameters so the shared core/Rust fixture
-/// (`packages/core/src/recurrence-local-api-parity.fixtures.json`, kind
-/// `project-action`) can pin both engines against the same frozen `now`, the
-/// way `apply_task_action` already is.
 fn apply_project_delete_or_restore_at(
     data: &mut Value,
     project_id: &str,
@@ -2117,6 +2561,14 @@ fn apply_project_delete_or_restore_at(
                 }
             }
         } else {
+            if project.get("areaId").and_then(Value::as_str).is_some() {
+                let color = project
+                    .get("colorOverride")
+                    .and_then(Value::as_str)
+                    .unwrap_or(DEFAULT_PROJECT_COLOR)
+                    .to_string();
+                project.insert("color".to_string(), json!(color));
+            }
             project.remove("areaId");
             project.remove("areaTitle");
         }
@@ -2203,13 +2655,11 @@ fn apply_project_delete_or_restore_at(
     Ok(changed)
 }
 
-/// Refuses `POST /tasks/{id}/complete` outright when the task's recurrence
-/// carries selectors this engine cannot compute (byDay/byMonthDay/rrule —
-/// see `recurrence_needs_core_engine`). A vanished recurring series is worse
-/// than a rejected request: nothing is read here except to decide, and the
-/// caller must not proceed to `update_task_in_data` when this returns `Some`,
-/// so the task is left completely untouched on disk.
-fn recurrence_completion_refusal(data: &Value, task_id: &str) -> Option<ApiResponse> {
+fn recurrence_completion_refusal(
+    data: &Value,
+    task_id: &str,
+    completed_at: &str,
+) -> Option<ApiResponse> {
     let task = find_task(data, task_id)?;
     let task_object = task.as_object()?;
     let previous_status = task_object
@@ -2219,7 +2669,10 @@ fn recurrence_completion_refusal(data: &Value, task_id: &str) -> Option<ApiRespo
     if !should_create_recurring_follow_up("complete", previous_status) {
         return None;
     }
-    if recurrence_rule(task_object).is_none() || !recurrence_needs_core_engine(task_object) {
+    if recurrence_rule(task_object).is_none()
+        || (!recurrence_needs_core_engine(task_object)
+            && !recurrence_start_needs_catchup(task_object, completed_at))
+    {
         return None;
     }
     Some(recurrence_completion_refusal_response())
@@ -2251,11 +2704,6 @@ where
     Ok(Value::Object(task_object.clone()))
 }
 
-/// Live (non-deleted, non-purged) project/section/area ids, snapshotted from
-/// the data file before a restore mutates it. A section only counts as live
-/// when its own owning project is also live, mirroring
-/// `sanitizeRestoredTaskContainerReferences`'s `sectionProjectId` check
-/// (store-tasks.ts) exactly.
 #[derive(Default)]
 struct LiveContainers {
     project_ids: std::collections::HashSet<String>,
@@ -2413,9 +2861,6 @@ fn finite_order_number(value: f64) -> Option<serde_json::Number> {
     serde_json::Number::from_f64(value)
 }
 
-/// Direct Rust port of `resolveTaskContainerHierarchy` (task-container-rules.ts):
-/// a section wins the project it lives under (or gets dropped if its project
-/// isn't live/doesn't match), and an area only survives when no project is set.
 struct ResolvedContainers {
     project_id: Option<String>,
     section_id: Option<String>,
@@ -2655,21 +3100,123 @@ fn reject_actionable_task_in_archived_project(
     Ok(())
 }
 
+fn task_patch_read_scope(task_id: &str, patch: &Map<String, Value>) -> TaskMutationReadScope {
+    TaskMutationReadScope::patch(
+        task_id,
+        patch.get("projectId").and_then(Value::as_str),
+        patch.get("sectionId").and_then(Value::as_str),
+        patch.get("areaId").and_then(Value::as_str),
+        patch.get("isFocusedToday").and_then(Value::as_bool) == Some(true)
+            || [
+                "startTime",
+                "relativeStartOffset",
+                "status",
+                "dueDate",
+                "reviewAt",
+                "recurrence",
+                "projectId",
+                "sectionId",
+                "order",
+                "orderNum",
+            ]
+            .iter()
+            .any(|field| patch.contains_key(*field)),
+    )
+}
+
 pub(crate) fn patch_task_in_data(
     data: &mut Value,
     task_id: &str,
     patch: &Map<String, Value>,
 ) -> Result<Value, String> {
+    patch_task_in_data_at(
+        data,
+        task_id,
+        patch,
+        OffsetDateTime::now_utc(),
+        &crate::local_query::local_wall,
+    )
+}
+
+fn patch_task_in_data_at(
+    data: &mut Value,
+    task_id: &str,
+    patch: &Map<String, Value>,
+    now: OffsetDateTime,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> Result<Value, String> {
     let device_id = device_id_from_data(data);
     let live_containers = LiveContainers::from_data(data);
+    let current = find_task(data, task_id).ok_or("Task not found")?;
+    let mut candidate = current.as_object().ok_or("Task is invalid")?.clone();
+    let was_counted = local_api_task_is_counted_as_focused(&candidate, now, local_wall);
+    let star_turning_on = patch.get("isFocusedToday").and_then(Value::as_bool) == Some(true)
+        && candidate.get("isFocusedToday").and_then(Value::as_bool) != Some(true);
+    apply_task_patch_with_containers(
+        &mut candidate,
+        patch,
+        &device_id,
+        &live_containers,
+        data.pointer("/settings/taskReminderDefault")
+            .and_then(Value::as_str)
+            == Some("skip"),
+    )?;
+    if star_turning_on {
+        if candidate.get("status").and_then(Value::as_str) == Some("inbox") {
+            candidate.insert("status".to_string(), Value::String("next".to_string()));
+            if !patch.contains_key("boardOrder") {
+                candidate.remove("boardOrder");
+            }
+        }
+        if candidate.get("status").and_then(Value::as_str) == Some("reference") {
+            normalize_created_reference_task(&mut candidate);
+        }
+        let future_start = local_api_task_is_future_start(&candidate, now, local_wall);
+        let queued = candidate.get("status").and_then(Value::as_str) == Some("next")
+            && has_non_empty_string(&candidate, "startTime")
+            && future_start;
+
+        if future_start
+            && !queued
+            && ["startTime", "dueDate", "reviewAt", "recurrence", "status"]
+                .iter()
+                .any(|field| patch.contains_key(*field))
+        {
+            candidate.insert("isFocusedToday".to_string(), Value::Bool(false));
+        }
+        if queued && !patch.contains_key("focusOrder") {
+            candidate.remove("focusOrder");
+        }
+    }
+    if !was_counted && local_api_task_is_counted_as_focused(&candidate, now, local_wall) {
+        let n = local_api_focus_task_limit(data);
+        if local_api_focused_task_count(data, now, local_wall) >= n {
+            log::warn!("Local API refused a Focus star over the limit extra.releaseCheck=v1.3.5/local-api-patch-focus-limit limit={n}");
+            return Err(format!("Focus limit of {n} reached"));
+        }
+    }
+    let mut meaningful_current = current.as_object().ok_or("Task is invalid")?.clone();
+    let mut meaningful_candidate = candidate.clone();
+    for field in ["rev", "revBy", "updatedAt"] {
+        meaningful_current.remove(field);
+        meaningful_candidate.remove(field);
+    }
+    for content in [&mut meaningful_current, &mut meaningful_candidate] {
+        if content.get("showFutureRecurrence").and_then(Value::as_bool) != Some(true)
+            || !content.contains_key("recurrence")
+        {
+            content.remove("showFutureRecurrence");
+        }
+    }
+    if meaningful_current == meaningful_candidate {
+        return Ok(current);
+    }
     update_task_in_data(data, task_id, |task| {
-        apply_task_patch_with_containers(task, patch, &device_id, &live_containers)
+        *task = candidate;
+        Ok(())
     })
 }
 
-/// Direct Rust port of `sanitizeRestoredTaskContainerReferences`
-/// (store-tasks.ts): a restored task never keeps a reference to a
-/// project/section/area that no longer exists.
 fn sanitize_restored_task_container_references(
     task: &mut Map<String, Value>,
     live: &LiveContainers,
@@ -2708,18 +3255,12 @@ fn sanitize_restored_task_container_references(
     set_or_remove_string(task, "areaId", resolved_area_id);
 }
 
-/// A completedAt value counts as set only if it's a non-empty string -
-/// mirrors core's `oldTask.completedAt || now` falsy fallback
-/// (applyTaskUpdates in store-helpers.ts) so complete's archived-correction
-/// branch and archive's own completedAt fallback use the same rule.
 fn has_non_empty_string(task: &Map<String, Value>, key: &str) -> bool {
     task.get(key)
         .and_then(Value::as_str)
         .is_some_and(|value| !value.is_empty())
 }
 
-// Cancellation is an archived outcome, never a completed occurrence. Keep this
-// boundary aligned with core's normalizeTaskLifecycleFields for native writes.
 fn normalize_local_task_lifecycle(
     task: &mut Map<String, Value>,
     now: &str,
@@ -2755,18 +3296,6 @@ fn normalize_local_task_lifecycle(
     }
 }
 
-/// The complete/archive/restore mutation lifted out of `route_api_request`'s
-/// closure (previously untestable without a `tauri::AppHandle`). Mirrors
-/// core's write-invariant home for tasks: `applyTaskUpdates` for
-/// complete/archive (composed after `normalizeTaskUpdate`'s boardOrder
-/// clearing, per the store's own `updateTask`), `sanitizeRestoredTaskContainerReferences`
-/// for restore. Returns the recurring follow-up task to insert alongside
-/// `task`, if the action spawns one; `task` is mutated in place with
-/// `updatedAt`/`rev`/`revBy` stamped, matching every write path in core
-/// (`mutateTasks`/`updateTask`) - except when the status isn't actually
-/// changing (complete on an already-done task, archive on an already-archived
-/// one), which is a full no-op: core's `statusChanged` gate means nothing in
-/// `applyTaskUpdates` would touch the task, so nothing here should either.
 fn apply_task_action(
     task: &mut Map<String, Value>,
     action: &str,
@@ -2791,21 +3320,14 @@ fn apply_task_action(
             let previous_task = task.clone();
             task.remove("cancelledAt");
             task.remove("archivedAt");
-            // archived -> done is a lifecycle correction, not a new
-            // completion: keep the existing completedAt (falling back to
-            // `now` only if it is somehow missing) instead of overwriting it,
-            // and never spawn a follow-up occurrence.
+
             let is_archive_correction = previous_status == "archived";
             task.insert("status".to_string(), Value::String("done".to_string()));
             if !is_archive_correction || !has_non_empty_string(task, "completedAt") {
                 task.insert("completedAt".to_string(), Value::String(now.to_string()));
             }
             task.insert("isFocusedToday".to_string(), Value::Bool(false));
-            // A manual Focus position only means something while starred;
-            // completing always unstars, so it must take focusOrder with it.
-            // boardOrder also resets on a status change unless the same
-            // patch sets it itself, which the server-triggered complete/
-            // archive actions never do (normalizeTaskUpdate's rule).
+
             task.remove("focusOrder");
             task.remove("boardOrder");
             if should_create_recurring_follow_up(action, previous_status) {
@@ -2828,9 +3350,6 @@ fn apply_task_action(
             task.remove("boardOrder");
         }
         "restore" => {
-            // Mirrors core's `restoreTask`: a purged task is the compacted
-            // tombstone of a permanent delete, so reviving it would resurrect
-            // an emptied row and sync it back to every device.
             if has_non_empty_string(task, "purgedAt") {
                 return Err("Task status conflict: purged task cannot be restored".to_string());
             }
@@ -2885,13 +3404,6 @@ fn bump_task_revision(task: &mut Map<String, Value>, device_id: &str) {
     task.insert("revBy".to_string(), Value::String(device_id.to_string()));
 }
 
-/// True when the recurrence carries selectors this fixed interval/anchor-day
-/// engine cannot compute: explicit weekdays, explicit month days, a raw
-/// RFC 5545 fragment (which may itself encode BYSETPOS or other selectors
-/// this engine never parses), or a `relativeStartOffset` (which core's
-/// `createNextRecurringTask` recomputes onto the follow-up's startTime -
-/// this engine doesn't carry it at all). Only `packages/core/src/recurrence.ts`
-/// understands these — the local API must refuse rather than guess a date.
 fn recurrence_needs_core_engine(task: &Map<String, Value>) -> bool {
     if task
         .get("relativeStartOffset")
@@ -2917,22 +3429,78 @@ fn recurrence_needs_core_engine(task: &Map<String, Value>) -> bool {
     has_by_day || has_by_month_day || has_rrule
 }
 
+fn recurrence_start_needs_catchup(task: &Map<String, Value>, completed_at: &str) -> bool {
+    if recurrence_strategy(task) == "fluid"
+        || has_non_empty_string(task, "dueDate")
+        || recurrence_count(task)
+            .is_some_and(|count| recurrence_completed_occurrences(task).unwrap_or(0) + 1 >= count)
+    {
+        return false;
+    }
+    let (Some(source), Some(rule)) = (
+        task.get("startTime")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty()),
+        recurrence_rule(task),
+    ) else {
+        return false;
+    };
+    let Some(next) = next_recurring_iso(
+        source,
+        completed_at,
+        rule,
+        "strict",
+        recurrence_interval(task),
+        recurrence_anchor_day_for_field(task, "startAnchorDay", "startTime"),
+    ) else {
+        return true;
+    };
+    if let Some(until) = recurrence_until(task) {
+        let certainly_ended = if next.len() == 10 && until.len() == 10 {
+            next > until
+        } else if let (Ok(next), Ok(until)) = (
+            OffsetDateTime::parse(&next, &Rfc3339),
+            OffsetDateTime::parse(&until, &Rfc3339),
+        ) {
+            next > until
+        } else {
+            false
+        };
+        if certainly_ended && should_stop_at_until(Some(&next), &until) {
+            return false;
+        }
+    }
+    let Ok(completed) = OffsetDateTime::parse(completed_at, &Rfc3339) else {
+        return true;
+    };
+    if let Ok(next) = OffsetDateTime::parse(&next, &Rfc3339) {
+        return next <= completed;
+    }
+    let Some(completed) = crate::local_query::local_wall(completed) else {
+        return true;
+    };
+    let floating = if next.len() == 16 {
+        format!("{next}:00")
+    } else {
+        next.clone()
+    };
+    let Some(candidate) = crate::local_query::parse_local_date(&floating) else {
+        return true;
+    };
+    if next.len() == 10 {
+        candidate.date() < completed.date()
+    } else {
+        candidate <= completed
+    }
+}
+
 fn create_next_recurring_task_for_local_api(
     task: &Map<String, Value>,
     completed_at: &str,
     previous_status: &str,
 ) -> Option<Map<String, Value>> {
     let rule = recurrence_rule(task)?;
-    if recurrence_needs_core_engine(task) {
-        // Refuse what this engine cannot model instead of guessing a wrong
-        // date (e.g. an every-Mon/Wed/Fri task otherwise gets a follow-up 7
-        // days out because `next_recurring_iso` below only knows fixed
-        // day/week/month steps). The HTTP complete handler already refuses
-        // this case via `recurrence_completion_refusal` before this function
-        // is ever reached, so the task is never marked done without its
-        // follow-up — a vanished recurring series would be worse than a
-        // rejected request. This `None` is a defensive backstop for any
-        // other caller (tests call this function directly).
+    if recurrence_needs_core_engine(task) || recurrence_start_needs_catchup(task, completed_at) {
         return None;
     }
     let interval = recurrence_interval(task);
@@ -2995,8 +3563,6 @@ fn create_next_recurring_task_for_local_api(
         });
 
     if next_start_time.is_none() && next_due_date.is_none() && next_review_at.is_none() {
-        // Date-only deferral: an unscheduled task must not inherit the completion's
-        // time of day. Mirrors the core TypeScript behavior (ISO date prefix).
         let completed_at_date = completed_at.get(..10).unwrap_or(completed_at);
         next_start_time = next_recurring_iso(
             completed_at,
@@ -3051,6 +3617,9 @@ fn create_next_recurring_task_for_local_api(
             "areaId",
             "timeEstimate",
             "repeatReminderMinutes",
+            "dueReminderLeadMinutes",
+            "startReminderLeadMinutes",
+            "reminderPolicy",
         ],
     );
     if let Some(value) = next_start_time {
@@ -3093,7 +3662,15 @@ fn create_next_recurring_task_for_local_api(
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new())),
     );
-    if let Some(checklist) = reset_checklist_value(task.get("checklist")) {
+    if let Some(checklist) = copy_recurring_checklist_value(
+        task.get("checklist"),
+        task.get("taskMode").and_then(Value::as_str) != Some("list")
+            && task
+                .get("recurrence")
+                .and_then(|r| r.get("preserveChecklistOnRepeat"))
+                .and_then(Value::as_bool)
+                == Some(true),
+    ) {
         next_task.insert("checklist".to_string(), checklist);
     }
     if let Some(attachments) = duplicate_attachment_value(task.get("attachments"), completed_at) {
@@ -3112,14 +3689,6 @@ fn create_next_recurring_task_for_local_api(
 }
 
 fn should_create_recurring_follow_up(action: &str, previous_status: &str) -> bool {
-    // Completing a task that was already archived is a lifecycle correction
-    // (archived -> done), not a new completion event: core never spawns a
-    // follow-up occurrence for it (store-helpers.ts's applyTaskUpdates treats
-    // `isReturningFromArchive` as `nextRecurringTask = null` regardless of
-    // recurrence), and this is also the sole gate the 409 refusal check
-    // (`recurrence_completion_refusal`) uses to decide whether to even look at
-    // the recurrence rule — so an archived-source completion is never refused
-    // either, even when its recurrence is one this engine cannot compute.
     action == "complete" && previous_status != "done" && previous_status != "archived"
 }
 
@@ -3212,12 +3781,6 @@ fn iso_day(value: &str) -> Option<u32> {
     parse_iso_prefix(value).map(|(_, _, day, _)| day)
 }
 
-// The legacy single `anchorDay` is credited ONLY to the field it was derived
-// from (dueDate, else startTime, else reviewAt — the order that writes it).
-// Letting it anchor the other fields advanced a start of the 14th as a day-15
-// rule, so "start 14th / due 15th, monthly" came back starting Aug 15 instead
-// of Sep 14. Mirrors resolveRecurrenceFieldAnchorDays in core's recurrence.ts;
-// the shared parity fixtures pin both sides.
 fn recurrence_anchor_owner_field(task: &Map<String, Value>) -> Option<&'static str> {
     ["dueDate", "startTime", "reviewAt"]
         .into_iter()
@@ -3438,10 +4001,13 @@ fn copy_task_fields(source: &Map<String, Value>, target: &mut Map<String, Value>
     }
 }
 
-fn reset_checklist_value(value: Option<&Value>) -> Option<Value> {
+fn copy_recurring_checklist_value(value: Option<&Value>, preserve: bool) -> Option<Value> {
     let checklist = value?.as_array()?;
     if checklist.is_empty() {
         return None;
+    }
+    if preserve {
+        log::info!("Recurring checklist progress copied releaseCheck=v1.3.7/recurring-checklist-progress outcome=constructed");
     }
     Some(Value::Array(
         checklist
@@ -3449,7 +4015,9 @@ fn reset_checklist_value(value: Option<&Value>) -> Option<Value> {
             .filter_map(|item| {
                 let mut item = item.as_object()?.clone();
                 item.insert("id".to_string(), Value::String(generate_uuid_v4()));
-                item.insert("isCompleted".to_string(), Value::Bool(false));
+                if !preserve {
+                    item.insert("isCompleted".to_string(), Value::Bool(false));
+                }
                 Some(Value::Object(item))
             })
             .collect(),
@@ -3475,14 +4043,15 @@ fn duplicate_attachment_value(value: Option<&Value>, timestamp: &str) -> Option<
                 Value::String(timestamp.to_string()),
             );
             attachment.remove("deletedAt");
-            // A duplicate is a distinct attachment record; sharing the original's
-            // cloud identity would point two records at one cloud blob (A4).
+
             attachment.remove("cloudKey");
             attachment.remove("fileHash");
             attachment.remove("localStatus");
             attachment.remove("contentRev");
             attachment.remove("contentMtimeMs");
             attachment.remove("contentSize");
+            attachment.remove("pendingContentUpload");
+            attachment.remove("staleContentHash");
             Some(Value::Object(attachment))
         })
         .collect::<Vec<_>>();
@@ -3494,6 +4063,12 @@ fn duplicate_attachment_value(value: Option<&Value>, timestamp: &str) -> Option<
 }
 
 fn normalize_created_reference_task(task: &mut Map<String, Value>) {
+    let had_advance_reminder = task
+        .get("dueReminderLeadMinutes")
+        .is_some_and(|value| !value.is_null());
+    let had_start_advance_reminder = task
+        .get("startReminderLeadMinutes")
+        .is_some_and(|value| !value.is_null());
     for key in [
         "startTime",
         "dueDate",
@@ -3504,52 +4079,90 @@ fn normalize_created_reference_task(task: &mut Map<String, Value>) {
         "timeEstimate",
         "suppressMindwtrReminders",
         "repeatReminderMinutes",
+        "dueReminderLeadMinutes",
+        "startReminderLeadMinutes",
         "showFutureRecurrence",
         "focusOrder",
         "boardOrder",
     ] {
         task.remove(key);
     }
+    if had_advance_reminder {
+        task.insert("dueReminderLeadMinutes".to_string(), json!(0));
+    }
+    if had_start_advance_reminder {
+        task.insert("startReminderLeadMinutes".to_string(), json!(0));
+    }
     task.insert("isFocusedToday".to_string(), Value::Bool(false));
     task.insert("pushCount".to_string(), Value::Number(0.into()));
 }
 
-fn local_api_schedule_time(value: Option<&Value>) -> Option<OffsetDateTime> {
-    let value = value?.as_str()?;
-    if let Some(date) = parse_iso_date_bytes(value.as_bytes()) {
-        return date.with_hms(0, 0, 0).ok().map(|value| value.assume_utc());
+fn local_api_due_schedule_time(
+    value: Option<&Value>,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> Option<PrimitiveDateTime> {
+    if let Some(date) = parse_iso_date_bytes(value?.as_str()?.as_bytes()) {
+        return date.with_hms_milli(23, 59, 59, 999).ok();
     }
-    OffsetDateTime::parse(value, &Rfc3339).ok()
+    local_api_focus_schedule_time(value, local_wall)
 }
 
-fn local_api_due_schedule_time(value: Option<&Value>) -> Option<OffsetDateTime> {
+fn local_api_review_is_due(
+    task: &Map<String, Value>,
+    now: OffsetDateTime,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> bool {
+    let utc = now.to_offset(time::UtcOffset::UTC);
+    let now = local_wall(now).unwrap_or(PrimitiveDateTime::new(utc.date(), utc.time()));
+    local_api_focus_schedule_time(task.get("reviewAt"), local_wall)
+        .is_some_and(|review| review <= now)
+}
+
+fn local_api_focus_schedule_time(
+    value: Option<&Value>,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> Option<PrimitiveDateTime> {
     let value = value?.as_str()?;
-    if let Some(date) = parse_iso_date_bytes(value.as_bytes()) {
-        return date
-            .with_hms_milli(23, 59, 59, 999)
-            .ok()
-            .map(|value| value.assume_utc());
-    }
-    OffsetDateTime::parse(value, &Rfc3339).ok()
-}
-
-fn local_api_review_is_due(task: &Map<String, Value>, now: OffsetDateTime) -> bool {
-    local_api_schedule_time(task.get("reviewAt")).is_some_and(|review| review <= now)
-}
-
-fn local_api_task_is_future_start(task: &Map<String, Value>, now: OffsetDateTime) -> bool {
-    let defer_until = local_api_schedule_time(task.get("startTime")).or_else(|| {
-        recurrence_rule(task).and_then(|_| {
-            [
-                local_api_schedule_time(task.get("dueDate")),
-                local_api_schedule_time(task.get("reviewAt")),
-            ]
-            .into_iter()
-            .flatten()
-            .min()
+    let parse = |value: &str| {
+        crate::local_query::parse_local_date(value).or_else(|| {
+            let instant = OffsetDateTime::parse(value, &Rfc3339).ok()?;
+            let utc = instant.to_offset(time::UtcOffset::UTC);
+            Some(local_wall(instant).unwrap_or(PrimitiveDateTime::new(utc.date(), utc.time())))
         })
-    });
-    defer_until.is_some_and(|value| value.date() > now.date())
+    };
+    parse(value).or_else(|| {
+        if matches!(
+            value.as_bytes().get(16),
+            None | Some(b'Z' | b'z' | b'+' | b'-')
+        ) {
+            parse(&format!("{}:00{}", value.get(..16)?, value.get(16..)?))
+        } else {
+            None
+        }
+    })
+}
+
+fn local_api_task_is_future_start(
+    task: &Map<String, Value>,
+    now: OffsetDateTime,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> bool {
+    let defer_until =
+        local_api_focus_schedule_time(task.get("startTime"), local_wall).or_else(|| {
+            recurrence_rule(task).and_then(|_| {
+                [
+                    local_api_focus_schedule_time(task.get("dueDate"), local_wall),
+                    local_api_focus_schedule_time(task.get("reviewAt"), local_wall),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
+            })
+        });
+    let today = local_wall(now)
+        .map(|value| value.date())
+        .unwrap_or_else(|| now.to_offset(time::UtcOffset::UTC).date());
+    defer_until.is_some_and(|value| value.date() > today)
 }
 
 fn local_api_focus_task_limit(data: &Value) -> usize {
@@ -3567,7 +4180,25 @@ fn local_api_focus_task_limit(data: &Value) -> usize {
         .unwrap_or(3)
 }
 
-fn local_api_focused_task_count(data: &Value, now: OffsetDateTime) -> usize {
+pub(crate) fn local_api_task_is_counted_as_focused(
+    task: &Map<String, Value>,
+    now: OffsetDateTime,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> bool {
+    !has_non_empty_string(task, "deletedAt")
+        && task.get("isFocusedToday").and_then(Value::as_bool) == Some(true)
+        && !matches!(
+            task.get("status").and_then(Value::as_str),
+            Some("done" | "reference" | "archived")
+        )
+        && !local_api_task_is_future_start(task, now, local_wall)
+}
+
+fn local_api_focused_task_count(
+    data: &Value,
+    now: OffsetDateTime,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> usize {
     if let Some(count) = data
         .get(TASK_MUTATION_FOCUSED_COUNT_KEY)
         .and_then(Value::as_u64)
@@ -3577,15 +4208,8 @@ fn local_api_focused_task_count(data: &Value, now: OffsetDateTime) -> usize {
     array_items(data, "tasks")
         .iter()
         .filter(|task| {
-            !has_string_field(task, "deletedAt")
-                && task.get("isFocusedToday").and_then(Value::as_bool) == Some(true)
-                && !matches!(
-                    task.get("status").and_then(Value::as_str),
-                    Some("done" | "reference" | "archived")
-                )
-                && task
-                    .as_object()
-                    .is_some_and(|task| !local_api_task_is_future_start(task, now))
+            task.as_object()
+                .is_some_and(|task| local_api_task_is_counted_as_focused(task, now, local_wall))
         })
         .count()
 }
@@ -3605,31 +4229,34 @@ fn local_api_project_allows_focus(task: &Map<String, Value>, data: &Value) -> bo
             || project.get("isFocused").and_then(Value::as_bool) == Some(true))
 }
 
-fn local_api_focus_schedule_key(task: &Map<String, Value>, now: OffsetDateTime) -> (u8, i128) {
+fn local_api_focus_schedule_key(
+    task: &Map<String, Value>,
+    now: OffsetDateTime,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) -> (u8, PrimitiveDateTime) {
     if task.get("isFocusedToday").and_then(Value::as_bool) == Some(true) {
-        return (0, 0);
+        return (0, PrimitiveDateTime::MIN);
     }
+    let utc = now.to_offset(time::UtcOffset::UTC);
+    let now_wall = local_wall(now).unwrap_or(PrimitiveDateTime::new(utc.date(), utc.time()));
     let mut scheduled = Vec::new();
-    if let Some(due) = local_api_due_schedule_time(task.get("dueDate")) {
-        if due.date() <= now.date() {
-            scheduled.push(due.unix_timestamp_nanos());
+    if let Some(due) = local_api_due_schedule_time(task.get("dueDate"), local_wall) {
+        if due.date() <= now_wall.date()
+            && task.get("status").and_then(Value::as_str) != Some("waiting")
+        {
+            scheduled.push(due);
         }
     }
-    if let Some(start) = local_api_schedule_time(task.get("startTime")) {
-        if start.date() == now.date() {
-            scheduled.push(start.unix_timestamp_nanos());
-        }
-    }
-    if local_api_review_is_due(task, now) {
-        if let Some(review) = local_api_schedule_time(task.get("reviewAt")) {
-            scheduled.push(review.unix_timestamp_nanos());
+    if local_api_review_is_due(task, now, local_wall) {
+        if let Some(review) = local_api_focus_schedule_time(task.get("reviewAt"), local_wall) {
+            scheduled.push(review);
         }
     }
     scheduled
         .into_iter()
         .min()
         .map(|time| (1, time))
-        .unwrap_or((2, i128::MAX))
+        .unwrap_or((2, PrimitiveDateTime::MAX))
 }
 
 fn local_api_focus_order(task: &Map<String, Value>, has_order: bool) -> f64 {
@@ -3641,7 +4268,13 @@ fn local_api_focus_order(task: &Map<String, Value>, has_order: bool) -> f64 {
             .filter(|value| value.is_finite())
             .unwrap_or(f64::INFINITY);
     }
-    local_api_schedule_time(task.get("createdAt"))
+    task.get("createdAt")
+        .and_then(Value::as_str)
+        .and_then(|value| {
+            parse_iso_date_bytes(value.as_bytes())
+                .map(|date| date.midnight().assume_utc())
+                .or_else(|| OffsetDateTime::parse(value, &Rfc3339).ok())
+        })
         .map(|value| value.unix_timestamp_nanos() as f64)
         .unwrap_or(f64::INFINITY)
 }
@@ -3650,6 +4283,7 @@ fn local_api_focus_candidate_is_sequential_first(
     candidate: &Map<String, Value>,
     data: &Value,
     now: OffsetDateTime,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
 ) -> bool {
     let Some(project_id) = candidate.get("projectId").and_then(Value::as_str) else {
         return true;
@@ -3660,16 +4294,30 @@ fn local_api_focus_candidate_is_sequential_first(
     else {
         return true;
     };
-    if project.get("isSequential").and_then(Value::as_bool) != Some(true) {
+    let candidate_section = candidate.get("sectionId").and_then(Value::as_str);
+    let project_sequential = project.get("isSequential").and_then(Value::as_bool) == Some(true);
+
+    let in_sequential_section = !project_sequential
+        && project.get("perSectionFlow").and_then(Value::as_bool) == Some(true)
+        && candidate_section.is_some_and(|section_id| {
+            array_items(data, "sections").into_iter().any(|section| {
+                section.get("id").and_then(Value::as_str) == Some(section_id)
+                    && section.get("projectId").and_then(Value::as_str) == Some(project_id)
+                    && !has_string_field(&section, "deletedAt")
+                    && section.get("isSequential").and_then(Value::as_bool) == Some(true)
+            })
+        });
+    if !project_sequential && !in_sequential_section {
         return true;
     }
-    let section_scoped = project.get("sequentialScope").and_then(Value::as_str) == Some("section");
-    let candidate_section = candidate.get("sectionId").and_then(Value::as_str);
+    let section_scoped = in_sequential_section
+        || project.get("sequentialScope").and_then(Value::as_str) == Some("section");
     let mut candidates = array_items(data, "tasks")
         .into_iter()
         .filter_map(|task| {
             let task = task.as_object()?.clone();
             if has_string_field(&Value::Object(task.clone()), "deletedAt")
+                || task.get("id") == candidate.get("id")
                 || task.get("projectId").and_then(Value::as_str) != Some(project_id)
                 || (section_scoped
                     && task.get("sectionId").and_then(Value::as_str) != candidate_section)
@@ -3679,7 +4327,7 @@ fn local_api_focus_candidate_is_sequential_first(
                 )
                 || !(task.get("isFocusedToday").and_then(Value::as_bool) == Some(true)
                     || task.get("status").and_then(Value::as_str) == Some("next")
-                    || local_api_review_is_due(&task, now))
+                    || local_api_review_is_due(&task, now, local_wall))
             {
                 return None;
             }
@@ -3694,10 +4342,10 @@ fn local_api_focus_candidate_is_sequential_first(
             .is_some_and(|value| value.is_finite())
     });
     let mut best_id = None;
-    let mut best_schedule = (u8::MAX, i128::MAX);
+    let mut best_schedule = (u8::MAX, PrimitiveDateTime::MAX);
     let mut best_order = f64::INFINITY;
     for task in &candidates {
-        let schedule = local_api_focus_schedule_key(task, now);
+        let schedule = local_api_focus_schedule_key(task, now, local_wall);
         let order = local_api_focus_order(task, has_order);
         if best_id.is_none()
             || schedule < best_schedule
@@ -3711,7 +4359,12 @@ fn local_api_focus_candidate_is_sequential_first(
     best_id == candidate.get("id").and_then(Value::as_str)
 }
 
-fn normalize_created_task_focus(task: &mut Map<String, Value>, data: &Value, now: &str) {
+fn normalize_created_task_focus(
+    task: &mut Map<String, Value>,
+    data: &Value,
+    now: &str,
+    local_wall: &dyn Fn(OffsetDateTime) -> Option<PrimitiveDateTime>,
+) {
     if task.get("isFocusedToday").and_then(Value::as_bool) != Some(true) {
         task.remove("focusOrder");
         return;
@@ -3733,22 +4386,25 @@ fn normalize_created_task_focus(task: &mut Map<String, Value>, data: &Value, now
         Value::String(promoted_status.to_string()),
     );
     candidate.insert("isFocusedToday".to_string(), Value::Bool(false));
-    let future_start = local_api_task_is_future_start(&candidate, now);
+    let future_start = local_api_task_is_future_start(&candidate, now, local_wall);
     let queued =
         promoted_status == "next" && has_non_empty_string(&candidate, "startTime") && future_start;
     let status_is_eligible = promoted_status == "next"
-        || (promoted_status != "inbox" && local_api_review_is_due(&candidate, now));
+        || (promoted_status != "inbox" && local_api_review_is_due(&candidate, now, local_wall));
     let eligible = status_is_eligible
         && local_api_project_allows_focus(&candidate, data)
         && (!future_start || queued)
-        && local_api_focus_candidate_is_sequential_first(&candidate, data, now);
-    let cap_is_available =
-        queued || local_api_focused_task_count(data, now) < local_api_focus_task_limit(data);
+        && local_api_focus_candidate_is_sequential_first(&candidate, data, now, local_wall);
+    let cap_is_available = queued
+        || local_api_focused_task_count(data, now, local_wall) < local_api_focus_task_limit(data);
     if eligible && cap_is_available {
         task.insert(
             "status".to_string(),
             Value::String(promoted_status.to_string()),
         );
+        if queued {
+            log::info!("Local API Focus star queued for a later local day extra.releaseCheck=v1.3.5/local-api-focus-local-day");
+        }
     } else {
         task.insert("isFocusedToday".to_string(), Value::Bool(false));
         task.remove("focusOrder");
@@ -3804,8 +4460,31 @@ fn create_task_from_body(
     if task.contains_key("title") {
         return Err("Unsupported task props: title".to_string());
     }
+    if let Some(attachments) = task.get_mut("attachments") {
+        if attachments.as_array().is_some_and(|items| {
+            items.iter().all(|item| {
+                item.as_object().is_some_and(|item| {
+                    item.keys()
+                        .all(|field| matches!(field.as_str(), "id" | "kind" | "title" | "uri"))
+                })
+            })
+        }) {
+            *attachments = crate::mcp_tools::normalize_links(attachments)?;
+        }
+    }
     sanitize_task_patch_map(&mut task)?;
     task.retain(|_, value| !value.is_null());
+    if task.get("reminderPolicy").is_none_or(Value::is_null)
+        && !task.contains_key("suppressMindwtrReminders")
+    {
+        task.insert("reminderPolicy".to_string(), json!("inherit"));
+    }
+    normalize_task_reminder_patch(
+        &mut task,
+        data.pointer("/settings/taskReminderDefault")
+            .and_then(Value::as_str)
+            == Some("skip"),
+    );
     normalize_created_task_containers(&mut task, &LiveContainers::from_data(data))?;
     let had_explicit_status = task.contains_key("status");
     let now = now_iso();
@@ -3836,7 +4515,7 @@ fn create_task_from_body(
     if task.get("status").and_then(Value::as_str) == Some("reference") {
         normalize_created_reference_task(&mut task);
     }
-    normalize_created_task_focus(&mut task, data, &now);
+    normalize_created_task_focus(&mut task, data, &now, &crate::local_query::local_wall);
     task.insert("rev".to_string(), Value::Number(1.into()));
     task.insert("revBy".to_string(), Value::String(device_id.to_string()));
     Ok(task)
@@ -3847,7 +4526,7 @@ pub(crate) fn apply_task_patch(
     patch: &Map<String, Value>,
     device_id: &str,
 ) -> Result<(), String> {
-    apply_task_patch_internal(task, patch, device_id, None)
+    apply_task_patch_internal(task, patch, device_id, None, false)
 }
 
 fn apply_task_patch_with_containers(
@@ -3855,8 +4534,9 @@ fn apply_task_patch_with_containers(
     patch: &Map<String, Value>,
     device_id: &str,
     live_containers: &LiveContainers,
+    default_skip: bool,
 ) -> Result<(), String> {
-    apply_task_patch_internal(task, patch, device_id, Some(live_containers))
+    apply_task_patch_internal(task, patch, device_id, Some(live_containers), default_skip)
 }
 
 fn apply_task_patch_internal(
@@ -3864,6 +4544,7 @@ fn apply_task_patch_internal(
     patch: &Map<String, Value>,
     device_id: &str,
     live_containers: Option<&LiveContainers>,
+    default_skip: bool,
 ) -> Result<(), String> {
     let previous_status = task
         .get("status")
@@ -3913,6 +4594,7 @@ fn apply_task_patch_internal(
     };
     let mut sanitized = patch.clone();
     sanitize_task_patch_map(&mut sanitized)?;
+    normalize_task_reminder_patch(&mut sanitized, default_skip);
     let explicit_order = if sanitized.contains_key("order") {
         sanitized.get("order").cloned()
     } else {
@@ -4021,6 +4703,20 @@ fn normalize_task_triage_patch(
     }
 
     if final_status == "reference" {
+        let clear_advance = previous_status != "reference"
+            || task
+                .get("dueReminderLeadMinutes")
+                .is_some_and(|value| !value.is_null())
+            || sanitized
+                .get("dueReminderLeadMinutes")
+                .is_some_and(|value| !value.is_null());
+        let clear_start_advance = previous_status != "reference"
+            || task
+                .get("startReminderLeadMinutes")
+                .is_some_and(|value| !value.is_null())
+            || sanitized
+                .get("startReminderLeadMinutes")
+                .is_some_and(|value| !value.is_null());
         for field in [
             "startTime",
             "dueDate",
@@ -4031,11 +4727,19 @@ fn normalize_task_triage_patch(
             "timeEstimate",
             "suppressMindwtrReminders",
             "repeatReminderMinutes",
+            "dueReminderLeadMinutes",
+            "startReminderLeadMinutes",
             "showFutureRecurrence",
             "focusOrder",
             "boardOrder",
         ] {
             sanitized.insert(field.to_string(), Value::Null);
+        }
+        if clear_advance {
+            sanitized.insert("dueReminderLeadMinutes".to_string(), json!(0));
+        }
+        if clear_start_advance {
+            sanitized.insert("startReminderLeadMinutes".to_string(), json!(0));
         }
         sanitized.insert("isFocusedToday".to_string(), Value::Bool(false));
         sanitized.insert("pushCount".to_string(), Value::Number(0.into()));
@@ -4047,6 +4751,32 @@ fn normalize_task_triage_patch(
         .unwrap_or(old_focused);
     if old_focused && !resolved_focused && !original_patch.contains_key("focusOrder") {
         sanitized.insert("focusOrder".to_string(), Value::Null);
+    }
+}
+
+fn normalize_task_reminder_patch(patch: &mut Map<String, Value>, default_skip: bool) {
+    if patch.get("dueReminderLeadMinutes").is_some_and(Value::is_null) {
+        patch.insert("dueReminderLeadMinutes".to_string(), json!(0));
+    }
+    if patch
+        .get("startReminderLeadMinutes")
+        .is_some_and(Value::is_null)
+    {
+        patch.insert("startReminderLeadMinutes".to_string(), json!(0));
+    }
+    if let Some(policy) = patch.get("reminderPolicy").and_then(Value::as_str) {
+        let skip = policy == "skip" || (policy == "inherit" && default_skip);
+        patch.insert("suppressMindwtrReminders".to_string(), Value::Bool(skip));
+    } else if patch.contains_key("reminderPolicy") {
+        patch.remove("reminderPolicy");
+    } else if let Some(skip) = patch
+        .get("suppressMindwtrReminders")
+        .and_then(Value::as_bool)
+    {
+        patch.insert(
+            "reminderPolicy".to_string(),
+            json!(if skip { "skip" } else { "send" }),
+        );
     }
 }
 
@@ -4102,6 +4832,12 @@ pub(crate) fn sanitize_task_patch_map(patch: &mut Map<String, Value>) -> Result<
                         .as_str()
                         .is_some_and(|item| matches!(item, "task" | "list"))
             }
+            "reminderPolicy" => {
+                value.is_null()
+                    || value
+                        .as_str()
+                        .is_some_and(|policy| matches!(policy, "inherit" | "send" | "skip"))
+            }
             "textDirection" => {
                 value.is_null()
                     || value
@@ -4128,6 +4864,15 @@ pub(crate) fn sanitize_task_patch_map(patch: &mut Map<String, Value>) -> Result<
             "pushCount" | "timeSpentMinutes" => {
                 value.is_null() || value.as_i64().is_some_and(|number| number >= 0)
             }
+            "dueReminderLeadMinutes" => {
+                value.is_null() || value.as_i64().is_some_and(|minutes| (0..=10080).contains(&minutes))
+            }
+            "startReminderLeadMinutes" => {
+                value.is_null()
+                    || value
+                        .as_i64()
+                        .is_some_and(|minutes| matches!(minutes, 0 | 5 | 15 | 30 | 60))
+            }
             "repeatReminderMinutes" => {
                 value.is_null()
                     || value
@@ -4141,9 +4886,7 @@ pub(crate) fn sanitize_task_patch_map(patch: &mut Map<String, Value>) -> Result<
             "attachments" => value.is_null() || valid_attachments(value),
             "relativeStartOffset" => value.is_null() || valid_relative_start_offset(value),
             "recurrence" => value.is_null() || valid_recurrence(value),
-            // Presentational grouping per view (#1090). Keys are view scopes and
-            // values are section ids from the settings catalogue; this engine
-            // never resolves them, so it only checks the shape.
+
             "viewSectionIds" => value.is_null() || valid_view_section_ids(value),
             _ => return Err(format!("Unsupported task field: {key}")),
         };
@@ -4458,17 +5201,14 @@ fn valid_recurrence(value: &Value) -> bool {
         }),
         "byMonthDay" => value.as_array().is_some_and(|items| {
             items.len() <= 31
-                && items
-                    .iter()
-                    // -1 = RFC 5545 "last day of the month", the one negative
-                    // ordinal the core engine supports.
-                    .all(|item| {
-                        item.as_i64()
-                            .is_some_and(|day| (1..=31).contains(&day) || day == -1)
-                    })
+                && items.iter().all(|item| {
+                    item.as_i64()
+                        .is_some_and(|day| (1..=31).contains(&day) || day == -1)
+                })
         }),
         "weekStart" => value.as_str().is_some_and(valid_recurrence_weekday),
         "count" => value.as_i64().is_some_and(|count| count > 0),
+        "preserveChecklistOnRepeat" => value.is_boolean(),
         "completedOccurrences" => value.as_i64().is_some_and(|count| count >= 0),
         "anchorDay" | "startAnchorDay" | "dueAnchorDay" | "reviewAnchorDay" => {
             value.as_i64().is_some_and(|day| (1..=31).contains(&day))
@@ -4654,8 +5394,7 @@ fn parse_supported_rrule(value: &str) -> Option<RecurrenceSchedule> {
                     .split(',')
                     .map(|token| token.trim().parse::<i64>().ok())
                     .collect::<Option<Vec<_>>>()?;
-                // -1 = RFC 5545 "last day of the month"; other values keep the
-                // positive 1..=31 contract.
+
                 if days.iter().any(|day| !(1..=31).contains(day) && *day != -1) {
                     return None;
                 }
@@ -4772,10 +5511,6 @@ fn valid_checklist(value: &Value) -> bool {
     })
 }
 
-/// Mirrors `ATTACHMENT_CLOUD_KEY_PATTERN` in packages/core/src/sync-normalization.ts. The local
-/// HTTP API is a second write path into the same attachments, so a cloudKey accepted here must be
-/// one the sync merge would accept too — the pattern is what rules out separators, traversal
-/// segments and NUL bytes reaching a filesystem or remote path.
 fn valid_attachment_cloud_key(value: &str) -> bool {
     fn valid_name(name: &str) -> bool {
         let mut chars = name.chars();
@@ -4823,7 +5558,9 @@ fn valid_attachments(value: &Value) -> bool {
                 "kind" => value
                     .as_str()
                     .is_some_and(|kind| matches!(kind, "file" | "link")),
-                "mimeType" | "deletedAt" | "fileHash" => value.is_string(),
+                "mimeType" | "deletedAt" | "fileHash" | "staleContentHash" => value.is_string(),
+
+                "pendingContentUpload" => value.is_boolean(),
                 "cloudKey" => value.as_str().is_some_and(valid_attachment_cloud_key),
                 "size" | "contentRev" | "contentMtimeMs" | "contentSize" => {
                     value.as_u64().is_some()
@@ -4881,7 +5618,1175 @@ fn hex_value(value: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    fn reliability_create(
+        conn: &rusqlite::Connection,
+        token: &str,
+        credential: &str,
+        body: &Value,
+        now: i64,
+    ) -> Result<(Value, bool), String> {
+        let operation = LocalOperation::CreateTaskWithReceipt {
+            body: body.as_object().unwrap().clone(),
+            receipt: create_receipt(token, body)?,
+        }
+        .bind_credential(credential);
+        let LocalOperation::CreateTaskWithReceipt { body, receipt } = operation else {
+            unreachable!()
+        };
+        let operation = LocalOperation::CreateTask(body);
+        let (response, _, changed) = crate::storage::local_receipt_operation_test_commit(
+            conn,
+            TaskMutationReadScope::create(None, None, None, false),
+            Some(&receipt),
+            now,
+            |data| {
+                let (id, rows) = mutate_task_operation(data, &operation)?;
+                Ok((task_response(persisted_task(data, &id)?), rows))
+            },
+        )?;
+        Ok((response, changed))
+    }
+
+    #[test]
+    fn reliability_receipt_reopens_replays_original_without_resurrection_and_isolates_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipts.db");
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        crate::storage::local_operation_test_seed(&mut conn, &empty_local_api_data()).unwrap();
+        let payload = json!({"title":"Original", "props":{"attachments":[{"uri":"https://example.com/note"}]}});
+        let (first, changed) =
+            reliability_create(&conn, "operation-1", "credential-a", &payload, 100).unwrap();
+        assert!(changed);
+        assert!(valid_task_response(&first));
+        let id = first["task"]["id"].as_str().unwrap();
+        let canonical = crate::storage::read_sqlite_data(&conn).unwrap();
+        assert_eq!(first, task_response(find_task(&canonical, id).unwrap()));
+        drop(conn);
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        for mutation in [
+            json!({"description":"Later edit"}),
+            json!({"title":"Changed"}),
+        ] {
+            let operation = LocalOperation::PatchTask {
+                id: id.into(),
+                body: mutation.as_object().unwrap().clone(),
+            };
+            crate::storage::local_operation_test_commit(
+                &conn,
+                task_patch_read_scope(id, mutation.as_object().unwrap()),
+                |data| mutate_task_operation(data, &operation),
+            )
+            .unwrap();
+            let (replayed, changed) =
+                reliability_create(&conn, "operation-1", "credential-a", &payload, 101).unwrap();
+            assert_eq!(replayed, first);
+            assert!(!changed);
+        }
+        conn.execute("UPDATE tasks SET deletedAt = '2026-11-01T00:00:00Z', purgedAt = '2026-11-01T00:00:00Z' WHERE id = ?1", [id]).unwrap();
+        assert_eq!(
+            reliability_create(&conn, "operation-1", "credential-a", &payload, 102).unwrap(),
+            (first.clone(), false)
+        );
+        conn.execute("DELETE FROM tasks WHERE id = ?1", [id])
+            .unwrap();
+        assert_eq!(
+            reliability_create(&conn, "operation-1", "credential-a", &payload, 103).unwrap(),
+            (first.clone(), false)
+        );
+        assert_eq!(
+            crate::storage::read_sqlite_data(&conn).unwrap()["tasks"],
+            json!([])
+        );
+        assert_eq!(
+            reliability_create(
+                &conn,
+                "operation-1",
+                "credential-a",
+                &json!({"title":"Different"}),
+                103
+            )
+            .unwrap_err(),
+            "idempotency_conflict"
+        );
+        let (other, changed) =
+            reliability_create(&conn, "operation-1", "credential-b", &payload, 103).unwrap();
+        assert!(changed);
+        assert_ne!(first["task"]["id"], other["task"]["id"]);
+        crate::storage::local_operation_test_seed(&mut conn, &empty_local_api_data()).unwrap();
+        assert_eq!(
+            reliability_create(&conn, "operation-1", "credential-a", &payload, 104).unwrap(),
+            (first.clone(), false)
+        );
+        let mut workspace = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::local_operation_test_seed(&mut workspace, &empty_local_api_data()).unwrap();
+        let (isolated, changed) =
+            reliability_create(&workspace, "operation-1", "credential-a", &payload, 100).unwrap();
+        assert!(changed);
+        assert_ne!(first["task"]["id"], isolated["task"]["id"]);
+        assert!(canonical.get("local_api_create_receipts").is_none());
+    }
+
+    #[test]
+    fn reliability_receipt_rollback_expiry_capacity_and_corruption_fail_closed() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::local_operation_test_seed(&mut conn, &empty_local_api_data()).unwrap();
+        let payload = json!({"title":"Original"});
+        conn.execute_batch("CREATE TRIGGER fail_receipt BEFORE INSERT ON local_api_create_receipts BEGIN SELECT RAISE(FAIL, 'receipt failure'); END;").unwrap();
+        assert!(reliability_create(&conn, "retry", "credential", &payload, 100).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM local_api_create_receipts",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute_batch("DROP TRIGGER fail_receipt;").unwrap();
+        assert!(
+            reliability_create(&conn, "invalid", "credential", &json!({"title":""}), 100).is_err()
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM local_api_create_receipts",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        let (first, _) = reliability_create(&conn, "retry", "credential", &payload, 100).unwrap();
+        assert_eq!(
+            reliability_create(&conn, "retry", "credential", &payload, 604899).unwrap(),
+            (first.clone(), false)
+        );
+        let (expired, changed) =
+            reliability_create(&conn, "retry", "credential", &payload, 604900).unwrap();
+        assert!(changed);
+        assert_ne!(first["task"]["id"], expired["task"]["id"]);
+        conn.execute(
+            "UPDATE local_api_create_receipts SET result_json = 'null'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            reliability_create(&conn, "retry", "credential", &payload, 604901)
+                .unwrap_err()
+                .starts_with("Invalid local API receipt")
+        );
+        conn.execute(
+            "UPDATE local_api_create_receipts SET result_json = ?1",
+            [expired.to_string()],
+        )
+        .unwrap();
+        conn.execute_batch("WITH RECURSIVE items(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM items WHERE n < 9999) INSERT INTO local_api_create_receipts SELECT 'capacity', 'create_task', CAST(n AS TEXT), 'fingerprint', '{}', 700000 FROM items;").unwrap();
+        assert_eq!(
+            reliability_create(&conn, "retry", "credential", &payload, 604901).unwrap(),
+            (expired, false)
+        );
+        assert_eq!(
+            reliability_create(&conn, "new", "credential", &payload, 604901).unwrap_err(),
+            "idempotency_capacity"
+        );
+        assert!(
+            reliability_create(&conn, "new", "credential", &payload, 700000)
+                .unwrap()
+                .1
+        );
+        assert!(reliability_create(&conn, "overflow", "credential", &payload, i64::MAX).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn reliability_conditional_patch_rechecks_authoritative_content_and_noop_skips_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conditional.db");
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        crate::storage::local_operation_test_seed(&mut conn, &empty_local_api_data()).unwrap();
+        let (first, _) = reliability_create(
+            &conn,
+            "create",
+            "credential",
+            &json!({"title":"Original","props":{"tags":["tag"]}}),
+            100,
+        )
+        .unwrap();
+        let id = first["task"]["id"].as_str().unwrap();
+        let version = first["version"].as_str().unwrap();
+        let operation = LocalOperation::ConditionalPatchTask {
+            id: id.into(),
+            body: json!({"title":"Original","tags":[" tag "],"showFutureRecurrence":false})
+                .as_object()
+                .unwrap()
+                .clone(),
+            condition: TaskMatchCondition::Versions(vec![version.into()]),
+        };
+        conn.execute_batch("CREATE TRIGGER fail_task_update BEFORE INSERT ON tasks BEGIN SELECT RAISE(FAIL, 'unexpected task write'); END;").unwrap();
+        let (result, _, changed) = crate::storage::local_receipt_operation_test_commit(
+            &conn,
+            TaskMutationReadScope::existing(id, false),
+            None,
+            100,
+            |data| {
+                let (_, rows) = mutate_task_operation(data, &operation)?;
+                Ok((task_response(find_task(data, id).unwrap()), rows))
+            },
+        )
+        .unwrap();
+        assert!(!changed, "before={first} after={result}");
+        assert_eq!(result, first);
+        let true_without_recurrence = LocalOperation::PatchTask {
+            id: id.into(),
+            body: json!({"showFutureRecurrence":true})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        crate::storage::local_operation_test_commit(
+            &conn,
+            TaskMutationReadScope::existing(id, false),
+            |data| mutate_task_operation(data, &true_without_recurrence),
+        )
+        .unwrap();
+        conn.execute_batch("DROP TRIGGER fail_task_update;")
+            .unwrap();
+        let retry_error = crate::storage::local_operation_test_commit(
+            &conn,
+            TaskMutationReadScope::existing(id, false),
+            |data| {
+                mutate_task_operation(data, &operation)?;
+                Err("database is locked".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(retry_error, "database is locked");
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute(
+                "UPDATE tasks SET title = 'Concurrent same revision edit' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let error = crate::storage::local_operation_test_commit(
+            &conn,
+            TaskMutationReadScope::existing(id, false),
+            |data| mutate_task_operation(data, &operation),
+        )
+        .unwrap_err();
+        assert_eq!(error, "task_version_conflict");
+        assert_eq!(api_error_response(error).status, 412);
+        let unconditional = LocalOperation::PatchTask {
+            id: id.into(),
+            body: json!({"description":"Unconditional remains supported"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        let persisted = crate::storage::local_operation_test_commit(
+            &conn,
+            TaskMutationReadScope::existing(id, false),
+            |data| mutate_task_operation(data, &unconditional),
+        )
+        .unwrap();
+        assert_eq!(find_task(&persisted, id).unwrap()["rev"], 2);
+        let mut repaired = persisted.clone();
+        repaired["tasks"][0]["completedAt"] = json!("2026-11-01T00:00:00Z");
+        let (_, rows) = mutate_task_operation(
+            &mut repaired,
+            &LocalOperation::PatchTask {
+                id: id.into(),
+                body: Map::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].get("completedAt").is_none());
+        assert_eq!(rows[0]["rev"], 3);
+    }
+
+    #[test]
+    fn reliability_http_dispatch_persists_versions_and_rejects_stale_patch() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::local_operation_test_seed(&mut conn, &empty_local_api_data()).unwrap();
+        let access = LocalApiAccess {
+            allow_write: true,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        let dispatch = |method: &str, path: &str, headers: Vec<(&str, String)>, body: Value| {
+            let mut headers = headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect::<HashMap<_, _>>();
+            headers.insert("authorization".into(), "Bearer credential".into());
+            handle_api_operation(
+                "credential",
+                &access,
+                ApiRequest {
+                    method: method.into(),
+                    path: path.into(),
+                    query: HashMap::new(),
+                    headers,
+                    body: serde_json::to_vec(&body).unwrap(),
+                },
+                |operation| match operation {
+                    LocalOperation::CreateTaskWithReceipt { body, receipt } => {
+                        let operation = LocalOperation::CreateTask(body);
+                        let (response, _, _) = crate::storage::local_receipt_operation_test_commit(
+                            &conn,
+                            TaskMutationReadScope::create(None, None, None, false),
+                            Some(&receipt),
+                            100,
+                            |data| {
+                                let (id, rows) = mutate_task_operation(data, &operation)?;
+                                Ok((task_response(find_task(data, &id).unwrap()), rows))
+                            },
+                        )?;
+                        Ok(response)
+                    }
+                    operation @ (LocalOperation::PatchTask { .. }
+                    | LocalOperation::ConditionalPatchTask { .. }) => {
+                        let id = match &operation {
+                            LocalOperation::PatchTask { id, .. }
+                            | LocalOperation::ConditionalPatchTask { id, .. } => id.clone(),
+                            _ => unreachable!(),
+                        };
+                        let canonical = crate::storage::local_operation_test_commit(
+                            &conn,
+                            TaskMutationReadScope::existing(&id, false),
+                            |data| mutate_task_operation(data, &operation),
+                        )?;
+                        Ok(task_response(find_task(&canonical, &id).unwrap()))
+                    }
+                    _ => panic!(),
+                },
+            )
+        };
+        let first = dispatch(
+            "POST",
+            "/v1/tasks",
+            vec![("idempotency-key", "receipt".into())],
+            json!({"title":"Original"}),
+        );
+        assert_eq!(first.status, 201);
+        let version = first.body["version"].as_str().unwrap();
+        assert!(http_response(&first).contains(&format!("ETag: \"{version}\"\r\n")));
+        let id = first.body["task"]["id"].as_str().unwrap();
+        let path = format!("/v1/tasks/{id}");
+        let noop = dispatch(
+            "PATCH",
+            &path,
+            vec![("if-match", format!("\"{version}\""))],
+            json!({}),
+        );
+        assert_eq!(noop.body, first.body);
+        let changed = dispatch(
+            "PATCH",
+            &path,
+            vec![("if-match", format!("\"{version}\""))],
+            json!({"description":"Changed"}),
+        );
+        assert_eq!(changed.status, 200);
+        assert_ne!(changed.body["version"], first.body["version"]);
+        let stale = dispatch(
+            "PATCH",
+            &path,
+            vec![("if-match", format!("\"{version}\""))],
+            json!({"description":"Stale"}),
+        );
+        assert_eq!(stale.status, 412);
+        assert_eq!(stale.body["code"], "task_version_conflict");
+        let replay = dispatch(
+            "POST",
+            "/v1/tasks",
+            vec![("idempotency-key", "receipt".into())],
+            json!({"title":"Original"}),
+        );
+        assert_eq!(replay.body, first.body);
+        assert_eq!(
+            crate::storage::read_sqlite_data(&conn).unwrap()["tasks"][0]["description"],
+            "Changed"
+        );
+    }
+
+    #[test]
+    fn reliability_concurrent_create_admission_replays_one_committed_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent.db");
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        crate::storage::local_operation_test_seed(&mut conn, &empty_local_api_data()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let workers = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let conn = rusqlite::Connection::open(path).unwrap();
+                    conn.busy_timeout(Duration::from_secs(5)).unwrap();
+                    barrier.wait();
+                    reliability_create(
+                        &conn,
+                        "retry",
+                        "credential",
+                        &json!({"title":"Original"}),
+                        100,
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results[0].0, results[1].0);
+        assert_ne!(results[0].1, results[1].1);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM local_api_create_receipts",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn reliability_http_headers_conditions_aliases_and_auth_are_bounded() {
+        let task = json!({"id":"task", "title":"Task", "rev":1});
+        let version = task_version(&task);
+        assert_ne!(
+            version,
+            task_version(&json!({"id":"task", "title":"Different", "rev":1}))
+        );
+        assert_eq!(
+            version,
+            task_version(
+                &serde_json::from_str::<Value>("{\"rev\":1,\"title\":\"Task\",\"id\":\"task\"}")
+                    .unwrap()
+            )
+        );
+        let header = format!("W/\"{version}\", \"other\", \"{version}\"");
+        assert_eq!(
+            parse_if_match(&header).unwrap(),
+            TaskMatchCondition::Versions(vec!["other".into(), version.clone()])
+        );
+        assert_eq!(parse_if_match(" * ").unwrap(), TaskMatchCondition::Exists);
+        for header in [
+            "",
+            "token",
+            "*, \"token\"",
+            "\"token\",",
+            "w/\"token\"",
+            "\"unterminated",
+            "\"bad\nvalue\"",
+        ] {
+            assert!(parse_if_match(header).is_err(), "{header:?}");
+        }
+        let data = json!({"tasks":[task]});
+        assert!(ensure_task_version(
+            &data,
+            "task",
+            &parse_if_match(&format!("W/\"{version}\"")).unwrap()
+        )
+        .is_err());
+        assert!(ensure_task_version(&data, "missing", &TaskMatchCondition::Exists).is_err());
+        let response = ApiResponse::ok(task_response(data["tasks"][0].clone()));
+        assert!(http_response(&response).contains(&format!("ETag: \"{version}\"\r\n")));
+        assert!(
+            http_response(&api_error_response("task_version_conflict".into()))
+                .starts_with("HTTP/1.1 412 Precondition Failed")
+        );
+        for token in ["", "space token", "new\nline", "é"] {
+            assert!(create_receipt(token, &json!({})).is_err());
+        }
+        assert!(create_receipt(&"a".repeat(128), &json!({})).is_ok());
+        assert!(create_receipt(&"a".repeat(129), &json!({})).is_err());
+        let mut request = ApiRequest {
+            method: "POST".into(),
+            path: "/v1/tasks".into(),
+            query: HashMap::new(),
+            headers: HashMap::from([
+                ("authorization".into(), "Bearer secret".into()),
+                ("idempotency-key".into(), "token".into()),
+            ]),
+            body: serde_json::to_vec(&json!({"title":"Task"})).unwrap(),
+        };
+        assert!(matches!(
+            operation_from_api_request(&request).unwrap(),
+            Some(LocalOperation::CreateTaskWithReceipt { .. })
+        ));
+        let access = LocalApiAccess {
+            allow_write: true,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        let response = handle_api_operation("secret", &access, request, |operation| {
+            let LocalOperation::CreateTaskWithReceipt { receipt, .. } = operation else {
+                panic!()
+            };
+            assert_eq!(
+                receipt.credential_digest,
+                Some(format!("{:x}", Sha256::digest(b"secret")))
+            );
+            Ok(json!({}))
+        });
+        assert_eq!(response.status, 201);
+        request = ApiRequest {
+            method: "PATCH".into(),
+            path: "/v1/tasks/task".into(),
+            query: HashMap::new(),
+            headers: HashMap::from([("if-match".into(), format!("\"{version}\""))]),
+            body: b"{}".to_vec(),
+        };
+        assert!(matches!(
+            operation_from_api_request(&request).unwrap(),
+            Some(LocalOperation::ConditionalPatchTask { .. })
+        ));
+        assert_eq!(
+            handle_api_operation("secret", &access, request, |_| panic!()).status,
+            401
+        );
+        let readonly = LocalApiAccess {
+            allow_write: false,
+            ..access
+        };
+        let request = ApiRequest {
+            method: "POST".into(),
+            path: "/tasks".into(),
+            query: HashMap::new(),
+            headers: HashMap::from([
+                ("authorization".into(), "Bearer secret".into()),
+                ("idempotency-key".into(), "token".into()),
+            ]),
+            body: b"{}".to_vec(),
+        };
+        assert_eq!(
+            handle_api_operation("secret", &readonly, request, |_| panic!()).status,
+            403
+        );
+    }
+
+    #[test]
+    fn advance_reminder_patch_validation_and_clear() {
+        for minutes in [json!(0), json!(1), json!(1440), json!(10080), Value::Null] {
+            let mut patch = json!({"dueReminderLeadMinutes": minutes}).as_object().unwrap().clone();
+            super::sanitize_task_patch_map(&mut patch).unwrap();
+            super::normalize_task_reminder_patch(&mut patch, false);
+            assert_eq!(patch["dueReminderLeadMinutes"], if minutes.is_null() { json!(0) } else { minutes });
+        }
+        for minutes in [json!(-1), json!(1.5), json!(10081), json!("15"), json!(true)] {
+            let mut patch = json!({"dueReminderLeadMinutes": minutes}).as_object().unwrap().clone();
+            assert!(super::sanitize_task_patch_map(&mut patch).is_err());
+        }
+    }
+
+    #[test]
+    fn start_advance_reminder_patch_validation_and_clear() {
+        for minutes in [
+            json!(0),
+            json!(5),
+            json!(15),
+            json!(30),
+            json!(60),
+            Value::Null,
+        ] {
+            let mut patch = json!({"startReminderLeadMinutes": minutes})
+                .as_object()
+                .unwrap()
+                .clone();
+            super::sanitize_task_patch_map(&mut patch).unwrap();
+            super::normalize_task_reminder_patch(&mut patch, false);
+            assert_eq!(
+                patch["startReminderLeadMinutes"],
+                if minutes.is_null() { json!(0) } else { minutes }
+            );
+        }
+        for minutes in [
+            json!(-1),
+            json!(1),
+            json!(1.5),
+            json!(61),
+            json!("15"),
+            json!(true),
+        ] {
+            let mut patch = json!({"startReminderLeadMinutes": minutes})
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(super::sanitize_task_patch_map(&mut patch).is_err());
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn reminder_policy_create_and_patch_preserve_legacy_intent_and_inherit_default() {
+        let data = json!({"tasks": [], "projects": [], "sections": [], "areas": [],
+            "settings": {"taskReminderDefault": "skip"}});
+        for (props, expected, skip) in [
+            (json!({}), "inherit", true),
+            (json!({"suppressMindwtrReminders": false}), "send", false),
+            (json!({"suppressMindwtrReminders": true}), "skip", true),
+            (
+                json!({"reminderPolicy": "send", "suppressMindwtrReminders": true}),
+                "send",
+                false,
+            ),
+        ] {
+            let body = json!({"title": "Reminder policy", "props": props});
+            let mut task =
+                create_task_from_body(body.as_object().unwrap(), "device-a", &data).unwrap();
+            assert_eq!(task["reminderPolicy"], expected);
+            assert_eq!(task["suppressMindwtrReminders"], skip);
+            let patch = json!({"title": "Unrelated edit"});
+            apply_task_patch(&mut task, patch.as_object().unwrap(), "device-a").unwrap();
+            assert_eq!(task["reminderPolicy"], expected);
+            assert_eq!(task["suppressMindwtrReminders"], skip);
+        }
+        let mut data = json!({"tasks": [{"id":"policy", "title":"Policy", "status":"next", "reminderPolicy":"send"}],
+            "settings":{"taskReminderDefault":"skip"}});
+        patch_task_in_data(
+            &mut data,
+            "policy",
+            json!({"reminderPolicy":"inherit"}).as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(data["tasks"][0]["reminderPolicy"], "inherit");
+        assert_eq!(data["tasks"][0]["suppressMindwtrReminders"], true);
+        patch_task_in_data(
+            &mut data,
+            "policy",
+            json!({"suppressMindwtrReminders":false})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(data["tasks"][0]["reminderPolicy"], "send");
+        assert_eq!(data["tasks"][0]["suppressMindwtrReminders"], false);
+        let mut legacy = json!({"id":"legacy", "title":"Legacy", "status":"next", "suppressMindwtrReminders":false}).as_object().unwrap().clone();
+        apply_task_patch(
+            &mut legacy,
+            json!({"title":"Retitled"}).as_object().unwrap(),
+            "device-a",
+        )
+        .unwrap();
+        assert!(!legacy.contains_key("reminderPolicy"));
+        for policy in [json!(true), json!("sometimes"), json!(1)] {
+            assert!(sanitize_task_patch_map(
+                &mut json!({"reminderPolicy":policy})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn local_api_patch_focus_accepts_past_no_offset_review_for_rest_and_mcp() {
+        use crate::storage::{local_operation_test_commit, local_operation_test_seed};
+        let data = json!({
+            "tasks": [{
+                "id": "waiting", "title": "Waiting", "status": "waiting",
+                "reviewAt": "2026-10-01T09:00", "isFocusedToday": false, "rev": 1,
+                "tags": [], "contexts": [],
+                "createdAt": "2026-10-01T08:00:00Z", "updatedAt": "2026-10-01T08:00:00Z"
+            }],
+            "projects": [], "sections": [], "areas": [], "people": [],
+            "settings": {"deviceId": "device-a", "gtd": {"focusTaskLimit": 3}}
+        });
+        let request = ApiRequest {
+            method: "PATCH".into(),
+            path: "/tasks/waiting".into(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&json!({"isFocusedToday": true})).unwrap(),
+        };
+        let rest = operation_from_api_request(&request).unwrap().unwrap();
+        let input = json!({"id": "waiting", "isFocusedToday": true});
+        let mcp =
+            crate::mcp_tools::operation("mindwtr_update_task", input.as_object().unwrap()).unwrap();
+        assert_eq!(rest, mcp);
+        for operation in [rest, mcp] {
+            let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+            local_operation_test_seed(&mut conn, &data).unwrap();
+            let persisted = local_operation_test_commit(
+                &conn,
+                TaskMutationReadScope::patch("waiting", None, None, None, true),
+                |data| mutate_task_operation(data, &operation),
+            )
+            .expect("past no-offset review must allow a Focus star below the cap");
+            let task = find_task(&persisted, "waiting").unwrap();
+            assert_eq!(task["status"], "waiting");
+            assert_eq!(task["isFocusedToday"], true);
+            assert_eq!(task["reviewAt"], "2026-10-01T09:00");
+        }
+    }
+
+    #[test]
+    fn local_api_b2a_review_focus_uses_local_midnight_and_exact_wall_time() {
+        let now = "2026-10-11T23:30:00Z";
+        let offset = time::UtcOffset::from_hms(9, 0, 0).unwrap();
+        let local_wall = |instant: OffsetDateTime| {
+            let local = instant.to_offset(offset);
+            Some(PrimitiveDateTime::new(local.date(), local.time()))
+        };
+        for (review, due) in [
+            ("2026-10-12", true),
+            ("2026-10-12T08:30", true),
+            ("2026-10-12T08:30:00", true),
+            ("2026-10-12T08:30+09:00", true),
+            ("2026-10-11T23:30:00Z", true),
+            ("2026-10-12T08:31", false),
+            ("2026-10-13", false),
+        ] {
+            let mut task = json!({
+                "status": "waiting", "reviewAt": review, "isFocusedToday": true
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            normalize_created_task_focus(&mut task, &empty_local_api_data(), now, &local_wall);
+            assert_eq!(
+                task["isFocusedToday"], due,
+                "Tokyo review eligibility mismatch: {review}"
+            );
+            assert_eq!(task["status"], "waiting");
+        }
+    }
+
+    #[test]
+    fn local_api_seqkey_create_start_today_does_not_displace_first_task() {
+        let now = "2026-10-11T23:30:00Z";
+        let offset = time::UtcOffset::from_hms(9, 0, 0).unwrap();
+        let local_wall = |instant: OffsetDateTime| {
+            let local = instant.to_offset(offset);
+            Some(PrimitiveDateTime::new(local.date(), local.time()))
+        };
+        let data = json!({
+            "tasks": [{
+                "id": "first", "status": "next", "projectId": "project", "orderNum": 1
+            }],
+            "projects": [{"id": "project", "status": "active", "isSequential": true}]
+        });
+        let mut task = json!({
+            "id": "second", "status": "next", "projectId": "project", "orderNum": 2,
+            "startTime": "2026-10-12T07:00", "isFocusedToday": true, "focusOrder": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        normalize_created_task_focus(&mut task, &data, now, &local_wall);
+
+        assert_eq!(
+            task["isFocusedToday"], false,
+            "SEQKEY: a start on Tokyo's today must not displace the first sequential task"
+        );
+        assert_eq!(task["status"], "next");
+        assert_eq!(task["startTime"], "2026-10-12T07:00");
+        assert!(!task.contains_key("focusOrder"));
+    }
+
+    #[test]
+    fn local_api_per_section_flow_holds_only_sequential_sections() {
+        let now = "2026-10-21T10:00:00Z";
+        let local_wall =
+            |instant: OffsetDateTime| Some(PrimitiveDateTime::new(instant.date(), instant.time()));
+        let data = json!({
+            "tasks": [
+                {"id": "find-site", "status": "next", "projectId": "trip", "sectionId": "book", "orderNum": 1},
+                {"id": "find-tent", "status": "next", "projectId": "trip", "sectionId": "prep", "orderNum": 1}
+            ],
+            "projects": [{"id": "trip", "status": "active", "isSequential": false, "perSectionFlow": true}],
+            "sections": [
+                {"id": "book", "projectId": "trip", "title": "Book campsite", "isSequential": true},
+                {"id": "prep", "projectId": "trip", "title": "Prep", "isSequential": false}
+            ]
+        });
+        let created = |section: &str| {
+            let mut task = json!({
+                "id": "new", "status": "next", "projectId": "trip", "sectionId": section,
+                "orderNum": 2, "isFocusedToday": true, "focusOrder": 1
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            normalize_created_task_focus(&mut task, &data, now, &local_wall);
+            task["isFocusedToday"].clone()
+        };
+
+        assert_eq!(
+            created("book"),
+            false,
+            "a later step of a Sequential section waits its turn"
+        );
+        assert_eq!(
+            created("prep"),
+            true,
+            "a Parallel section never holds a task back"
+        );
+    }
+
+    #[test]
+    fn local_api_seqkey_waiting_due_does_not_outrank_review() {
+        let now = OffsetDateTime::parse("2026-10-11T23:30:00Z", &Rfc3339).unwrap();
+        let offset = time::UtcOffset::from_hms(9, 0, 0).unwrap();
+        let local_wall = |instant: OffsetDateTime| {
+            let local = instant.to_offset(offset);
+            Some(PrimitiveDateTime::new(local.date(), local.time()))
+        };
+        let mut task = json!({
+            "status": "waiting", "dueDate": "2026-10-11", "reviewAt": "2026-10-12T08:00"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let review = local_api_focus_schedule_time(task.get("reviewAt"), &local_wall).unwrap();
+
+        assert_eq!(
+            local_api_focus_schedule_key(&task, now, &local_wall),
+            (1, review),
+            "SEQKEY: waiting tasks must rank by their due review, never their due date"
+        );
+        task.remove("reviewAt");
+        assert_eq!(
+            local_api_focus_schedule_key(&task, now, &local_wall),
+            (2, PrimitiveDateTime::MAX)
+        );
+        task.insert("isFocusedToday".into(), Value::Bool(true));
+        assert_eq!(
+            local_api_focus_schedule_key(&task, now, &local_wall),
+            (0, PrimitiveDateTime::MIN)
+        );
+    }
+
+    #[test]
+    fn local_api_b2a_sequential_focus_orders_local_schedule_values() {
+        let now = "2026-10-11T23:30:00Z";
+        let offset = time::UtcOffset::from_hms(9, 0, 0).unwrap();
+        let local_wall = |instant: OffsetDateTime| {
+            let local = instant.to_offset(offset);
+            Some(PrimitiveDateTime::new(local.date(), local.time()))
+        };
+        for (field, schedule, focused) in [
+            ("startTime", "2026-10-12T07:00", false),
+            ("startTime", "2026-10-11T23:00:00Z", false),
+            ("dueDate", "2026-10-12", true),
+            ("dueDate", "2026-10-12T09:00", true),
+            ("dueDate", "2026-10-11T23:00:00Z", true),
+            ("dueDate", "2026-10-13", false),
+            ("reviewAt", "2026-10-12T08:00", true),
+            ("reviewAt", "2026-10-12T08:31", false),
+        ] {
+            let mut data = json!({
+                "tasks": [{
+                    "id": "unscheduled", "status": "next", "projectId": "project", "orderNum": 1
+                }],
+                "projects": [{"id": "project", "status": "active", "isSequential": true}]
+            });
+            let task = json!({
+                "id": "scheduled", "status": "next", "projectId": "project", "orderNum": 2,
+                "isFocusedToday": true, field: schedule
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let mut normalized = task.clone();
+            normalize_created_task_focus(&mut normalized, &data, now, &local_wall);
+            assert_eq!(
+                normalized["isFocusedToday"], focused,
+                "sequential Focus must match core's local schedule rank: {field}={schedule}"
+            );
+
+            data["tasks"][0][field] = json!(schedule);
+            let mut normalized = task;
+            normalize_created_task_focus(&mut normalized, &data, now, &local_wall);
+            assert_eq!(
+                normalized["isFocusedToday"], false,
+                "equal schedule keys must keep manual sequence order: {field}={schedule}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_api_patch_focus_matches_core_admission_cases() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../packages/core/src/__fixtures__/focus-admission/cases.json"
+        ))
+        .expect("valid Focus admission fixture");
+        let defaults = fixture["taskDefaults"].as_object().unwrap();
+        let divergences: Vec<&str> = fixture["knownRustDivergences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let mut mismatches = Vec::new();
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let task = |side: &str| {
+                let mut task = defaults.clone();
+                task.extend(case[side].as_object().unwrap().clone());
+                task
+            };
+            let (before, after) = (task("before"), task("after"));
+            let mut patch: Map<String, Value> = after
+                .iter()
+                .filter(|(key, value)| before.get(*key) != Some(*value))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            for key in before.keys().filter(|key| !after.contains_key(*key)) {
+                patch.insert(key.clone(), Value::Null);
+            }
+            let limit = case["focusTaskLimit"].as_u64().unwrap();
+            let mut data = json!({
+                "tasks": [Value::Object(before)],
+                "projects": [], "sections": [], "areas": [], "people": [],
+                "settings": {"deviceId": "device-a", "gtd": {"focusTaskLimit": limit}},
+                TASK_MUTATION_FOCUSED_COUNT_KEY: case["focusedCount"].clone(),
+            });
+            let offset = time::UtcOffset::from_whole_seconds(
+                case["utcOffsetMinutes"].as_i64().unwrap() as i32 * 60,
+            )
+            .unwrap();
+            let local_wall = |instant: OffsetDateTime| {
+                let local = instant.to_offset(offset);
+                Some(PrimitiveDateTime::new(local.date(), local.time()))
+            };
+            let now = OffsetDateTime::parse(case["now"].as_str().unwrap(), &Rfc3339).unwrap();
+            let result = patch_task_in_data_at(&mut data, "task", &patch, now, &local_wall);
+            let matches = match case["outcome"].as_str().unwrap() {
+                "refused-limit" => result == Err(format!("Focus limit of {limit} reached")),
+                "focused" | "queued" => result
+                    .as_ref()
+                    .is_ok_and(|task| task["isFocusedToday"] == true),
+                "unchanged" => result.is_ok(),
+                other => panic!("{name}: unknown outcome {other}"),
+            };
+
+            if matches == divergences.contains(&name) {
+                mismatches.push(format!("{name}: {result:?}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn local_api_patch_focus_limit_refuses_atomically_for_rest_and_mcp() {
+        use crate::storage::{
+            local_operation_test_commit, local_operation_test_seed, read_sqlite_data,
+        };
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let data = json!({
+            "tasks": (0..4).map(|index| json!({
+                "id": format!("task-{index}"), "title": "Original", "status": "next",
+                "isFocusedToday": index < 3, "tags": [], "contexts": [], "rev": 1,
+                "createdAt": "2026-10-11T12:00:00Z", "updatedAt": "2026-10-11T12:00:00Z"
+            })).collect::<Vec<_>>(),
+            "projects": [], "sections": [], "areas": [], "people": [],
+            "settings": {"deviceId": "device-a", "gtd": {"focusTaskLimit": 3}}
+        });
+        local_operation_test_seed(&mut conn, &data).unwrap();
+        let before = read_sqlite_data(&conn).unwrap();
+        let request = ApiRequest {
+            method: "PATCH".into(),
+            path: "/tasks/task-3".into(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&json!({"isFocusedToday": true, "title": "Changed"})).unwrap(),
+        };
+        let rest = operation_from_api_request(&request).unwrap().unwrap();
+        let input = json!({"id": "task-3", "isFocusedToday": true, "title": "Changed"});
+        let mcp =
+            crate::mcp_tools::operation("mindwtr_update_task", input.as_object().unwrap()).unwrap();
+        assert_eq!(rest, mcp);
+        for operation in [rest, mcp] {
+            let result = local_operation_test_commit(
+                &conn,
+                TaskMutationReadScope::patch("task-3", None, None, None, true),
+                |data| mutate_task_operation(data, &operation),
+            );
+            assert!(
+                result.is_err(),
+                "PATCH must refuse a fourth Focus star at limit 3"
+            );
+            let response = api_error_response(result.unwrap_err());
+            assert_eq!(response.status, 409);
+            assert_eq!(response.body["error"], "Focus limit of 3 reached");
+            assert_eq!(read_sqlite_data(&conn).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn local_api_patch_focus_queued_start_refuses_atomically_with_scoped_count() {
+        use crate::storage::{
+            local_operation_test_commit, local_operation_test_seed, read_sqlite_data,
+        };
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut data = empty_local_api_data();
+        data["settings"] = json!({"deviceId": "device-a", "gtd": {"focusTaskLimit": 3}});
+        data["tasks"] = json!([
+            {"id": "focus-1", "title": "Focus", "status": "next", "isFocusedToday": true},
+            {"id": "focus-2", "title": "Focus", "status": "next", "isFocusedToday": true},
+            {"id": "focus-3", "title": "Focus", "status": "next", "isFocusedToday": true},
+            {"id": "queued", "title": "Queued", "status": "next", "isFocusedToday": true,
+             "startTime": "9999-12-31", "rev": 1}
+        ]);
+        local_operation_test_seed(&mut conn, &data).unwrap();
+        let before = read_sqlite_data(&conn).unwrap();
+        let now = OffsetDateTime::now_utc();
+        let today = crate::local_query::local_wall(now)
+            .map(|wall| wall.date())
+            .unwrap_or_else(|| now.date())
+            .to_string();
+        for patch in [json!({"startTime": null}), json!({"startTime": today})] {
+            let request = ApiRequest {
+                method: "PATCH".into(),
+                path: "/tasks/queued".into(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: serde_json::to_vec(&patch).unwrap(),
+            };
+            let rest = operation_from_api_request(&request).unwrap().unwrap();
+            let mut input = patch.as_object().unwrap().clone();
+            input.insert("id".into(), json!("queued"));
+            let mcp = crate::mcp_tools::operation("mindwtr_update_task", &input).unwrap();
+            assert_eq!(rest, mcp);
+            for operation in [rest, mcp] {
+                let result = local_operation_test_commit(
+                    &conn,
+                    task_patch_read_scope("queued", patch.as_object().unwrap()),
+                    |data| {
+                        assert_eq!(
+                            data[TASK_MUTATION_FOCUSED_COUNT_KEY], 3,
+                            "queued PATCH must load the global Focus count"
+                        );
+                        mutate_task_operation(data, &operation)
+                    },
+                );
+                assert_eq!(result, Err("Focus limit of 3 reached".into()));
+                assert_eq!(read_sqlite_data(&conn).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn local_api_patch_focus_limit_keeps_existing_stars_and_queues_local_tomorrow() {
+        use crate::storage::{local_operation_test_commit, local_operation_test_seed};
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let data = json!({
+            "tasks": (0..4).map(|index| json!({
+                "id": format!("task-{index}"), "title": "Original", "status": "next",
+                "isFocusedToday": index < 3, "tags": [], "contexts": [], "rev": 1,
+                "createdAt": "2026-10-11T12:00:00Z", "updatedAt": "2026-10-11T12:00:00Z"
+            })).collect::<Vec<_>>(),
+            "projects": [], "sections": [], "areas": [], "people": [],
+            "settings": {"deviceId": "device-a", "gtd": {"focusTaskLimit": 3}}
+        });
+        local_operation_test_seed(&mut conn, &data).unwrap();
+        let now = OffsetDateTime::now_utc();
+        let tomorrow = crate::local_query::local_wall(now)
+            .map(|wall| wall.date())
+            .unwrap_or_else(|| now.date())
+            .next_day()
+            .unwrap()
+            .to_string();
+        for (id, patch) in [
+            (
+                "task-0",
+                json!({"isFocusedToday": true, "title": "Kept star"}),
+            ),
+            (
+                "task-3",
+                json!({"isFocusedToday": true, "startTime": tomorrow}),
+            ),
+        ] {
+            let operation = LocalOperation::PatchTask {
+                id: id.into(),
+                body: patch.as_object().unwrap().clone(),
+            };
+            let persisted = local_operation_test_commit(
+                &conn,
+                TaskMutationReadScope::patch(id, None, None, None, true),
+                |data| mutate_task_operation(data, &operation),
+            )
+            .unwrap();
+            let task = find_task(&persisted, id).unwrap();
+            assert_eq!(task["isFocusedToday"], true);
+            assert_eq!(task["status"], "next");
+            assert_eq!(
+                local_api_focused_task_count(&persisted, now, &crate::local_query::local_wall),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn local_api_patch_focus_matches_core_normalization_below_cap() {
+        for (status, review, focused) in [
+            ("inbox", None, true),
+            ("next", None, true),
+            ("waiting", Some("2000-01-01"), true),
+            ("someday", Some("2000-01-01"), true),
+            ("waiting", None, true),
+            ("someday", Some("9999-12-31"), true),
+            ("reference", Some("2000-01-01"), false),
+            ("done", None, false),
+            ("archived", None, false),
+        ] {
+            let mut data = empty_local_api_data();
+            data["tasks"] =
+                json!([{"id": "task", "title": "Original", "status": status, "reviewAt": review}]);
+            let patch = json!({"isFocusedToday": true, "title": "Changed"});
+            let task = patch_task_in_data(&mut data, "task", patch.as_object().unwrap())
+                .expect("ineligible star below the cap must follow core normalization");
+            assert_eq!(task["isFocusedToday"], focused, "{status} {review:?}");
+            assert_eq!(
+                task["status"],
+                if status == "inbox" { "next" } else { status }
+            );
+            assert_eq!(task["title"], "Changed");
+        }
+    }
+
+    #[test]
+    fn local_api_b2a_patch_normalizes_deferred_stars_like_core() {
+        for status in ["waiting", "someday"] {
+            for (patch, focused) in [
+                (json!({"isFocusedToday": true}), true),
+                (
+                    json!({"isFocusedToday": true, "startTime": "9999-12-31"}),
+                    false,
+                ),
+            ] {
+                let mut data = empty_local_api_data();
+                data["tasks"] = json!([{
+                    "id": "task", "title": "Deferred", "status": status,
+                    "startTime": "9999-12-31", "focusOrder": 1
+                }]);
+                let task = patch_task_in_data(&mut data, "task", patch.as_object().unwrap())
+                    .expect("deferred star patch must follow core normalization");
+                assert_eq!(task["isFocusedToday"], focused, "{status} {patch}");
+                assert_eq!(task["status"], status);
+                assert_eq!(task.get("focusOrder"), Some(&json!(1)));
+            }
+        }
+    }
 
     #[test]
     fn mcp_shared_http_parser_preserves_http_10_and_rejects_malformed_versions() {
@@ -4972,8 +6877,7 @@ mod tests {
         let reopened = read_sqlite_data(&conn).unwrap();
         assert_eq!(find_task(&reopened, &id).unwrap()["title"], "Shared task");
         assert_eq!(find_task(&reopened, &id).unwrap()["rev"], 1);
-        // Another writer changes the row between requests; the common transaction
-        // reloads it before the next REST/MCP patch and preserves that edit.
+
         let intervening = LocalOperation::PatchTask {
             id: id.clone(),
             body: json!({"description":"Intervening edit"})
@@ -4983,7 +6887,7 @@ mod tests {
         };
         local_operation_test_commit(
             &conn,
-            TaskMutationReadScope::patch(&id, None, None, None),
+            TaskMutationReadScope::patch(&id, None, None, None, false),
             |data| mutate_task_operation(data, &intervening),
         )
         .unwrap();
@@ -5001,7 +6905,7 @@ mod tests {
         assert_eq!(rest, mcp);
         local_operation_test_commit(
             &conn,
-            TaskMutationReadScope::patch(&id, None, None, None),
+            TaskMutationReadScope::patch(&id, None, None, None, false),
             |data| mutate_task_operation(data, &rest),
         )
         .unwrap();
@@ -5032,7 +6936,7 @@ mod tests {
         };
         assert!(local_operation_test_commit(
             &conn,
-            TaskMutationReadScope::patch(&id, None, None, None),
+            TaskMutationReadScope::patch(&id, None, None, None, false),
             |data| mutate_task_operation(data, &invalid)
         )
         .is_err());
@@ -5040,6 +6944,99 @@ mod tests {
             find_task(&read_sqlite_data(&conn).unwrap(), &id).unwrap(),
             task,
             "failed operation rolls back atomically"
+        );
+    }
+
+    #[test]
+    fn mcp_archive_permission_preserves_history_and_never_spawns_recurring_tasks() {
+        use crate::mcp_server::{handle_mcp_request, McpPermissions};
+        use crate::storage::{
+            local_operation_test_commit, local_operation_test_seed, read_sqlite_data,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mcp-archive.sqlite");
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        let mut seed = empty_local_api_data();
+        let completed_at = "2026-10-01T12:00:00Z";
+        seed["tasks"] = json!([
+            {"id":"history", "title":"History", "status":"done", "completedAt":completed_at,
+                "recurrence":{"rule":"daily","count":5,"completedOccurrences":2},
+                "createdAt":completed_at,"updatedAt":completed_at,"rev":1,"tags":[],"contexts":[]},
+            {"id":"recurring", "title":"Recurring", "status":"next",
+                "recurrence":{"rule":"daily","count":5,"completedOccurrences":2},
+                "createdAt":completed_at,"updatedAt":completed_at,"rev":1,"tags":[],"contexts":[]}
+        ]);
+        local_operation_test_seed(&mut conn, &seed).unwrap();
+        let before = read_sqlite_data(&conn).unwrap();
+        let access = LocalApiAccess {
+            allow_write: true,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        for allowed in [false, true] {
+            for id in ["history", "recurring"] {
+                let request = ApiRequest {
+                    method: "POST".into(),
+                    path: "/mcp".into(),
+                    query: HashMap::new(),
+                    headers: HashMap::from([
+                        ("host".into(), "127.0.0.1:9123".into()),
+                        ("authorization".into(), "Bearer fixture".into()),
+                        ("content-type".into(), "application/json".into()),
+                        (
+                            "accept".into(),
+                            "application/json, text/event-stream".into(),
+                        ),
+                    ]),
+                    body: serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                        "params":{"name":"mindwtr_archive_task","arguments":{"id":id}}}))
+                    .unwrap(),
+                };
+                let mut executed = false;
+                let response = handle_mcp_request(
+                    "fixture",
+                    &access,
+                    McpPermissions {
+                        allow_write: !allowed,
+                        allow_archive: allowed,
+                        allow_delete: false,
+                    },
+                    9123,
+                    request,
+                    |operation| {
+                        executed = true;
+                        let persisted = local_operation_test_commit(
+                            &conn,
+                            TaskMutationReadScope::existing(id, false),
+                            |data| mutate_task_operation(data, &operation),
+                        )?;
+                        Ok(json!({"task":find_task(&persisted, id).unwrap()}))
+                    },
+                );
+                assert_eq!(executed, allowed);
+                assert_eq!(response.body["result"]["isError"] == true, !allowed);
+                if !allowed {
+                    assert_eq!(
+                        read_sqlite_data(&conn).unwrap(),
+                        before,
+                        "denial leaves durable rows unchanged"
+                    );
+                }
+            }
+        }
+        drop(conn);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let reopened = read_sqlite_data(&conn).unwrap();
+        assert_eq!(reopened["tasks"].as_array().unwrap().len(), 2);
+        for id in ["history", "recurring"] {
+            let task = find_task(&reopened, id).unwrap();
+            assert_eq!(task["status"], "archived");
+            assert_eq!(task["rev"], 2);
+            assert_eq!(task["recurrence"]["completedOccurrences"], 2);
+            assert!(valid_cancellation_timestamp(task.get("archivedAt")));
+        }
+        assert_eq!(
+            find_task(&reopened, "history").unwrap()["completedAt"],
+            completed_at
         );
     }
 
@@ -5075,7 +7072,7 @@ mod tests {
                 403
             );
         }
-        // The public Local API token is deliberately unrelated.
+
         request.method = "GET".into();
         assert_eq!(
             authorize_api_request(&request, "external-token", &access)
@@ -5115,10 +7112,6 @@ mod tests {
         );
     }
 
-    /// Every write route serializes on the same `Mutex<()>`, and requests run on their own
-    /// threads. One panic in a handler used to poison it for the life of the process: reads
-    /// kept working while every POST/PATCH/DELETE answered 500 until restart. A `Mutex<()>`
-    /// protects no state a panic could half-mutate, so recover instead of failing.
     #[test]
     fn a_poisoned_write_lock_still_hands_out_a_guard() {
         let write_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
@@ -5270,6 +7263,365 @@ mod tests {
     }
 
     #[test]
+    fn area_patch_is_a_classified_write_operation() {
+        let mut request = ApiRequest {
+            method: "PATCH".into(),
+            path: "/areas/area-1".into(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: br#"{"name":"Work"}"#.to_vec(),
+        };
+        let operation = operation_from_api_request(&request)
+            .unwrap()
+            .expect("area patch route");
+        assert!(operation.writes());
+        assert!(matches!(operation, LocalOperation::PatchArea { id, .. } if id == "area-1"));
+        request.method = "GET".into();
+        assert!(matches!(operation_from_api_request(&request).unwrap(),
+            Some(LocalOperation::GetArea(id)) if id == "area-1"));
+        for path in ["/areas", "/v1/areas"] {
+            request.path = path.into();
+            assert_eq!(
+                operation_from_api_request(&request).unwrap(),
+                Some(LocalOperation::ListAreas)
+            );
+        }
+        for (method, path) in [
+            ("POST", "/areas"),
+            ("DELETE", "/areas/area-1"),
+            ("PATCH", "/areas"),
+            ("PATCH", "/v1/areas/area-1"),
+        ] {
+            request.method = method.into();
+            request.path = path.into();
+            assert!(operation_from_api_request(&request).unwrap().is_none());
+        }
+    }
+
+    fn area_update_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../packages/core/src/__fixtures__/local-api-area-update.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn area_updates_match_core_golden_cases() {
+        let fixture = area_update_fixture();
+        for case in fixture["cases"].as_array().unwrap() {
+            let mut data = fixture["before"].clone();
+            let changed = patch_area_in_data(
+                &mut data,
+                "area-1",
+                case["patch"].as_object().unwrap(),
+                fixture["now"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(changed.areas.len(), 1, "{}", case["label"]);
+            assert_eq!(
+                live_project_area(&data, "area-1").unwrap(),
+                &case["expected"]["area"],
+                "{}",
+                case["label"]
+            );
+            assert_eq!(
+                data["projects"], case["expected"]["projects"],
+                "{}",
+                case["label"]
+            );
+            assert_eq!(data["tasks"], fixture["before"]["tasks"]);
+            assert_eq!(data["sections"], fixture["before"]["sections"]);
+            assert!(changed.tasks.is_empty() && changed.sections.is_empty());
+            for area in fixture["before"]["areas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|area| area["id"] != "area-1")
+            {
+                assert!(data["areas"].as_array().unwrap().contains(area));
+            }
+        }
+    }
+
+    #[test]
+    fn area_name_collisions_match_core_unicode_normalization_without_mutating_rows() {
+        let fixture = area_update_fixture();
+        for case in fixture["normalizationCases"].as_array().unwrap() {
+            let mut data = fixture["before"].clone();
+            data["areas"].as_array_mut().unwrap().truncate(2);
+            data["areas"][1]["name"] = case["left"].clone();
+            let before = data.clone();
+            let patch = json!({"name":case["right"],"color":null,"icon":"updated","order":2});
+            let result = patch_area_in_data(
+                &mut data,
+                "area-1",
+                patch.as_object().unwrap(),
+                fixture["now"].as_str().unwrap(),
+            );
+            if case["collides"] == true {
+                assert_eq!(
+                    api_error_response(result.unwrap_err()).status,
+                    409,
+                    "{case}"
+                );
+                assert_eq!(data, before, "{case}");
+            } else {
+                assert!(result.is_ok(), "{case}");
+            }
+        }
+    }
+
+    fn area_http_request(
+        port: u16,
+        method: &str,
+        id: &str,
+        body: Value,
+        token: &str,
+    ) -> (u16, Value) {
+        let body = if method == "GET" {
+            String::new()
+        } else {
+            body.to_string()
+        };
+
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let response = client
+            .request(
+                method.parse().unwrap(),
+                format!("http://{LOCAL_API_HOST}:{port}/areas/{id}"),
+            )
+            .bearer_auth(token)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .unwrap();
+        (response.status().as_u16(), response.json().unwrap())
+    }
+
+    #[test]
+    fn area_http_request_requires_a_complete_framed_response_without_waiting_for_eof() {
+        for content_length in [2, 3] {
+            let listener = TcpListener::bind((LOCAL_API_HOST, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (finished, completion) = std::sync::mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                read_request(&mut stream, far_future_deadline())
+                    .unwrap()
+                    .unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\n\r\n{{}}"
+                )
+                .unwrap();
+                if content_length == 2 {
+                    completion.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+            });
+            let result = std::panic::catch_unwind(|| {
+                area_http_request(port, "GET", "area-1", Value::Null, "token")
+            });
+            if content_length == 2 {
+                assert_eq!(result.unwrap(), (200, json!({})));
+                finished.send(()).unwrap();
+            } else {
+                assert!(
+                    result.is_err(),
+                    "a truncated body must fail even if it is valid JSON"
+                );
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn area_http_updates_are_durable_and_fail_atomically() {
+        use crate::storage::{
+            local_area_operation_test_commit, local_operation_test_seed, read_sqlite_data,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("areas.sqlite");
+        let fixture = area_update_fixture();
+        let mut conn = rusqlite::Connection::open(&database).unwrap();
+        local_operation_test_seed(&mut conn, &fixture["before"]).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let before = read_sqlite_data(&conn).unwrap();
+        let handler_database = database.clone();
+        let write_lock = Arc::new(Mutex::new(()));
+        let listener = start_http_listener(0, true, move |access, _, request| {
+            handle_api_operation("area-http-token", access, request, |operation| {
+                let _guard = if operation.writes() {
+                    Some(access.lock_write(&write_lock)?)
+                } else {
+                    None
+                };
+                let conn = rusqlite::Connection::open(&handler_database)
+                    .map_err(|error| error.to_string())?;
+                conn.execute_batch("PRAGMA foreign_keys=ON;")
+                    .map_err(|error| error.to_string())?;
+                let (id, data) = match operation {
+                    LocalOperation::PatchArea { id, body } => {
+                        let data = local_area_operation_test_commit(&conn, &id, |data| {
+                            Ok((
+                                (),
+                                patch_area_in_data(data, &id, &body, "2026-10-11T12:00:00.000Z")?,
+                            ))
+                        })?;
+                        (id, data)
+                    }
+                    LocalOperation::GetArea(id) => (id, read_sqlite_data(&conn)?),
+                    _ => return Err("Unsupported test operation".into()),
+                };
+                Ok(json!({"area": live_project_area(&data, &id).ok_or("Area not found")?}))
+            })
+        })
+        .unwrap();
+        let port = listener.port;
+        let token = "area-http-token";
+        assert_eq!(
+            area_http_request(port, "GET", "missing", Value::Null, token).0,
+            404
+        );
+        assert_eq!(
+            area_http_request(port, "GET", "deleted-area", Value::Null, token).0,
+            404
+        );
+        assert_eq!(
+            area_http_request(
+                port,
+                "PATCH",
+                "area-1",
+                json!({"name":"Unauthorized"}),
+                "wrong"
+            )
+            .0,
+            401
+        );
+        for (id, patch, status) in [
+            ("missing", json!({"name":"Office"}), 404),
+            ("deleted-area", json!({"name":"Office"}), 404),
+            ("area-1", json!({}), 400),
+            ("area-1", json!({"name":"\u{feff} \t"}), 400),
+            ("area-1", json!({"name":null}), 400),
+            ("area-1", json!({"name":1}), 400),
+            ("area-1", json!({"order":null}), 400),
+            ("area-1", json!({"order":"1"}), 400),
+            ("area-1", json!({"color":false}), 400),
+            ("area-1", json!({"icon":1}), 400),
+            ("area-1", json!({"rev":20}), 400),
+            (
+                "area-1",
+                json!({"name":"\u{feff}hOmE\u{feff}","color":"#10b981","icon":null,"order":1.5}),
+                409,
+            ),
+        ] {
+            assert_eq!(
+                area_http_request(port, "PATCH", id, patch.clone(), token).0,
+                status,
+                "{id} {patch}"
+            );
+            assert_eq!(
+                read_sqlite_data(&conn).unwrap(),
+                before,
+                "rejected request must not change rows"
+            );
+        }
+        conn.execute_batch(
+            "CREATE TRIGGER reject_area_project BEFORE UPDATE ON projects WHEN NEW.id = 'archived'
+            BEGIN SELECT RAISE(ABORT, 'injected area project failure'); END;",
+        )
+        .unwrap();
+        assert_eq!(
+            area_http_request(
+                port,
+                "PATCH",
+                "area-1",
+                json!({"name":"Office","color":"#10b981"}),
+                token
+            )
+            .0,
+            500
+        );
+        assert_eq!(
+            read_sqlite_data(&conn).unwrap(),
+            before,
+            "failure rolls back area and earlier project writes"
+        );
+        conn.execute_batch("DROP TRIGGER reject_area_project;")
+            .unwrap();
+        let (status, response) = area_http_request(
+            port,
+            "PATCH",
+            "area-1",
+            fixture["cases"][0]["patch"].clone(),
+            token,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            response,
+            json!({"area": fixture["cases"][0]["expected"]["area"]})
+        );
+        let after = read_sqlite_data(&conn).unwrap();
+        for expected in fixture["cases"][0]["expected"]["projects"]
+            .as_array()
+            .unwrap()
+        {
+            let actual = find_project(&after, expected["id"].as_str().unwrap()).unwrap();
+            for (field, value) in expected.as_object().unwrap() {
+                assert_eq!(&actual[field], value, "{} {field}", expected["id"]);
+            }
+        }
+        assert_eq!(
+            after["tasks"], before["tasks"],
+            "child foreign keys and content survive"
+        );
+        assert_eq!(after["sections"], before["sections"]);
+        assert_eq!(
+            area_http_request(port, "GET", "area-1", Value::Null, token),
+            (200, response)
+        );
+        drop(conn);
+        let reopened = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            read_sqlite_data(&reopened).unwrap(),
+            after,
+            "HTTP success survives database reopen"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn area_http_read_only_denies_patch_before_execution() {
+        let listener = start_http_listener(0, false, |access, _, request| {
+            handle_api_operation("area-http-token", access, request, |_| {
+                panic!("read-only area patch must not reach storage")
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            area_http_request(
+                listener.port,
+                "PATCH",
+                "area-1",
+                json!({"name":"Office"}),
+                "area-http-token"
+            )
+            .0,
+            403
+        );
+        drop(listener);
+    }
+
+    #[test]
     fn normalizes_default_local_api_port() {
         assert_eq!(
             normalize_local_api_port(None).unwrap(),
@@ -5286,11 +7638,6 @@ mod tests {
         assert_eq!(query.get("status").map(String::as_str), Some("next"));
     }
 
-    // R-04: without the deadline check, a client that sends a partial
-    // request and then goes silent would block read_request on read()
-    // forever (nothing here ever closes the socket or sends more data). An
-    // already-expired deadline must be caught at the top of the loop before
-    // that blocking read is attempted at all.
     #[test]
     fn read_request_aborts_a_slow_drip_connection_once_the_deadline_passes() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -5310,14 +7657,6 @@ mod tests {
         );
     }
 
-    // I3: without a write timeout, write_all against a peer that never drains
-    // its socket buffer blocks forever - and since accept_or_reject's 503
-    // rejection runs synchronously on the accept loop's own thread, that
-    // would stop the server from accepting any connection at all, not just
-    // pin one of the capped slots. TcpStream::write_timeout() reads back
-    // what's actually configured on the socket, so this checks the real
-    // write_response wiring directly and fast, instead of filling a send
-    // buffer with a non-reading peer to force an actual multi-second block.
     #[test]
     fn write_response_sets_a_write_timeout_so_a_non_reading_peer_cannot_block_it_forever() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -5333,9 +7672,70 @@ mod tests {
         );
     }
 
-    // Feeds fixed byte chunks to read_request one read() call at a time, so
-    // a test can force "split across multiple reads" deterministically and
-    // instantly - no real sockets or sleeps needed (R-05).
+    #[test]
+    fn handle_connection_completes_large_utf8_response_from_nonblocking_accepted_socket() {
+        let listener = TcpListener::bind((LOCAL_API_HOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        client.write_all(b"GET /tasks HTTP/1.1\r\n\r\n").unwrap();
+        let (stream, _) = listener.accept().unwrap();
+
+        stream.set_nonblocking(true).unwrap();
+        let body = json!({ "payload": "任務".repeat(1_000_000) });
+        let expected_body = serde_json::to_vec_pretty(&body).unwrap();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let access = LocalApiAccess {
+                allow_write: false,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            };
+            handle_connection(
+                &access,
+                address.port(),
+                &move |_, _, request| {
+                    assert_eq!(request.path, "/tasks");
+                    ApiResponse::ok(body.clone())
+                },
+                stream,
+            );
+            finished.send(()).unwrap();
+        });
+
+        assert_eq!(client.peek(&mut [0_u8; 1]).unwrap(), 1);
+
+        let _ = completion.recv_timeout(Duration::from_millis(100));
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        server.join().unwrap();
+
+        let header_end = find_header_end(&received).expect("HTTP response headers");
+        let headers = std::str::from_utf8(&received[..header_end]).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let received_body = &received[header_end + 4..];
+        assert_eq!(content_length, expected_body.len());
+        assert_eq!(
+            received_body.len(),
+            content_length,
+            "large response must contain every advertised UTF-8 byte"
+        );
+        assert_eq!(received_body, expected_body);
+        let decoded: Value = serde_json::from_slice(received_body).unwrap();
+        assert_eq!(
+            decoded["payload"].as_str().unwrap().chars().count(),
+            2_000_000
+        );
+    }
+
     struct ChunkedReader {
         chunks: std::collections::VecDeque<Vec<u8>>,
     }
@@ -5441,8 +7841,6 @@ mod tests {
         );
     }
 
-    // R-04: the 33rd concurrent connection (cap already at 32) gets a 503
-    // instead of a thread.
     #[test]
     fn accept_or_reject_serves_503_once_the_connection_cap_is_reached() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -5531,13 +7929,6 @@ mod tests {
         }
     }
 
-    /// Mirrors `packages/core/src/task-query.test.ts` against the SAME
-    /// (tasks, query) -> expected ids fixture table. `filter_tasks`'s query
-    /// param shape can't express every case the JS/SQL sides cover
-    /// (`excludeStatuses` lists, `projectId`, or "hide archived but keep
-    /// done" independently of `done`) - those cases carry `rustQuery: null`
-    /// and are skipped here; the TS test is the one asserting the full
-    /// fixture-name roster hasn't shrunk.
     #[test]
     fn local_api_filter_tasks_matches_task_query_fixture() {
         let cases: Value = serde_json::from_str(include_str!(
@@ -5585,8 +7976,6 @@ mod tests {
             ran += 1;
         }
 
-        // Sanity check on the check itself: if every case ever became
-        // `rustQuery: null`, the loop above would pass vacuously.
         assert!(
             ran > 0,
             "expected at least one Rust-expressible fixture case"
@@ -6085,8 +8474,6 @@ mod tests {
 
     #[test]
     fn local_api_valid_attachments_accepts_content_identity_fields() {
-        // #370b74f09 added contentRev/contentMtimeMs/contentSize; a GET-edit-PUT
-        // round trip of a task with a synced file attachment must not be rejected.
         let round_trip = json!([{
             "id": "attachment-1",
             "kind": "file",
@@ -6101,8 +8488,21 @@ mod tests {
             "contentRev": 3,
             "contentMtimeMs": 1750000000000_u64,
             "contentSize": 4096,
+            "pendingContentUpload": true,
+            "staleContentHash": "b".repeat(64),
         }]);
         assert!(valid_attachments(&round_trip));
+        for (field, bad_value) in [
+            ("pendingContentUpload", json!("yes")),
+            ("staleContentHash", json!(7)),
+        ] {
+            let mut attachment = round_trip[0].clone();
+            attachment[field] = bad_value.clone();
+            assert!(
+                !valid_attachments(&json!([attachment])),
+                "{field} should reject {bad_value:?}"
+            );
+        }
 
         for field in ["contentRev", "contentMtimeMs", "contentSize"] {
             for bad_value in [json!("not-a-number"), json!(null), json!(-1)] {
@@ -6126,9 +8526,6 @@ mod tests {
 
     #[test]
     fn local_api_valid_attachments_enforces_cloud_key_shape() {
-        // SEC-08: the local HTTP API is a second write path into the same attachments, so a
-        // cloudKey it accepts must be one the sync merge would accept too
-        // (ATTACHMENT_CLOUD_KEY_PATTERN in packages/core/src/sync-normalization.ts).
         let with_cloud_key = |cloud_key: &str| {
             json!([{
                 "id": "attachment-1",
@@ -6173,9 +8570,6 @@ mod tests {
 
     #[test]
     fn local_api_duplicate_attachment_resets_content_identity_fields() {
-        // Mirrors core's duplicateProjectAttachmentCopy semantics: a duplicated
-        // attachment must not share cloudKey/fileHash/content-identity with the
-        // original, or two records point at one cloud blob.
         let original = json!([{
             "id": "attachment-1",
             "kind": "file",
@@ -6189,6 +8583,8 @@ mod tests {
             "contentRev": 3,
             "contentMtimeMs": 1750000000000_u64,
             "contentSize": 4096,
+            "pendingContentUpload": true,
+            "staleContentHash": "b".repeat(64),
         }]);
         let duplicated = duplicate_attachment_value(Some(&original), "2026-01-02T00:00:00.000Z")
             .expect("duplicated attachments");
@@ -6200,6 +8596,8 @@ mod tests {
         assert!(!copy.contains_key("contentRev"));
         assert!(!copy.contains_key("contentMtimeMs"));
         assert!(!copy.contains_key("contentSize"));
+        assert!(!copy.contains_key("pendingContentUpload"));
+        assert!(!copy.contains_key("staleContentHash"));
     }
 
     #[test]
@@ -6413,6 +8811,38 @@ mod tests {
     }
 
     #[test]
+    fn reference_advance_clear_preserves_absence_and_explicit_conversion() {
+        let mut absent = json!({"status":"reference"}).as_object().unwrap().clone();
+        normalize_created_reference_task(&mut absent);
+        assert!(!absent.contains_key("dueReminderLeadMinutes"));
+        let mut configured = json!({"status":"reference","dueReminderLeadMinutes":15})
+            .as_object()
+            .unwrap()
+            .clone();
+        normalize_created_reference_task(&mut configured);
+        assert_eq!(configured["dueReminderLeadMinutes"], 0);
+        for (before, expected) in [("reference", Value::Null), ("next", json!(0))] {
+            let mut task =
+                json!({"id":"task", "status":before, "title":"Task", "tags":[], "contexts":[]})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            apply_task_patch(
+                &mut task,
+                json!({"status":"reference","tags":["#changed"]})
+                    .as_object()
+                    .unwrap(),
+                "device",
+            )
+            .unwrap();
+            assert_eq!(
+                task.get("dueReminderLeadMinutes").unwrap_or(&Value::Null),
+                &expected
+            );
+        }
+    }
+
+    #[test]
     fn local_api_create_canonicalizes_reference_tasks() {
         let data = empty_local_api_data();
         let task = create_task_from_body(
@@ -6446,6 +8876,7 @@ mod tests {
         assert_eq!(task["status"], "reference");
         assert_eq!(task["isFocusedToday"], false);
         assert_eq!(task["pushCount"], 0);
+        assert!(task.get("dueReminderLeadMinutes").is_none());
         for field in [
             "startTime",
             "dueDate",
@@ -6504,6 +8935,67 @@ mod tests {
         .expect("refused focus task remains valid");
         assert_eq!(refused["status"], "inbox");
         assert_eq!(refused["isFocusedToday"], false);
+    }
+
+    #[test]
+    fn local_api_focus_uses_local_day_at_timezone_boundaries() {
+        for (offset_hours, now, start, future) in [
+            (9, "2026-10-11T23:00:00Z", "2026-10-12", false),
+            (9, "2026-10-11T23:00:00Z", "2026-10-12T07:00+09:00", false),
+            (9, "2026-10-11T23:00:00Z", "2026-10-11T23:30:00Z", false),
+            (-4, "2026-10-12T01:00:00Z", "2026-10-12", true),
+            (-4, "2026-10-12T01:00:00Z", "2026-10-12T07:00", true),
+            (-4, "2026-10-12T01:00:00Z", "2026-10-12T01:30:00Z", false),
+            (-4, "2026-10-12T01:00:00Z", "2026-10-12T07:00+09:00", false),
+        ] {
+            let offset = time::UtcOffset::from_hms(offset_hours, 0, 0).unwrap();
+            let local_wall = |instant: OffsetDateTime| {
+                let local = instant.to_offset(offset);
+                Some(PrimitiveDateTime::new(local.date(), local.time()))
+            };
+            let instant = OffsetDateTime::parse(now, &Rfc3339).unwrap();
+            let mut task = json!({
+                "status": "next", "startTime": start, "isFocusedToday": true, "focusOrder": 1
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            assert_eq!(
+                local_api_task_is_future_start(&task, instant, &local_wall),
+                future,
+                "future-start mismatch: offset={offset_hours} now={now} start={start}"
+            );
+            assert_eq!(
+                local_api_focused_task_count(
+                    &json!({"tasks": [task.clone()]}),
+                    instant,
+                    &local_wall
+                ),
+                usize::from(!future),
+                "Focus count mismatch: offset={offset_hours} now={now} start={start}"
+            );
+            let cap_full = json!({
+                "tasks": [{"status": "next", "isFocusedToday": true}],
+                "settings": {"gtd": {"focusTaskLimit": 1}}
+            });
+            normalize_created_task_focus(&mut task, &cap_full, now, &local_wall);
+            assert_eq!(
+                task["isFocusedToday"], future,
+                "Focus cap mismatch: {start}"
+            );
+            assert_eq!(task.contains_key("focusOrder"), future);
+        }
+
+        let utc_unavailable = |_| None;
+        let now = OffsetDateTime::parse("2026-10-12T01:00:00+09:00", &Rfc3339).unwrap();
+        for start in ["2026-10-12", "2026-10-11T23:30:00-04:00"] {
+            let task = json!({"startTime": start});
+            assert!(local_api_task_is_future_start(
+                task.as_object().unwrap(),
+                now,
+                &utc_unavailable
+            ));
+        }
     }
 
     #[test]
@@ -6641,12 +9133,8 @@ mod tests {
         );
     }
 
-    /// Companion to the task parity test below. Without it, adding a cloud-writable project
-    /// field to the schema silently leaves the local API answering 400 for it. Every
-    /// cloud-writable field must be either accepted or listed here with a reason.
     #[test]
     fn local_api_project_allowlist_matches_project_sync_schema() {
-        // Owned by the merge engine / tombstone lifecycle — never a client write.
         const DELIBERATELY_DENIED: [&str; 5] = [
             "deletedAt",
             "purgedAt",
@@ -6654,9 +9142,7 @@ mod tests {
             "attachments",
             "areaTitle",
         ];
-        // Cloud-writable in the schema, but the local API project routes do not implement them
-        // yet. This is a known gap, not a decision: adding one to the allowlist is a deliberate
-        // change and must move the name out of this list.
+
         const NOT_IMPLEMENTED: [&str; 8] = [
             "tagIds",
             "taskSortBy",
@@ -6757,7 +9243,6 @@ mod tests {
         assert!(!task.contains_key("boardOrder"));
         assert_eq!(task["rev"], 4);
 
-        // A later notes edit must not turn cancellation into completion.
         apply_task_patch(
             &mut task,
             json!({"description": "Reason added"}).as_object().unwrap(),
@@ -6768,8 +9253,6 @@ mod tests {
         assert!(task.contains_key("cancelledAt"));
         assert_eq!(task["archivedAt"], archived_at);
 
-        // Correcting the outcome to Completed clears cancellation and does not
-        // create another recurring occurrence from an already archived item.
         let follow_up = apply_task_action(
             &mut task,
             "complete",
@@ -6940,13 +9423,6 @@ mod tests {
         assert_eq!(api_error_response(error).status, 409);
     }
 
-    /// The project counterpart to
-    /// `local_api_apply_task_action_matches_core_write_path_fixture`: drives
-    /// `apply_project_delete_or_restore_at` against the shared fixture's
-    /// `kind: "project-action"` cases, whose `expected` rows are independently
-    /// pinned against core's real `deleteProject`/`restoreProject` in
-    /// packages/core/src/local-api-project-action-parity.test.ts (which also
-    /// owns the case roster).
     #[test]
     fn local_api_project_delete_or_restore_matches_core_fixture() {
         let cases: Value = serde_json::from_str(include_str!(
@@ -7023,11 +9499,7 @@ mod tests {
         let Some(mut task) = task else {
             return Value::Null;
         };
-        // `id` is a fresh random UUID minted independently by each engine
-        // (TS's createNextRecurringTask and this Rust port each call their own
-        // uuid generator) - the one legitimately platform/run-variant field,
-        // so it is excluded rather than compared. Every other key is real
-        // full-task equality against the fixture's `expected`/`localApiExpected`.
+
         task.remove("id");
         Value::Object(task)
     }
@@ -7041,11 +9513,6 @@ mod tests {
         let cases = cases.as_array().expect("fixture array");
 
         for test_case in cases {
-            // The same fixture file also carries `kind: "action"` and
-            // `kind: "project-action"` cases (task and project write-path
-            // parity), asserted by their own tests - this test only owns the
-            // recurrence-only cases, which predate the `kind` field, so its
-            // absence means "recurrence". Mirrors recurrence.test.ts's filter.
             if test_case
                 .get("kind")
                 .and_then(Value::as_str)
@@ -7069,12 +9536,7 @@ mod tests {
                 .get("previousStatus")
                 .and_then(|value| value.as_str())
                 .unwrap_or_else(|| panic!("missing previousStatus for {name}"));
-            // `localApiExpected` is an optional, Rust-only override: recurrence.ts
-            // (the correct engine) and this local API deliberately diverge on
-            // byDay/byMonthDay/rrule cases — core computes the real next date,
-            // this engine refuses (None) rather than guess. `expected` still
-            // pins core's real answer via recurrence.test.ts unchanged;
-            // `localApiExpected`, when present, is what this engine must produce.
+
             let expected = test_case
                 .get("localApiExpected")
                 .or_else(|| test_case.get("expected"))
@@ -7084,6 +9546,119 @@ mod tests {
                 create_next_recurring_task_for_local_api(task, completed_at, previous_status),
             );
             assert_eq!(&actual, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn local_api_start_catchup_refusal_preserves_source_and_supported_completions() {
+        let completed = "2026-08-13T12:00:00.000Z";
+        let local_day =
+            crate::local_query::local_wall(OffsetDateTime::parse(completed, &Rfc3339).unwrap())
+                .unwrap()
+                .date()
+                .to_string();
+        let base = json!({ "id": "late-start", "title": "Recurring", "status": "next",
+            "startTime": "2000-01-01", "recurrence": "daily", "tags": [], "contexts": [] });
+        assert!(recurrence_start_needs_catchup(
+            base.as_object().unwrap(),
+            completed
+        ));
+        let mut data = json!({ "tasks": [base.clone()] });
+        let before = data.clone();
+        let result = mutate_task_operation(
+            &mut data,
+            &LocalOperation::TaskAction {
+                id: "late-start".to_string(),
+                action: "complete".to_string(),
+            },
+        );
+        assert_eq!(result.unwrap_err(), RECURRENCE_REQUIRES_APP);
+        assert_eq!(data, before);
+        let patch = json!({ "status": "done" });
+        assert!(patch_task_in_data(&mut data, "late-start", patch.as_object().unwrap()).is_err());
+        assert_eq!(data, before);
+
+        for (start, needs_app) in [
+            ("2026-08-12T12:00:00.000Z", true),
+            ("2026-08-12T12:00:00.001Z", false),
+            ("2100-01-01", false),
+        ] {
+            let mut task = base.as_object().unwrap().clone();
+            task.insert("startTime".into(), json!(start));
+            assert_eq!(
+                recurrence_start_needs_catchup(&task, completed),
+                needs_app,
+                "{start}"
+            );
+        }
+
+        let (year, month, day, _) = parse_iso_prefix(&local_day).unwrap();
+        let (year, month, day) = add_days(year, month, day, -1);
+        let mut task = base.as_object().unwrap().clone();
+        task.insert(
+            "startTime".into(),
+            json!(format!("{year:04}-{month:02}-{day:02}")),
+        );
+        assert!(!recurrence_start_needs_catchup(&task, completed));
+        for update in [
+            json!({ "dueDate": "2000-01-01" }),
+            json!({ "recurrence": { "rule": "daily", "strategy": "fluid" } }),
+            json!({ "recurrence": { "rule": "daily", "count": 1 } }),
+            json!({ "recurrence": { "rule": "daily", "until": "2000-01-01" } }),
+        ] {
+            let mut task = base.as_object().unwrap().clone();
+            task.extend(update.as_object().unwrap().clone());
+            assert!(!recurrence_start_needs_catchup(&task, completed));
+        }
+        task = base.as_object().unwrap().clone();
+        task.insert("recurrence".into(), json!({ "rule": "daily", "count": 1 }));
+        assert!(create_next_recurring_task_for_local_api(&task, completed, "next").is_none());
+        assert!(recurrence_completion_refusal(
+            &json!({ "tasks": [task] }),
+            "late-start",
+            completed
+        )
+        .is_none());
+        let mixed_offset = json!({ "id": "late-start", "status": "next",
+            "startTime": "2026-08-10T12:00:00+14:00",
+            "recurrence": { "rule": "daily", "until": "2026-08-11T11:00:00-12:00" } });
+        assert!(recurrence_start_needs_catchup(
+            mixed_offset.as_object().unwrap(),
+            "2026-08-10T23:00:00Z"
+        ));
+        assert!(recurrence_completion_refusal(
+            &json!({ "tasks": [mixed_offset] }),
+            "late-start",
+            "2026-08-10T23:00:00Z"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn local_api_recurring_checklist_progress_is_independent_and_list_mode_resets() {
+        for mode in ["task", "list"] {
+            let task = json!({
+                "id": "routine", "title": "Routine", "status": "next", "taskMode": mode,
+                "dueDate": "2026-10-18", "recurrence": { "rule": "weekly", "preserveChecklistOnRepeat": true },
+                "checklist": [{ "id": "a", "title": "First", "isCompleted": true },
+                    { "id": "b", "title": "Second", "isCompleted": false }]
+            });
+            let next = create_next_recurring_task_for_local_api(
+                task.as_object().unwrap(),
+                "2026-10-18T12:00:00Z",
+                "next",
+            )
+            .unwrap();
+            assert_eq!(next["recurrence"]["preserveChecklistOnRepeat"], true);
+            assert_eq!(next["checklist"][0]["isCompleted"], mode == "task");
+            assert_eq!(next["checklist"][1]["isCompleted"], false);
+            assert_ne!(next["checklist"][0]["id"], "a");
+            let third =
+                create_next_recurring_task_for_local_api(&next, "2026-10-25T12:00:00Z", "next")
+                    .unwrap();
+            assert_eq!(third["checklist"][0]["isCompleted"], mode == "task");
+            assert_ne!(third["checklist"][0]["id"], next["checklist"][0]["id"]);
+            assert_eq!(task["checklist"][0]["isCompleted"], true);
         }
     }
 
@@ -7153,8 +9728,7 @@ mod tests {
     #[test]
     fn local_api_complete_does_not_repeat_done_recurring_tasks() {
         assert!(should_create_recurring_follow_up("complete", "next"));
-        // archived -> done is a lifecycle correction (mirrors core's
-        // `isReturningFromArchive` in applyTaskUpdates): no new occurrence.
+
         assert!(!should_create_recurring_follow_up("complete", "archived"));
         assert!(!should_create_recurring_follow_up("complete", "done"));
         assert!(!should_create_recurring_follow_up("archive", "next"));
@@ -7182,9 +9756,6 @@ mod tests {
 
     #[test]
     fn local_api_complete_does_not_refuse_archived_correction_even_with_complex_recurrence() {
-        // archived -> done never spawns a follow-up (it's a correction, not a
-        // completion), so it must never be refused either, even for a
-        // recurrence this engine could not otherwise compute a next date for.
         let data = json!({
             "tasks": [{
                 "id": "byday-archived",
@@ -7194,15 +9765,12 @@ mod tests {
                 "recurrence": { "rule": "weekly", "byDay": ["MO", "WE", "FR"] }
             }]
         });
-        assert!(recurrence_completion_refusal(&data, "byday-archived").is_none());
+        assert!(
+            recurrence_completion_refusal(&data, "byday-archived", "2026-07-20T12:00:00.000Z")
+                .is_none()
+        );
     }
 
-    /// Consolidation-law pin: a test that only iterates `kind: "action"`
-    /// cases can't catch the fixture shrinking - deleting a case would
-    /// silently narrow the loop right along with the bug it stopped
-    /// covering. This roster mirrors the independent, hand-written list in
-    /// packages/core/src/local-api-action-parity.test.ts; removing a case
-    /// from the JSON without removing it in both places fails here.
     #[test]
     fn local_api_action_fixture_matches_pinned_case_roster() {
         const PINNED_ACTION_CASE_NAMES: &[&str] = &[
@@ -7241,12 +9809,6 @@ mod tests {
         assert_eq!(actual_names, expected_names);
     }
 
-    /// The write-path counterpart to `local_api_recurring_task_matches_core_golden_fixture`:
-    /// exercises `apply_task_action` (complete/archive/restore, plus the 409
-    /// refusal) against the same shared fixture's `kind: "action"` cases,
-    /// whose `expectedTask`/`expectedFollowUp` are independently pinned
-    /// against core's real `applyTaskUpdates`/`nextRevision` in
-    /// packages/core/src/local-api-action-parity.test.ts.
     #[test]
     fn local_api_apply_task_action_matches_core_write_path_fixture() {
         let cases: Value = serde_json::from_str(include_str!(
@@ -7272,8 +9834,9 @@ mod tests {
                     .unwrap_or_default()
                     .to_string();
                 let data = json!({ "tasks": [task] });
-                let refusal = recurrence_completion_refusal(&data, &task_id)
-                    .unwrap_or_else(|| panic!("{name}: expected a 409 refusal"));
+                let refusal =
+                    recurrence_completion_refusal(&data, &task_id, "2026-07-20T12:00:00.000Z")
+                        .unwrap_or_else(|| panic!("{name}: expected a 409 refusal"));
                 assert_eq!(refusal.status, 409, "{name}");
                 assert_eq!(
                     refusal.body.get("code").and_then(Value::as_str),
@@ -7333,8 +9896,6 @@ mod tests {
 
             match follow_up {
                 Some(mut next_task) => {
-                    // `id` is a fresh random uuid - the one legitimately
-                    // platform/run-variant field.
                     next_task.remove("id");
                     assert_eq!(
                         Value::Object(next_task),
@@ -7390,6 +9951,69 @@ mod tests {
         assert!(project["id"].as_str().is_some_and(|id| !id.is_empty()));
         assert!(project["createdAt"].is_string());
         assert_eq!(project["createdAt"], project["updatedAt"]);
+    }
+
+    #[test]
+    fn local_api_project_color_override_uses_explicit_presence() {
+        let mut data = json!({"tasks": [], "projects": [], "sections": [], "people": [],
+            "areas": [{"id": "a", "name": "Area", "color": "#3b82f6"}],
+            "settings": {"deviceId": "writer"}});
+        let created = create_project_from_body(
+            json!({"title": "Project", "props": {
+                "areaId": "a", "colorOverride": "#3b82f6"
+            }})
+            .as_object()
+            .unwrap(),
+            &data,
+        )
+        .unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+        data["projects"] = json!([created]);
+        let (renamed, _, _) = patch_project_in_data(
+            &mut data,
+            &id,
+            json!({"title": "Renamed"}).as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(renamed["colorOverride"], "#3b82f6");
+        let (moved, _, _) =
+            patch_project_in_data(&mut data, &id, json!({"areaId": null}).as_object().unwrap())
+                .unwrap();
+        assert_eq!(moved["colorOverride"], "#3b82f6");
+        assert_eq!(moved["color"], "#3b82f6");
+        let (reset, _, _) = patch_project_in_data(
+            &mut data,
+            &id,
+            json!({"colorOverride": null}).as_object().unwrap(),
+        )
+        .unwrap();
+        assert!(reset["colorOverride"].is_null());
+        assert_eq!(reset["color"], DEFAULT_PROJECT_COLOR);
+        for invalid in [json!(false), json!("#fff"), json!("#12345678"), json!("")] {
+            assert!(sanitize_project_fields(
+                json!({"colorOverride": invalid}).as_object().unwrap(),
+                true
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn local_api_project_color_override_restore_detaches_stale_area() {
+        for color_override in [Value::Null, json!("#123456")] {
+            let mut data = json!({"tasks": [], "sections": [], "areas": [], "settings": {},
+                "projects": [{"id": "p", "title": "Project", "status": "active", "color": "#123456",
+                    "colorOverride": color_override, "areaId": "gone", "areaTitle": "Gone",
+                    "order": 0, "tagIds": [], "rev": 1, "createdAt": "2026-10-01T00:00:00Z",
+                    "updatedAt": "2026-10-02T00:00:00Z", "deletedAt": "2026-10-02T00:00:00Z"}]});
+            apply_project_delete_or_restore(&mut data, "p", true).unwrap();
+            let restored = &data["projects"][0];
+            assert!(restored.get("areaId").is_none());
+            assert_eq!(
+                restored["color"],
+                color_override.as_str().unwrap_or(DEFAULT_PROJECT_COLOR)
+            );
+        }
     }
 
     #[test]
@@ -7692,6 +10316,7 @@ mod tests {
         )
         .expect("reference transition");
         assert_eq!(reference["status"], "reference");
+        assert_eq!(reference["dueReminderLeadMinutes"], 0);
         for field in [
             "startTime",
             "dueDate",

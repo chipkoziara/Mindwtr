@@ -1,14 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { useTaskStore } from './store';
+import { flushPendingSave, resetForTests, sameStoreData, storeDataOf, useTaskStore } from './store';
+import { runToEnd } from './cooperative';
+import { cloneAppDataPass } from './sync-runtime-utils';
+import type { AppData } from './types';
 import {
     CLOUD_PROVIDER_DROPBOX,
     CLOUD_PROVIDER_SELF_HOSTED,
     DEFAULT_ATTACHMENT_CLEANUP_INTERVAL_MS,
     LocalSyncAbort,
+    applySyncedDataToStore,
+    captureInMemoryAppDataSnapshot,
     createAbortableFetch,
     ensureFreshLocalSyncSnapshot,
     getInMemoryAppDataSnapshot,
+    loadLeavesStorePass,
+    prepareSyncedDataPublishPass,
     getInMemorySyncChangeFingerprint,
     normalizeCloudProvider,
     shouldRunAttachmentCleanup,
@@ -35,6 +42,123 @@ describe('sync-client-helpers', () => {
         expect(useTaskStore.getState()._allPeople[0]!.name).toBe('Alex');
     });
 
+    it('captures the store in one read, and copying the capture gives the deep snapshot (D9b change 3 review P3-2)', () => {
+        const now = '2026-01-01T00:00:00.000Z';
+        useTaskStore.setState((state) => ({
+            ...state,
+            _allTasks: [{ id: 't1', title: 'Task', status: 'inbox', tags: ['#a'], checklist: [{ id: 'c1', title: 'one', isCompleted: false }], createdAt: now, updatedAt: now }],
+            _allProjects: [{ id: 'p1', title: 'Project', status: 'active', color: '#000000', createdAt: now, updatedAt: now }],
+            _allSections: [{ id: 's1', projectId: 'p1', title: 'Section', createdAt: now, updatedAt: now }],
+            _allAreas: [{ id: 'a1', name: 'Area', order: 0, createdAt: now, updatedAt: now }],
+            _allPeople: [{ id: 'person-1', name: 'Alex', createdAt: now, updatedAt: now }],
+            settings: { gtd: { autoArchiveDays: 7 } },
+        }));
+        const expected = getInMemoryAppDataSnapshot();
+
+        const captured = captureInMemoryAppDataSnapshot();
+
+        useTaskStore.setState({ _allTasks: [], _allPeople: [] });
+        const copy = runToEnd(cloneAppDataPass(captured));
+
+        expect(copy).toEqual(expected);
+        copy.tasks[0]!.tags!.push('#b');
+        expect(captured.tasks[0]!.tags).toEqual(['#a']);
+    });
+
+    it('swaps in a prepared publish only onto the store it was built against, leaving what computing it in the gate leaves (D9b W6)', () => {
+        const now = '2026-01-01T00:00:00.000Z';
+        const later = '2026-01-02T00:00:00.000Z';
+        useTaskStore.setState((state) => ({
+            ...state,
+            _allTasks: [
+                { id: 't1', title: 'Old', status: 'inbox', createdAt: now, updatedAt: now, rev: 1 },
+                { id: 't2', title: 'Kept', status: 'next', createdAt: now, updatedAt: now, rev: 1 },
+            ],
+            _allProjects: [], _allSections: [], _allAreas: [], _allPeople: [],
+            settings: { gtd: { autoArchiveDays: 7 } },
+        }));
+        const before = useTaskStore.getState();
+        const doc: AppData = {
+            tasks: [
+                { id: 't1', title: 'New', status: 'next', createdAt: now, updatedAt: later, rev: 2 },
+                { ...before._allTasks[1]! },
+                { id: 't3', title: 'Added', status: 'inbox', createdAt: later, updatedAt: later, rev: 1 },
+            ],
+            projects: [], sections: [], areas: [], people: [],
+            settings: { gtd: { autoArchiveDays: 14 } },
+        };
+        const shown = () => {
+            const state = useTaskStore.getState();
+            return { all: state._allTasks, visible: state.tasks, byId: [...state._tasksById.entries()], projects: state._allProjects, settings: state.settings };
+        };
+        expect(applySyncedDataToStore(doc, useTaskStore)).toBe(false);
+        const inGate = shown();
+
+        useTaskStore.setState(before, true);
+        const prepared = runToEnd(prepareSyncedDataPublishPass(doc));
+        expect(applySyncedDataToStore(doc, useTaskStore, prepared)).toBe(true);
+        expect(shown()).toEqual(inGate);
+
+        expect(useTaskStore.getState()._tasksById.get('t2')).toBe(before._allTasks[1]);
+
+
+        useTaskStore.setState(before, true);
+        const stale = runToEnd(prepareSyncedDataPublishPass(doc));
+        useTaskStore.setState((state) => ({ settings: { ...state.settings, lastSyncStatus: 'syncing' } }));
+        expect(applySyncedDataToStore(doc, useTaskStore, stale)).toBe(false);
+        useTaskStore.setState(before, true);
+        expect(applySyncedDataToStore({ ...doc }, useTaskStore, runToEnd(prepareSyncedDataPublishPass(doc)))).toBe(false);
+        expect(shown()).toEqual(inGate);
+    });
+
+
+    it.each([
+        ['a document the load leaves as it is', true, (doc: AppData) => doc],
+        ['a row that needs normalizeTaskForLoad', false, (doc: AppData) => ({
+
+            ...doc, tasks: [...doc.tasks, { id: 'raw', title: 'Raw', status: 'inbox', createdAt: '2026-01-02T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', rev: 1 } as AppData['tasks'][number]],
+        })],
+        ['a row a load migration changes', false, (doc: AppData) => ({
+            ...doc, tasks: doc.tasks.map((task) => (task.id === 't2'
+                ? { ...task, status: 'done' as const, completedAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString(), rev: 2 }
+                : task)),
+        })],
+        ['a kept store row whose Focus fields differ', false, (doc: AppData) => {
+            useTaskStore.setState((state) => ({ _allTasks: state._allTasks.map((task) => (task.id === 't1' ? { ...task, isFocusedToday: true } : task)) }));
+            return doc;
+        }],
+    ])('says the end-of-cycle load changes nothing exactly when it does not: %s', async (_name, covered, change) => {
+        await flushPendingSave();
+        resetForTests();
+        const now = new Date().toISOString();
+
+        useTaskStore.setState({ _allTasks: [], _allProjects: [], _allSections: [], _allAreas: [], _allPeople: [], settings: {} });
+        await useTaskStore.getState().fetchData({ silent: true, preloadedData: {
+            tasks: [
+                { id: 't1', title: 'One', status: 'next', createdAt: now, updatedAt: now, rev: 1 },
+                { id: 't2', title: 'Two', status: 'next', createdAt: now, updatedAt: now, rev: 1 },
+            ],
+            projects: [{ id: 'p1', title: 'Project', status: 'active', color: '#000000', createdAt: now, updatedAt: now, rev: 1 }],
+            sections: [], areas: [], people: [], settings: { deviceId: 'this-device' },
+        } as AppData });
+        await flushPendingSave();
+        expect(useTaskStore.getState()._allTasks.map((task) => task.id)).toEqual(['t1', 't2']);
+        expect(useTaskStore.getState().settings).toMatchObject({ deviceId: 'this-device', migrations: { version: expect.any(Number) } });
+
+        const doc = change(getInMemoryAppDataSnapshot());
+
+        const prepared = runToEnd(prepareSyncedDataPublishPass(doc));
+        expect(applySyncedDataToStore(doc, useTaskStore, prepared)).toBe(true);
+        const published = storeDataOf(useTaskStore.getState());
+        const shown = useTaskStore.getState();
+        const leaves = runToEnd(loadLeavesStorePass(doc, { tasks: shown._allTasks, projects: shown._allProjects }));
+        await useTaskStore.getState().fetchData({ silent: true, preloadedData: doc });
+        await flushPendingSave();
+
+        expect(leaves).toBe(covered);
+        expect(sameStoreData(storeDataOf(useTaskStore.getState()), published)).toBe(covered);
+    });
+
     it('fingerprints store changes without cloning, and ignores device-local sync status', () => {
         const now = '2026-01-01T00:00:00.000Z';
         useTaskStore.setState((state) => ({
@@ -48,8 +172,7 @@ describe('sync-client-helpers', () => {
         }));
         const before = getInMemorySyncChangeFingerprint();
 
-        // Sync bookkeeping is patched straight into settings after every cycle;
-        // it must never look like a change worth syncing again (#766).
+
         useTaskStore.setState((state) => ({
             settings: { ...state.settings, lastSyncAt: now, lastSyncStatus: 'success' },
         }));

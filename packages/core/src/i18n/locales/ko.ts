@@ -1,5 +1,28 @@
-// Split from i18n-translations.ts to make community translation contributions easier.
+
 export const koOverrides: Record<string, string> = {
+    "taskEdit.startAdvanceReminderLabel": "시작 전",
+    "settings.speechUseGemini": "Gemini 사용",
+    "settings.speechNativeUnsupported": "이 음성 제공업체는 아직 여기서 지원되지 않습니다. 음성 입력을 사용하려면 Gemini, OpenAI 또는 Whisper를 선택하세요.",
+    "settings.speechGeminiDisclosure": "녹음은 텍스트 변환을 위해 Gemini로 직접 전송됩니다. Mindwtr는 녹음을 수집하지 않습니다.",
+    "settings.speechGeminiCredentialShared": "이 Gemini API 키는 이 기기에서 Gemini 텍스트 AI 기능에도 사용됩니다.",
+    "quickAdd.audioStopAndSave": "중지하고 저장",
+    "quickAdd.audioTooLarge": "녹음 파일이 너무 큽니다. 더 짧게 녹음해 보세요.",
+    "quickAdd.audioNoSpeech": "녹음에서 음성을 찾지 못했습니다.",
+    "quickAdd.audioNotRetained": "오디오 보관이 꺼져 있습니다. 앱을 다시 시작한 후에는 텍스트 변환이 재개되지 않습니다.",
+    "quickAdd.audioSingleTaskOnly": "녹음 하나는 작업 하나에 저장할 수 있습니다. 추가 작업 줄을 삭제하세요.",
+    "settings.aiConfigureTextAssistant": "텍스트 도우미 설정",
+    "settings.aiCredentialPresent": "API 키 사용 가능",
+    "settings.aiCredentialMissing": "저장된 API 키 없음",
+    "settings.aiConsentRecordFailed": "동의는 수락되었지만 이 기기에 저장하지 못했습니다. 다시 물어볼 수 있습니다.",
+    "settings.aiConfigurationSaved": "AI 설정 저장됨",
+    "settings.aiCredentialSaved": "API 키 저장됨",
+    "settings.aiCredentialCleared": "API 키 삭제됨",
+    'settings.importDiagnostics.unknownColumns': "알 수 없는 열 {{count}}개를 무시했습니다.",
+    'settings.importDiagnostics.csvLocation': "{{row}}행, {{column}}열",
+    'settings.importDiagnostics.csvArchiveLocation': "CSV 항목 {{entry}}, {{row}}행, {{column}}열",
+    'settings.importDiagnostics.csvLocations': "위치(CSV 레코드 기준, 머리글은 1행): {{locations}}.",
+    'settings.importDiagnostics.csvLocationsMore': "추가 위치 {{count}}개는 표시하지 않습니다.",
+    "projects.convertBlocked.destination-section-sequence": "순차 → 섹션별로 설정된 대상 프로젝트를 선택하세요. 새 섹션은 작업 순서를 유지하고 다른 섹션은 독립적으로 진행됩니다.",
     'timeline.moveTaskDates': "작업 날짜 이동",
     'timeline.moveProjectDates': "프로젝트 날짜 이동",
     'timeline.resizeStart': "시작일 조정",
@@ -9,6 +32,13 @@ export const koOverrides: Record<string, string> = {
     'timeline.dateEditFailed': "날짜를 업데이트하지 못했습니다. 날짜 범위를 확인하고 다시 시도하세요.",
     'timeline.dateUndoConflict': "편집 후 날짜가 변경되어 실행 취소를 건너뛰었습니다.",
     'timeline.dateUndoFailed': "날짜 변경을 취소하지 못했습니다. 다시 시도하세요.",
+    "timeline.reorderTask": "작업 순서 변경",
+    "timeline.reorderProject": "프로젝트 순서 변경",
+    "timeline.reorderConflict": "다른 곳에서 순서가 변경되었습니다. 다시 시도하세요.",
+    "timeline.reorderFailed": "새 순서를 저장할 수 없습니다. 다시 시도하세요.",
+    "timeline.reorderInstructions": "스페이스로 행을 선택하고 위아래 키로 그룹 안에서 이동한 다음 스페이스로 놓거나 이스케이프로 취소하세요.",
+    "task.addToChecklist": "체크리스트에 추가…",
+    "task.addedToChecklist": "체크리스트에 추가됨",
     "task.expandChecklist": "체크리스트 항목을 프로젝트 할 일로 전환",
     "task.keepChecklistDescription": "원래 할 일과 체크리스트를 프로젝트 안에 유지합니다.",
     "task.expandChecklistDescription": "순서와 체크 상태를 유지하여 항목마다 할 일을 만듭니다. 메모, 첨부파일, 날짜는 프로젝트로 옮기고 태그와 맥락은 새 할 일에 유지합니다. 원본은 휴지통으로 이동합니다. 집중 표시는 복사하지 않습니다. 전환을 되돌릴 수 있습니다.",
@@ -21,6 +51,9 @@ export const koOverrides: Record<string, string> = {
     "task.expandChecklistSaveFailed": "전환을 저장하지 못했습니다. 다시 시도하면 중복 없이 같은 전환을 저장합니다.",
 
     'task.copyTitle': '제목 복사',
+    "task.copyTaskLink": "Mindwtr 링크 복사",
+    "task.copyTaskId": "작업 ID 복사",
+    "task.linkNotFound": "이 라이브러리에 작업이 없습니다. 삭제되었거나 이 기기에 아직 동기화되지 않았을 수 있습니다.",
     'task.titleCopied': '제목이 복사되었습니다',
     "settings.mcpTitle": "로컬 MCP 서버 (고급)",
     "settings.mcpDesc": "이 컴퓨터의 AI 클라이언트를 Mindwtr에 연결합니다.",
@@ -30,16 +63,24 @@ export const koOverrides: Record<string, string> = {
     "settings.mcpPrivacy": "연결은 이 컴퓨터에 한정됩니다. AI 클라이언트가 작업 데이터를 원격 서비스로 보낼 수 있으므로 AI가 완전히 로컬에서 실행되는 것은 아닙니다.",
     "settings.mcpRunning": "실행 중",
     "settings.mcpStopped": "중지됨",
-    "settings.mcpAllowWrite": "변경 허용",
-    "settings.mcpAllowWriteDesc": "연결된 AI 클라이언트가 작업을 추가, 편집, 완료 및 삭제하고 프로젝트를 추가, 편집 또는 삭제하도록 허용합니다. 끄면 읽기 전용입니다.",
+    "settings.mcpAllowWrite": "작업 및 프로젝트 편집 허용",
+    "settings.mcpAllowWriteDesc": "연결된 AI 클라이언트가 작업을 추가, 편집, 완료 및 복원하고 프로젝트를 추가하거나 편집하도록 허용합니다. 보관과 삭제는 고급에서 별도의 권한을 설정합니다.",
+    "settings.mcpAllowArchive": "보관 허용",
+    "settings.mcpAllowArchiveDesc": "연결된 AI 클라이언트가 작업과 프로젝트를 삭제하지 않고 보관하도록 허용합니다.",
+    "settings.mcpAllowDelete": "삭제 허용",
+    "settings.mcpAllowDeleteDesc": "연결된 AI 클라이언트가 작업과 프로젝트를 삭제하도록 허용합니다.",
+    "settings.mcpPort": "MCP 포트",
+    "settings.mcpPortDesc": "1024부터 65535 사이의 포트를 선택하세요. 저장하면 서버가 다시 시작되므로 AI 클라이언트의 연결 설정을 업데이트해야 합니다.",
     "settings.mcpCopyHint": "연결 정보에는 비공개 액세스 토큰이 포함됩니다. 신뢰하는 AI 클라이언트에만 공유하세요.",
     "settings.mcpCopy": "연결 정보 복사",
+    "settings.mcpCopyCodex": "Codex용으로 복사",
     "settings.mcpRotate": "액세스 토큰 재생성",
     "settings.mcpRotateHint": "재생성하면 모든 이전 연결이 취소됩니다. 새 연결 정보로 AI 클라이언트를 업데이트하세요.",
     "settings.mcpCopied": "연결 정보를 복사했습니다.",
     "settings.mcpCopyFailed": "연결 정보를 복사할 수 없습니다.",
     "settings.mcpTokenRotated": "액세스 토큰을 재생성했습니다. 이전 연결이 취소되었습니다.",
-    "settings.mcpError.port_in_use": "8722 포트가 사용 중입니다. 다른 서비스를 닫고 다시 시도하세요.",
+    "settings.mcpError.port_in_use": "선택한 포트가 사용 중입니다. 고급에서 다른 포트를 선택하거나 해당 포트를 사용하는 다른 서비스를 닫고 다시 시도하세요.",
+    "settings.mcpError.invalid_port": "1024부터 65535 사이의 정수로 포트 번호를 입력하세요.",
     "settings.mcpError.start_failed": "MCP 서버를 시작할 수 없습니다. 다시 시도하세요.",
     "settings.mcpError.exited": "MCP 서버가 예기치 않게 중지되었습니다. 다시 시도하세요.",
     "settings.mcpError.config_failed": "MCP 설정을 불러오거나 저장할 수 없습니다. 다시 시도하세요.",
@@ -106,6 +147,28 @@ export const koOverrides: Record<string, string> = {
     'sandbox.confirmTitle': "샌드박스를 열까요?",
     'sandbox.confirmDescription': "가상의 작업과 프로젝트로 버그를 녹화하거나 데모를 진행하세요. 개인 데이터는 별도로 유지됩니다. 샌드박스의 변경 사항은 종료할 때 삭제됩니다.",
     'sandbox.enter': "샌드박스 열기",
+    'workspaces.title': "작업 공간",
+    'workspaces.description': "이 컴퓨터에서 작업, 첨부 파일, 동기화 서버, 설정을 따로 보관합니다. 한 번에 하나의 작업 공간만 열리며, 열린 작업 공간만 동기화하고 알림을 보냅니다.",
+    'workspaces.defaultName': "기본값",
+    'workspaces.open': "열림",
+    'workspaces.add': "작업 공간 추가",
+    'workspaces.namePlaceholder': "작업 공간 이름",
+    'workspaces.switch': "전환",
+    'workspaces.switchTitle': "작업 공간을 전환할까요?",
+    'workspaces.switchDesc': "{{name}}을(를) 열기 위해 Mindwtr가 다시 시작됩니다.",
+    'workspaces.switchNow': "지금 전환",
+    'workspaces.createdTitle': "작업 공간을 추가했습니다",
+    'workspaces.later': "나중에",
+    'workspaces.saveFailed': "변경 사항을 저장하지 못해 작업 공간을 전환하지 않았습니다. 다시 시도하세요.",
+    'workspaces.failed': "작업 공간을 변경하지 못했습니다.",
+    'workspaces.deleteTitle': "{{name}}을(를) 삭제할까요?",
+    'workspaces.deleteDesc': "이 작업 공간의 로컬 작업, 첨부 파일, 설정을 이 컴퓨터에서 삭제합니다. 동기화 서버의 데이터는 바뀌지 않습니다.",
+    'workspaces.dataFolder': "데이터 폴더",
+    'workspaces.cliHint': "MCP 서버와 명령줄은 기본 작업 공간을 엽니다. 다른 작업 공간을 쓰려면 해당 mindwtr.db 파일을 --db로 지정하세요.",
+    'workspaces.unavailable': "Mindwtr가 프로필 폴더 이동을 마칠 때까지 작업 공간을 사용할 수 없습니다. Mindwtr를 다시 시작한 뒤 다시 시도하세요.",
+    'workspaces.unreadable': "작업 공간 목록을 읽지 못해 기본 작업 공간을 열었습니다. Mindwtr 설정 폴더의 workspaces.toml 파일을 확인하세요.",
+    'workspaces.iCloudDefaultOnly': "iCloud 동기화는 기본 작업 공간에서만 사용할 수 있습니다.",
+    'workspaces.switcherLabel': "작업 공간",
     'sandbox.title': "샌드박스 · 샘플 데이터",
     'sandbox.exit': "샌드박스 나가기",
     'sandbox.reset': "샘플 데이터 초기화",
@@ -127,7 +190,7 @@ export const koOverrides: Record<string, string> = {
         'settings.automationCaptureLoadFailed': '자동화 캡처 설정을 불러오지 못했습니다.',
         'settings.automationCaptureUpdateFailed': '자동화 캡처 설정을 업데이트하지 못했습니다.',
         'timeline.omittedItems': '{{count}}개 더 보기',
-        // Ratchet backfill (i18n-fallback-20260730-12): new en.ts keys
+
         'accessibility.skipToContent': '본문으로 건너뛰기',
         'accessibility.mainContent': '본문 콘텐츠',
         'quickAdd.pastedImageTitle': '스크린샷',
@@ -203,7 +266,7 @@ export const koOverrides: Record<string, string> = {
         'bulk.deleting': '선택한 할 일 삭제 중...',
         'taskEdit.aiAssistant': 'AI 어시스턴트',
         'task.dateIssue.startAfterDue': '마감일 이후에 시작',
-        // App
+
         'app.name': 'Mindwtr',
         'app.closeStillSavingTitle': 'Mindwtr는 아직 저장 중입니다',
         'app.closeStillSavingBody': 'Mindwtr가 최근 변경 사항을 아직 저장하지 않았습니다. 그래도 닫으시겠습니까? 저장되지 않은 변경 사항은 손실됩니다.',
@@ -218,7 +281,7 @@ export const koOverrides: Record<string, string> = {
         'markdown.openLinkFailed': "이 링크를 열 수 없습니다. 해당 앱이 설치되어 있는지 확인하세요. 링크를 복사하여 해당 앱에서 열 수 있습니다.",
         'markdown.copyLinkFailed': "이 링크를 복사할 수 없습니다.",
 
-        // Navigation
+
         'nav.main': '기본',
         'nav.inbox': '수집함',
         'nav.board': '보드',
@@ -241,11 +304,12 @@ export const koOverrides: Record<string, string> = {
         'nav.sectionOrganize': '정리',
         'nav.sectionArchive': '보관함',
 
-        // Quick Add
-        'quickAdd.help': '빠른 추가 기능은 /start:<when>, /due:<when>, /review:<when>, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> 또는 !Area, @context, #tag, +Project, %Person (또는 %"Full Name") 문법을 지원합니다. 시간을 따로 지정하지 않으면 날짜만 마감일로 설정됩니다.',
+
+        'quickAdd.help': '빠른 추가 기능은 /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> 또는 !Area, @context, #tag, +Project, %Person (또는 %"Full Name") 문법을 지원합니다. 시간을 따로 지정하지 않으면 날짜만 마감일로 설정됩니다.',
         'quickAdd.example': '예: 엄마에게 전화 /due:tomorrow @전화',
         'quickAdd.inlineHint': '예: 엄마에게 전화 /due:tomorrow 5pm @전화 #가족',
         'quickAdd.syntaxHelp': '빠른 추가 문법 도움말',
+        'quickAdd.pasteImagesHint': '{{shortcut}}로 이미지나 스크린샷을 붙여 넣으면 첨부됩니다.',
         'quickAdd.placeholder': '할 일 추가… @context +Project #tag',
         'quickAdd.addAnother': '하나 더 추가',
         'quickAdd.inputLabel': '할 일 제목',
@@ -256,6 +320,7 @@ export const koOverrides: Record<string, string> = {
         'quickAdd.audioRecording': '녹음 중...',
         'quickAdd.audioReady': '녹음을 저장할 수 있습니다.',
         'quickAdd.audioQueued': '저장했습니다. Mindwtr를 열면 녹음이 텍스트로 변환됩니다.',
+        'quickAdd.textQueued': "저장했습니다. Mindwtr를 열면 할 일이 추가됩니다.",
         'quickAdd.audioProcessing': '음성 입력 처리 중...',
         'quickAdd.audioSavingSpeechToText': '녹음을 저장하고 음성을 텍스트로 변환하는 중입니다.',
         'quickAdd.audioNoteTitle': '음성 메모',
@@ -274,10 +339,10 @@ export const koOverrides: Record<string, string> = {
         'quickAdd.bulkCreateError': '모든 할 일을 생성할 수 없습니다.',
         'quickAdd.saveAndEdit': '저장하고 편집',
 
-        // Checklist
+
         'checklist.progress': '체크리스트 진행상황',
 
-        // Keybindings (Desktop)
+
         'keybindings.helpTitle': '키보드 단축키',
         'keybindings.helpSubtitle': '닫으려면 Esc 누르기',
         'keybindings.styleLabel': '키바인딩 스타일',
@@ -328,7 +393,7 @@ export const koOverrides: Record<string, string> = {
         'keybindings.list.toggleDetails': '목록 세부정보 전환',
         'keybindings.list.toggleDensity': '보기 방식 전환',
 
-        // Tabs (Mobile)
+
         'tab.inbox': '수집함',
         'tab.next': '집중',
         'tab.board': '보드',
@@ -337,7 +402,7 @@ export const koOverrides: Record<string, string> = {
         'tab.calendar': '캘린더',
         'tab.review': '검토',
 
-        // List Views
+
         'list.inbox': '수집함',
         'list.todo': '할 일',
         'list.inProgress': '진행 중',
@@ -375,7 +440,7 @@ export const koOverrides: Record<string, string> = {
         'reference.empty': '아직 참조 항목이 없습니다.',
         'reference.emptyHint': '참조에는 나중에 필요할 수 있는 정보를 보관합니다 — 행동이 필요하지 않습니다.',
 
-        // Status Labels
+
         'status.inbox': '수집함',
         'status.todo': '할 일',
         'status.next': '다음',
@@ -387,7 +452,7 @@ export const koOverrides: Record<string, string> = {
         'status.archived': '보관됨',
         'status.active': '활성',
 
-        // Priority Labels
+
         'priority.low': '낮음',
         'priority.medium': '보통',
         'priority.high': '높음',
@@ -396,9 +461,14 @@ export const koOverrides: Record<string, string> = {
         'energyLevel.medium': '중간 에너지',
         'energyLevel.high': '높은 에너지',
 
-        // Task Edit
+
         'taskEdit.editTask': '할 일 편집',
         'taskEdit.checklist': '체크리스트',
+        'taskEdit.dragChecklistItem': "드래그하여 순서 변경",
+        'taskEdit.checklistItemActions': "체크리스트 항목 작업",
+        'taskEdit.moveChecklistTop': "맨 위로 이동",
+        'taskEdit.moveChecklistBottom': "맨 아래로 이동",
+        'taskEdit.addChecklistBelow': "아래에 항목 추가",
         'taskEdit.tab.task': '할 일',
         'taskEdit.tab.list': '목록',
         'taskEdit.tab.view': '보기',
@@ -409,6 +479,8 @@ export const koOverrides: Record<string, string> = {
         'taskEdit.shoppingListPrompt': '쇼핑 목록인가요?',
         'taskEdit.openChecklistMode': '체크리스트 모드 열기',
         'taskEdit.addItem': '항목 추가',
+        'taskEdit.resetChecklistOnRepeat': "다음 반복 시 체크리스트 초기화",
+        'taskEdit.resetChecklistOnRepeatHint': "끄면 작업이 반복될 때 체크한 항목의 상태가 유지됩니다.",
         'taskEdit.resetChecklist': '체크리스트 재설정',
         'task.convertToReference': '참조로 변환',
         'task.createProjectFromTask': '할 일에서 프로젝트 만들기',
@@ -477,6 +549,9 @@ export const koOverrides: Record<string, string> = {
         'markdown.toolbar.italic': '기울임꼴',
         'markdown.toolbar.strikethrough': '취소선',
         'markdown.toolbar.bulletList': '글머리 기호 목록',
+        'markdown.toolbar.quote': '인용',
+        'markdown.toolbar.orderedList': '번호 매기기 목록',
+        'markdown.toolbar.taskList': '할 일 목록',
         'markdown.toolbar.horizontalRule': '가로줄',
         'markdown.toolbar.link': '링크 삽입',
         'markdown.toolbar.code': '인라인 코드',
@@ -500,6 +575,13 @@ export const koOverrides: Record<string, string> = {
         'attachments.attachObsidianNote': 'Obsidian 노트 첨부',
         'attachments.obsidianLinkPlaceholder': 'obsidian://open?vault=Vault&file=Note',
         'attachments.obsidianLinkInputHint': 'obsidian:// 노트 링크를 붙여넣거나 "제목 | obsidian://..."를 사용하세요.',
+        "attachments.webUploadRequiresCloud": "브라우저 업로드에는 자체 호스팅 클라우드 동기화가 필요합니다.",
+        "attachments.webUploadEncrypted": "브라우저 업로드를 사용하려면 동기화 암호화를 꺼야 합니다.",
+        "attachments.webUploadOffline": "오프라인에서는 파일을 업로드할 수 없습니다.",
+        "attachments.webUploadChanged": "초안 또는 동기화 설정이 변경되었습니다. 파일을 다시 선택하세요.",
+        "attachments.webUploadFailed": "첨부 파일이 저장되지 않았습니다.",
+        "attachments.webUploadRetry": "저장을 다시 시도하거나 파일을 제거하고 계속하세요.",
+        "attachments.webProjectUploadUnsupported": "브라우저에서는 프로젝트에 업로드할 수 없습니다. 작업에 파일을 추가하세요.",
         'attachments.fileNotSupported': '파일 첨부는 데스크톱 앱에서만 지원됩니다.',
         'attachments.fileTooLarge': '파일이 너무 커서 업로드할 수 없습니다.',
         'attachments.fileNotReadable': '이 파일을 읽을 수 없어 첨부되지 않았습니다. 파일을 다른 폴더로 옮긴 뒤 다시 시도하세요.',
@@ -547,7 +629,7 @@ export const koOverrides: Record<string, string> = {
         'taskEdit.repeatReminderMinutesShort': '{count}분',
         'taskEdit.repeatReminderHint': '완료하거나 미룰 때까지 이 간격으로 다시 알림을 보냅니다 (최대 횟수 제한 있음, 짧은 간격일수록 적은 횟수 반복).',
         'taskEdit.suppressMindwtrReminders': '알림 건너뛰기',
-        'taskEdit.suppressMindwtrRemindersHint': '이 할 일의 시작 및 마감 알림을 건너뜁니다. 여전히 Focus와 목록에는 표시됩니다.',
+        'taskEdit.suppressMindwtrRemindersHint': '이 할 일의 시작 및 마감 알림을 건너뜁니다. 오늘의 집중과 목록에는 계속 표시됩니다.',
         'taskEdit.pushCountHint': '푸시됨',
         'taskEdit.unblocksLabel': '차단 해제',
         'taskStatus.changeStatus': '상태 변경',
@@ -586,13 +668,13 @@ export const koOverrides: Record<string, string> = {
         'task.aria.dueTime': '마감 시간',
         'task.aria.location': '위치',
 
-        // Compact unit labels (time-estimate chips, calendar duration labels)
+
         'units.minutesShort': '{{minutes}}분',
         'units.hoursShort': '{{hours}}시간',
         'units.hoursMinutesShort': '{{hours}}시간 {{minutes}}분',
         'units.hoursPlusShort': '{{hours}}시간+',
 
-        // Recurrence Labels
+
         'recurrence.none': '없음',
         'recurrence.daily': '매일',
         'recurrence.weekly': '매주',
@@ -634,7 +716,7 @@ export const koOverrides: Record<string, string> = {
         'recurrence.showFutureInCalendar': '캘린더에 향후 반복 표시',
         'recurrence.showFutureInCalendarHint': '계획 전용 미리보기입니다. 이 할 일을 완료해야 다음 할 일이 생성됩니다.',
 
-        // Inbox (Mobile)
+
         'inbox.title': '수집함',
         'inbox.processButton': '수집함 처리',
         'inbox.projectHint': '여러 단계가 필요한 항목인가요? 처리하는 중에 「예, 프로젝트로 변환합니다」를 선택해 결과와 첫 번째 다음 행동의 이름을 정하세요.',
@@ -648,7 +730,7 @@ export const koOverrides: Record<string, string> = {
         'mobileHelp.swipeLeft': '할 일을 왼쪽으로 쓸어서 삭제, 복원 또는 되돌리세요.',
         'mobileHelp.longPressCapture': '+ 버튼을 길게 눌러 다른 수집 모드를 사용하세요.',
         'mobileHelp.shortcutsTitle': '바로가기',
-        'mobileHelp.appShortcuts': '앱 아이콘을 길게 눌러 할 일 추가, Focus 및 캘린더 단축키를 사용할 수 있습니다.',
+        'mobileHelp.appShortcuts': '앱 아이콘을 길게 눌러 할 일 추가, 오늘의 집중 및 캘린더 바로가기를 사용할 수 있습니다.',
         'inbox.refineTitle': '이 할 일 구체화',
         'inbox.refineHint': '다음에 무엇을 할지 결정하기 전에 제목과 세부 사항을 명확히 하세요.',
         'inbox.refineNext': '다음',
@@ -675,12 +757,12 @@ export const koOverrides: Record<string, string> = {
         'inbox.addContextPlaceholder': '새 상황 추가...',
         'inbox.waitingQuestion': '누구를/무엇을 기다리고 있나요?',
         'inbox.waitingHint': "무엇을 기다리고 있는지 메모를 추가하세요",
-        'inbox.waitingPlaceholder': '예: John이 검토하기를 기다리는 중...',
+        'inbox.waitingPlaceholder': '예: 민수가 검토하기를 기다리는 중...',
         'inbox.assignProjectQuestion': '프로젝트에 할당하시겠습니까? (선택 사항)',
         'inbox.noProject': '프로젝트 없음',
         'inbox.skip': '건너뛰기',
 
-        // Next Actions (Mobile)
+
         'next.title': '다음 행동',
         'next.ready': '할 일 준비 완료',
         'next.current': '현재 할 일',
@@ -691,7 +773,9 @@ export const koOverrides: Record<string, string> = {
         'next.warningCount': '다음 행동의 항목',
         'next.warningHint': '더 적은 수의 프로젝트에 집중하는 것을 고려해보세요. GTD에서는 명확성을 위해 다음 행동을 10~15개 항목으로 유지할 것을 권장합니다.',
 
-        // Contact / Contexts (Mobile updates)
+
+    'contexts.new': '새 상황',
+    'tags.new': '새 태그',
         'contexts.title': '상황',
         'contexts.filter': '상황별 할 일 필터링',
         'filters.label': '필터',
@@ -713,6 +797,13 @@ export const koOverrides: Record<string, string> = {
         'filters.starred': '별표 표시됨',
         'filters.notStarred': '별표 없음',
         'filters.datePreset.today': '오늘',
+        "filters.taskDates": "작업 날짜",
+        "filters.anyTime": "언제든지",
+        "filters.datePreset.next_7_days": "향후 7일",
+        "filters.datePreset.overdue_next_7_days": "기한 경과 + 향후 7일",
+        "filters.datePreset.next_14_days": "향후 14일",
+        "filters.datePreset.next_30_days": "향후 30일",
+        "filters.datePreset.upcoming": "모든 예정 날짜",
         'filters.datePreset.this_week': '이번 주',
         'filters.datePreset.this_month': '이번 달',
         'filters.datePreset.overdue': '기한 지남',
@@ -731,7 +822,7 @@ export const koOverrides: Record<string, string> = {
         'contexts.noContexts': '상황을 찾을 수 없습니다. 할 일에 @집, @회사, @computer와 같은 상황을 추가하세요.',
         'contexts.noTasks': '이 상황에 대한 활성 할 일이 없습니다.',
 
-        // Board
+
         'board.title': '보드',
         'board.next': '다음 행동',
         'board.todo': '할 일',
@@ -742,7 +833,7 @@ export const koOverrides: Record<string, string> = {
         'board.dragTask': '드래그 할 일',
         'board.delete': '삭제',
 
-        // Calendar
+
         'calendar.title': '캘린더',
         'calendar.tasksAndEvents': '할 일 및 일정',
         'calendar.today': '오늘',
@@ -822,7 +913,7 @@ export const koOverrides: Record<string, string> = {
         'shortcuts.captureUnavailable': '수집 바로가기를 사용할 수 없음',
         'shortcuts.missingTitle': 'Mindwtr가 해당 바로가기 링크에서 할 일 제목을 읽지 못했습니다.',
 
-        // Projects
+
         'projects.title': '프로젝트',
         'projects.statusLabel': '상태',
         'projects.activeSection': '활성 프로젝트',
@@ -834,6 +925,11 @@ export const koOverrides: Record<string, string> = {
         'projects.noActiveTasks': '이 프로젝트에는 활성 할 일이 없습니다.',
         'projects.projectName': '프로젝트 이름',
         'projects.color': '색상',
+        'projects.useAreaColor': "영역 색상 사용",
+        'projects.colorSaveFailed': "색상을 저장하지 못했습니다.",
+        'projects.sequenceMode': "흐름 모드",
+        'projects.perSection': "섹션마다 선택",
+        'projects.perSectionTooltip': "섹션마다 선택: 각 섹션을 병렬 또는 순차로 설정합니다(섹션 메뉴에서 선택).",
         'projects.colorBlue': '파랑',
         'projects.colorGreen': '초록',
         'projects.colorAmber': '호박색',
@@ -890,6 +986,7 @@ export const koOverrides: Record<string, string> = {
         'projects.moveUp': '위로 이동',
         'projects.moveDown': '아래로 이동',
         'focus.reorderPosition': '{{title}}. {{count}}개 중 {{position}}번째',
+        'focus.hiddenByArea': "다른 영역에서 {{count}}개 선택됨",
         'focus.reorderHint': '길게 누른 후 드래그하여 순서를 변경하세요',
         'focus.reorderScreenHint': '이 작업들의 순서를 바꾸는 전용 화면을 엽니다',
         'projects.tagFilter': '태그 필터',
@@ -964,7 +1061,7 @@ export const koOverrides: Record<string, string> = {
         'projects.nextActionPromptAddButton': '다음 행동 추가',
         'projects.nextActionPromptComplete': '프로젝트 완료',
 
-        // Review Steps
+
         'review.title': '검토',
         'review.openTasks': '미완료 할 일',
         'review.intro': '머릿속을 정리하고, 현재 상태를 파악하고, 새로운 아이디어를 떠올리세요.',
@@ -1035,6 +1132,7 @@ export const koOverrides: Record<string, string> = {
         'review.projectsStepDesc': '모든 활성 프로젝트에 다음 행동이 있는지 확인하세요.',
         'review.projectsHint': '각 프로젝트를 검토하세요. 구체적인 다음 행동이 하나 이상 있습니까? 그렇지 않다면 지금 추가하세요. 완료된 프로젝트를 완료로 표시합니다.',
         'review.hasNextAction': '다음 행동 있음',
+    'review.projectDeferred': '예정됨',
         'review.needsAction': '행동 필요',
         'review.noActiveTasks': '활성 할 일 없음',
         'review.somedayStep': '언젠가',
@@ -1058,7 +1156,7 @@ export const koOverrides: Record<string, string> = {
         'review.nextStepBtn': '다음 단계',
         'review.stuckQuestion': '이 항목이 막혀 있나요?',
         'review.stuckPrompt': '실행 가능하게 내용을 변경하거나, 더 이상 관련이 없다면 삭제 또는 보류하세요.',
-        // Mobile Review keys
+
         'review.notSet': '설정되지 않음',
         'review.description': '설명',
         'review.startTime': '시작 예정',
@@ -1074,7 +1172,7 @@ export const koOverrides: Record<string, string> = {
         'review.noArea': '영역 없음',
         'review.singleActions': '단일 행동',
 
-        // Processing
+
         'process.title': '항목 처리',
         'process.refineTitle': '할 일 구체화',
         'process.refineDesc': '무엇을 할지 결정하기 전에 이것이 무엇인지 명확히 하십시오.',
@@ -1090,6 +1188,8 @@ export const koOverrides: Record<string, string> = {
         'process.trash': '휴지통',
         'process.someday': '언젠가',
         'process.reference': '참조',
+        'process.incubate': '나중에 다시 검토',
+        'process.returningItem': '다시 명확히 하기',
         'process.later': '나중에',
         'process.laterHint': '시작 날짜를 설정하고 이 할 일을 다음으로 이동하세요.',
         'process.laterStartRequired': '나중에 할 일에 대한 시작 날짜를 선택하세요.',
@@ -1115,7 +1215,7 @@ export const koOverrides: Record<string, string> = {
         'process.ifNotActionable': '실행할 수 없는 경우:',
         'process.waitingFor': '누구를/무엇을 기다리고 있나요?',
         'process.waitingForDesc': "무엇을 기다리고 있는지 메모를 추가하세요",
-        'process.waitingPlaceholder': '예: John이 문서를 검토하기를 기다리는 중...',
+        'process.waitingPlaceholder': '예: 민수가 문서를 검토하기를 기다리는 중...',
         'process.next': '다음',
         'process.noContext': '상황 없음',
         'process.project': '프로젝트에 할당하시겠습니까?',
@@ -1140,7 +1240,7 @@ export const koOverrides: Record<string, string> = {
         'process.quickApplyHint': '이 선택을 적용하고 수집함의 다음 항목으로 이동하세요.',
         'process.quickMoveHint': '이 항목을 옮기고 수집함의 다음 항목으로 이동하세요.',
 
-        // Settings
+
         'settings.title': '설정',
         'settings.subtitle': 'Mindwtr 경험을 맞춤화하세요',
         'settings.appearance': '모양',
@@ -1154,6 +1254,8 @@ export const koOverrides: Record<string, string> = {
         'settings.theme': '테마',
         'settings.eink': 'E-Ink',
         'settings.nord': 'Nord',
+        'settings.gruvboxLight': 'Gruvbox Light',
+        'settings.gruvboxDark': 'Gruvbox Dark',
         'settings.sepia': '세피아',
         'settings.oled': 'OLED / 미드나잇',
         'settings.material3Light': 'Material 3 (라이트)',
@@ -1206,7 +1308,7 @@ export const koOverrides: Record<string, string> = {
         'settings.logCleared': '로그 파일이 지워졌습니다.',
         'settings.logClearFailed': '로그 파일을 지울 수 없습니다.',
         'settings.shareUnavailable': '이 기기에서는 공유를 사용할 수 없습니다.',
-        // Mobile Settings
+
         'settings.useSystem': '시스템 테마 사용',
         'settings.followDevice': '기기의 화면 설정을 따릅니다.',
         'settings.darkMode': '다크 모드',
@@ -1219,6 +1321,11 @@ export const koOverrides: Record<string, string> = {
         'settings.terms': '이용약관',
         'settings.mobile.appLock': '앱 잠금',
         'settings.mobile.appLockDesc': 'Mindwtr를 열거나 앱으로 돌아올 때 기기 잠금을 요구합니다. 앱 화면만 보호하며 기기 안의 데이터베이스는 보호하지 않습니다.',
+        'settings.mobile.appLockRelock': '잠금 해제 요구',
+        'settings.mobile.appLockRelockImmediately': '즉시',
+        'settings.mobile.appLockRelockAfter1': '1분 후',
+        'settings.mobile.appLockRelockAfter5': '5분 후',
+        'settings.mobile.appLockRelockAfter15': '15분 후',
         'appLock.title': 'Mindwtr가 잠겨 있습니다',
         'appLock.description': '기기 잠금으로 Mindwtr를 엽니다. 앱 화면만 보호하며 기기 안의 데이터베이스는 보호하지 않습니다.',
         'appLock.prompt': 'Mindwtr 잠금 해제',
@@ -1229,6 +1336,14 @@ export const koOverrides: Record<string, string> = {
         'appLock.unavailable': '앱 잠금을 사용하려면 기기 암호 또는 생체 인증을 설정하세요.',
         'appLock.cancelled': 'Mindwtr가 계속 잠겨 있습니다.',
         'appLock.failed': '인증에 실패했습니다. 다시 시도하세요.',
+        "settings.desktopAppLockDesc": "Mindwtr를 열 때와 자리를 비운 뒤에 Windows Hello 또는 Touch ID(또는 Mac 암호)를 요구합니다. 앱 창만 가리며, macOS 위젯, 로컬 API, MCP 서버는 여전히 데이터를 읽을 수 있습니다.",
+        "settings.desktopAppLockUnavailable": "앱 잠금을 사용하려면 Windows Hello 또는 Mac 로그인 암호를 설정하세요.",
+        "appLock.lockNow": "Mindwtr 잠그기",
+        "appLock.lockedReminder": "Mindwtr 알림",
+        "appLock.turnOff": "앱 잠금 끄기",
+        "appLock.osCheckUnavailable": "지금 이 기기에서는 Windows Hello 또는 Touch ID를 사용할 수 없습니다.",
+        "appLock.macUnlockReason": "잠금을 해제하고 작업을 표시",
+        "appLock.macEnableReason": "앱 잠금을 켜기",
         'settings.data': '데이터',
         'settings.menuDesc.general': '모양, 언어, 표시',
         'settings.menuDesc.gtd': '수집, 검토, 할 일 편집기',
@@ -1322,6 +1437,7 @@ export const koOverrides: Record<string, string> = {
         'settings.allowInsecureHttpHint': '신뢰할 수 있는 네트워크에서만 사용하세요. 데이터가 암호화되지 않은 상태로 전송됩니다.',
         'settings.cleartextSyncWarningWebdav': 'WebDAV 동기화가 HTTP를 사용 중입니다. 데이터가 암호화되지 않으므로 신뢰할 수 있는 네트워크에서만 사용하세요.',
         'settings.cleartextSyncWarningCloud': '자체 호스팅 동기화가 HTTP를 사용 중입니다. 데이터가 암호화되지 않으므로 신뢰할 수 있는 네트워크에서만 사용하세요.',
+        'settings.cleartextSyncDismiss': '이 동기화 대상에 대해 숨기기',
         'settings.webdavBrowserStorageWarning': 'WebDAV 비밀번호는 브라우저 저장소에 저장됩니다. 신뢰할 수 있는 기기에서만 사용하세요.',
         'settings.cloudUrl': '자체 호스팅 URL',
         'settings.cloudUrlPlaceholder': 'https://example.com',
@@ -1358,6 +1474,10 @@ export const koOverrides: Record<string, string> = {
         'settings.notifications': '알림',
         'settings.notificationsDesc': '시작 날짜나 마감 날짜가 있는 할 일에 대한 알림을 활성화합니다.',
         'settings.notificationsEnable': '할 일 알림',
+        'settings.appIconBadge': '앱 아이콘 배지',
+        'settings.appIconBadgeHint': '이 기기에서 오늘 마감인 작업과 기한이 지난 작업의 수를 표시합니다. Mindwtr가 실행 중일 때 업데이트되며, 앱이 닫혀 있으면 최신 수치가 아닐 수 있습니다.',
+        'settings.appIconBadgeDenied': '이 수치를 표시하려면 iOS 설정에서 Mindwtr의 배지를 허용하세요.',
+        'settings.appIconBadgeError': '앱 아이콘 배지 설정을 업데이트하지 못했습니다. 다시 시도해 주세요.',
         'settings.notificationsDisabled': '알림이 비활성화됨',
         'settings.notificationsDisabledMessage': '알림 접근 권한이 복원될 때까지 Mindwtr는 리마인더를 예약할 수 없습니다.',
         'settings.startDateNotifications': '시작일 리마인더',
@@ -1379,7 +1499,7 @@ export const koOverrides: Record<string, string> = {
         "settings.appleClarification.onDevice": "기기 내",
         'settings.aiProvider': '제공업체',
         'settings.aiModel': '모델',
-        'settings.aiBaseUrl': '사용자 지정 OpenAI 호환 Base URL',
+        'settings.aiBaseUrl': '사용자 지정 OpenAI 호환 기본 URL',
         'settings.aiBaseUrlHint': '공식 OpenAI를 사용하려면 비워두세요. llama.cpp, Ollama, LM Studio, GLM, vLLM과 같은 로컬 또는 타사 OpenAI 호환 API의 경우 이 값을 설정하세요.',
         'settings.aiBaseUrlPlaceholder': 'http://localhost:11434/v1',
         'settings.aiExtraBodyParams': '추가 요청 매개변수',
@@ -1426,14 +1546,15 @@ export const koOverrides: Record<string, string> = {
         'settings.aiProviderOpenAI': 'OpenAI',
         'settings.aiProviderGemini': 'Gemini',
         'settings.aiProviderAnthropic': 'Anthropic (Claude)',
+        'settings.aiEffortMinimalSaved': '저장됨: 최소',
         'settings.aiEffortLow': '낮은',
         'settings.aiEffortMedium': '중간',
         'settings.aiEffortHigh': '높은',
         'settings.aiCopilotModel': 'Copilot 모델',
         'settings.aiCopilotHint': '빠른 자동 완성 제안에 사용됩니다.',
-        'settings.aiThinkingBudget': 'Thinking 예산',
+        'settings.aiThinkingBudget': '사고 예산',
         'settings.aiThinkingHint': 'Claude/Gemini 전용. 0은 확장된 사고를 비활성화합니다.',
-        'settings.aiThinkingEnable': 'Thinking 켜기',
+        'settings.aiThinkingEnable': '사고 기능 켜기',
         'settings.aiThinkingEnableDesc': '복잡한 할 일에는 확장된 추론을 사용합니다.',
         'settings.aiThinkingOff': '끄기',
         'settings.aiThinkingLow': '낮은',
@@ -1449,6 +1570,7 @@ export const koOverrides: Record<string, string> = {
         'ai.addSteps': '단계 추가',
         'ai.working': '할 일 중...',
         'ai.breakdownTitle': '권장 단계',
+        'copilot.suggest': '제안 받기',
         'copilot.suggested': '제안',
         'copilot.applyHint': '적용하려면 탭하세요',
         'copilot.applied': '적용됨',
@@ -1541,7 +1663,7 @@ export const koOverrides: Record<string, string> = {
         'settings.weeklyReviewIncludeContextsStepDesc': '대기 중과 프로젝트 사이에 전용 상황 검토 단계를 표시합니다.',
         'widget.capture': '빠른 수집',
         'obsidian.taskNotesDetectedTitle': 'TaskNotes 모드가 활성화되었습니다',
-        'obsidian.taskNotesDetectedBody': '이 파일들에서 TaskNotes 스타일의 frontmatter가 감지되었으므로 다른 노트의 인라인 체크리스트 할 일은 무시됩니다.',
+        'obsidian.taskNotesDetectedBody': '이 파일들에서 TaskNotes 형식의 머리말 메타데이터가 감지되었으므로 다른 노트의 인라인 체크리스트 할 일은 무시됩니다.',
         'obsidian.taskNotesDetectedHint': 'status 필드와 tags: [task], due, scheduled, contexts, projects, timeEstimate, recurrence, completedDate와 같은 TaskNotes 메타데이터를 찾습니다.',
         'obsidian.taskNotesDetectedMore': '일치하는 파일 더 보기',
         'obsidian.showCompleted': '완료된 항목 표시',
@@ -1562,7 +1684,7 @@ export const koOverrides: Record<string, string> = {
         'digest.reviewDue': '검토 기한',
         'digest.noItems': '오늘은 급한 항목이 없습니다.',
 
-        // Common
+
         'common.tasks': '할 일',
         'common.day': '일',
         'common.days': '일',
@@ -1619,7 +1741,7 @@ export const koOverrides: Record<string, string> = {
         'attachments.transcriptionUnavailable': '음성 텍스트 변환이 준비되지 않았습니다. AI 설정을 확인하고 다시 시도하세요.',
         'attachments.transcriptionFailed': '변환에 실패했습니다. 다시 시도하세요.',
 
-        // Bulk Actions
+
         'bulk.select': '선택',
         'bulk.exitSelect': '완료',
         'bulk.selected': '선택된',
@@ -1637,7 +1759,7 @@ export const koOverrides: Record<string, string> = {
         'bulk.confirmDeleteTitle': '할 일 삭제',
         'bulk.confirmDeleteBody': '선택한 할 일을 삭제하시겠습니까?',
 
-        // Sorting
+
         'sort.label': '정렬',
         'sort.default': '기본',
         'sort.due': '마감일',
@@ -1655,7 +1777,7 @@ export const koOverrides: Record<string, string> = {
         'list.completedGroup.earlier': '이전',
         'list.completedGroup.notCompleted': '완료되지 않음',
 
-        // Agenda
+
         'agenda.title': '집중',
         'agenda.active': '활성 항목',
         'agenda.collapseOtherSections': '포커스만',
@@ -1680,6 +1802,13 @@ export const koOverrides: Record<string, string> = {
         'agenda.reviewDue': '검토 기한',
         'agenda.reviewDueProjects': '검토할 프로젝트',
         'agenda.upcoming': '예정',
+        'widget.upcomingStarts': '시작',
+        'widget.upcomingReturns': '다시 표시',
+        'widget.background': '배경',
+        'widget.backgroundLightText': '투명, 밝은 글자',
+        'widget.backgroundDarkText': '투명, 어두운 글자',
+        'widget.availableActions': '시작 가능한 작업',
+        'widget.includeAvailableActions': '시작일이 된 다음 행동 추가',
         'agenda.allClear': '모두 완료!',
         'agenda.noTasks': '지금은 집중할 항목이 없습니다. 할 일에 별표를 하거나 마감일을 지정하면 여기에 표시됩니다.',
         'agenda.emptyStart': '아직 할 일이 없습니다. 떠오르는 일을 수집함에 추가하고 나중에 정리하세요.',
@@ -1695,7 +1824,7 @@ export const koOverrides: Record<string, string> = {
         'focus.group.noEnergy': '에너지 없음',
         'focus.group.noPriority': '우선순위 없음',
 
-        // Task Age
+
         'taskAge.day': '1일 경과',
         'taskAge.days': '일 경과',
         'taskAge.week': '1주 경과',
@@ -1703,13 +1832,13 @@ export const koOverrides: Record<string, string> = {
         'taskAge.month': '1개월 경과',
         'taskAge.months': '개월 경과',
 
-        // Energy Contexts
+
         'context.energy.focused': '집중',
         'context.energy.lowenergy': '낮은 에너지',
         'context.energy.creative': '창의적인',
         'context.energy.routine': '루틴',
 
-        // Waiting (Mobile)
+
         'waiting.title': '대기 중',
         'waiting.subtitle': '다른 사람을 기다리는 할 일이나 외부 이벤트',
         'waiting.count': '대기 중',
@@ -1719,7 +1848,7 @@ export const koOverrides: Record<string, string> = {
         'waiting.empty': '대기 할 일 없음',
         'waiting.emptyHint': '다른 사람이나 외부 이벤트에 의존하는 할 일에는 "대기 중" 상태를 사용하세요.',
 
-        // Someday (Mobile)
+
         'someday.title': '언젠가',
         'someday.subtitle': '앞으로 추구하고 싶은 아이디어와 목표',
         'someday.ideas': '아이디어',
@@ -1730,7 +1859,7 @@ export const koOverrides: Record<string, string> = {
         'someday.emptyHint': '앞으로 하고 싶은 아이디어, 목표, 프로젝트에 대해 "언젠가" 상태를 사용하세요.',
         'done.emptyHint': '완료된 할 일이 여기에 표시됩니다 — 완료한 항목의 누적 기록입니다.',
 
-        // Search
+
         'search.title': '검색',
         'search.placeholder': '할 일 및 프로젝트 검색...',
         'search.scopeHint': '할 일, 프로젝트, 인물',
@@ -1745,6 +1874,7 @@ export const koOverrides: Record<string, string> = {
         'search.saveSearchPrompt': '검색 이름 지정',
         'search.savedSearches': '저장된 검색',
         'search.noSavedSearches': '아직 저장된 검색결과가 없습니다.',
+        'search.sortUseGlobal': '전역 설정 사용 ({sort})',
         'search.deleteConfirm': '저장된 검색결과를 삭제하시겠습니까?',
         'search.helpOperators': 'status:, context:, tag:, project:, due:<=7d와 같은 연산자를 사용하세요.',
         'search.hiddenCompletedMatches': '완료 및 보관됨에 {{count}}개 더 있음',
@@ -1767,7 +1897,7 @@ export const koOverrides: Record<string, string> = {
         'search.due.nextWeek': '다음 주',
         'search.due.none': '마감일 없음',
 
-        // Archived
+
         'archived.tasksSegment': '할 일',
         'archived.title': '보관됨',
         'archived.searchPlaceholder': '보관된 할 일 검색...',
@@ -1812,7 +1942,7 @@ export const koOverrides: Record<string, string> = {
         'settings.globalQuickAddShortcutRecommended': "{shortcut} (권장)",
         'settings.globalQuickAddShortcutLegacy': "{shortcut} (이전 방식)",
         'settings.globalQuickAddShortcutDesc': 'Mindwtr 창이 활성화되어 있지 않은 경우에도 빠른 수집를 위해 시스템 전체에서 사용됩니다.',
-        'settings.windowDecorations': '창 테두리 (Window decorations)',
+        'settings.windowDecorations': '창 테두리',
         'settings.windowDecorationsDesc': '시스템 제목 표시줄과 창 테두리를 표시합니다.',
         'settings.showTray': '시스템 트레이 아이콘 표시',
         'settings.showTrayDesc': '빠른 액세스를 위해 시스템 트레이에 앱 아이콘을 표시합니다.',
@@ -1933,6 +2063,10 @@ export const koOverrides: Record<string, string> = {
         'settings.feedbackWhereOther': '기타',
         'settings.feedbackEmail': "회신 이메일 (선택 사항, 권장)",
         'settings.feedbackEmailPlaceholder': '답변을 받으려면 이메일을 입력하세요',
+        "settings.feedbackNoEmailTitle": "후속 연락 없이 보낼까요?",
+        "settings.feedbackNoEmailDesc": "Mindwtr는 데이터를 기기에 우선 저장하며 연락할 수 있는 계정 이메일이 없습니다. 회신 이메일이 없으면 피드백에 답변하거나 후속 연락을 할 수 없습니다. 이메일 주소를 추가할까요, 아니면 후속 연락 없이 보낼까요?",
+        "settings.feedbackAddEmail": "이메일 추가",
+        "settings.feedbackSendWithoutEmail": "후속 연락 없이 보내기",
         'settings.feedbackIncludeDiagnostics': '최근 진단 데이터 포함',
         'settings.feedbackIncludeDiagnosticsDesc': "최근 활동과 오류. 보내기 전에 이 기기에서 문제를 다시 재현해 주세요.",
         'settings.feedbackPrivacy': '메시지, 앱 버전, 플랫폼 및 진단 데이터는 선택한 경우에만 전송됩니다. 회신 이메일을 입력한 경우에만 회신 이메일이 전송됩니다. 할 일 내용은 첨부되지 않습니다.',
@@ -1967,7 +2101,7 @@ export const koOverrides: Record<string, string> = {
         'settings.linuxUpdateHint': 'Linux에서는 Mindwtr가 업데이트를 자동 설치할 수 없습니다. 다운로드 후 패키지 관리자(예: yay -S mindwtr 또는 paru -S mindwtr)를 통하거나 다운로드한 패키지로 설치하세요.',
         'settings.saved': '설정 저장됨',
         'settings.selectSyncFolderTitle': '동기화 폴더 선택',
-        // Mobile-only copy migrated from keyed helpers.
+
         'calendar.mobile.1Day': '1일',
         'calendar.mobile.day': '일',
         'calendar.mobile.dayDetailsPanelHandle': '일별 세부 정보 패널 핸들',
@@ -2038,6 +2172,10 @@ export const koOverrides: Record<string, string> = {
         'settings.backupMobile.recoverySnapshotSaved': '복구 스냅샷이 {{snapshotName}}(으)로 저장되었습니다.',
         'settings.backupMobile.restoreBackup': '백업을 복원하시겠습니까?',
         'settings.backupMobile.restoreComplete': '복원 완료',
+        'settings.backupMobile.undoUnavailableTitle': '실행 취소를 사용하지 못할 수 있습니다',
+        'settings.backupMobile.undoUnavailableConfirm': '이 라이브러리가 너무 커서 이 변경을 실행 취소하지 못할 수 있습니다. 복구 스냅샷은 먼저 저장됩니다. 계속할까요?',
+        'settings.backupMobile.undoUnavailableContinue': '계속',
+        'settings.backupMobile.undoUnavailableResult': '이 변경은 실행 취소할 수 없습니다: 라이브러리가 너무 큽니다.',
         'settings.backupMobile.restoreFailed': '복원 실패',
         'settings.backupMobile.restoreRecoverySnapshot': '복구 스냅샷을 복원하시겠습니까?',
         'settings.backupMobile.restoreSnapshotReplaceLocalData': '{{snapshotName}} 스냅샷을 복원하시겠습니까? 현재 로컬 데이터를 덮어쓰게 됩니다.',
@@ -2244,7 +2382,7 @@ export const koOverrides: Record<string, string> = {
         'captureNotification.text': '탭하여 수집함에 수집',
         'captureNotification.channelName': '빠른 수집',
 
-        // Mind sweep (guided capture)
+
         'mindSweep.launchButton': '머릿속 비우기',
         'mindSweep.title': '머릿속 비우기',
         'mindSweep.intro': '몇 가지 힌트 목록을 살펴보며 떠오르는 것을 모두 적어 보세요. 필터링하거나 정리하지 마세요 — 모든 항목은 수집함에 담기며 나중에 정리할 수 있습니다.',
@@ -2328,7 +2466,7 @@ export const koOverrides: Record<string, string> = {
 		'obsidian.bringIntoMindwtrFailed': '할 일을 Mindwtr에 추가하지 못했습니다.',
         'obsidian.sourceAttachmentTitle': 'Obsidian 원본',
 
-        // First-run onboarding modal (both platforms).
+
         'onboarding.title': 'Mindwtr에 오신 것을 환영합니다',
         'onboarding.subtitle': '머릿속에 있는 것을 적어 두고, 정리는 나중에, 한 번에 몇 가지에만 집중하세요. 기존 데이터를 가져오거나 작은 시작하기 프로젝트로 시작할 수 있습니다.',
         'onboarding.skip': '소개 건너뛰기',
@@ -2348,21 +2486,21 @@ export const koOverrides: Record<string, string> = {
         'onboarding.toastReady': '시작하기 프로젝트가 준비되었습니다.',
         'onboarding.toastFailed': '시작하기 프로젝트를 생성하지 못했습니다.',
 
-        // Seeded Getting Started content (first-run tutorial data).
+
         'starter.projectTitle': '시작하기',
         'starter.projectNotes': '이 시작하기 할 일들은 선택 사항입니다. Mindwtr가 손에 익으면 이 프로젝트는 언제든 삭제하세요.',
         'starter.processInbox.title': '여기서 시작하세요: 첫 번째 수집함 항목 처리하기',
-        'starter.processInbox.desc': '적어 둔 생각 하나를 작고 실행 가능한 단계로 바꿔보세요.',
+        'starter.processInbox.desc': '“집 수리” 프로젝트를 만들고 “물이 새는 수도꼭지 확인하기”와 “페인트 색상 비교하기”를 해당 프로젝트에 배정한 수집함 할 일로 기록해 보세요. 실행할 준비가 된 항목만 처리하여 다음 행동으로 만드세요. 나머지 아이디어는 검토할 때까지 수집함이나 프로젝트 메모에 두면 됩니다. 모두 언젠가로 옮길 필요는 없습니다.',
         'starter.processInbox.check1': '수집함 열기',
         'starter.processInbox.check2': '수집함 정리 누르기',
         'starter.processInbox.check3': '샘플 항목 하나의 다음 단계를 정하거나, 나중으로 미뤄두기',
         'starter.quickCapture.title': '한 줄로 할 일 수집하기',
-        'starter.quickCapture.desc': '떠오른 생각을 입력하고 세부 정보도 텍스트에 바로 덧붙이세요. 복잡한 입력 양식이 필요 없습니다.',
+        'starter.quickCapture.desc': '“주방 청소하기”를 수집함에 기록하세요. 할 일 편집기에서 “시작”을 다음에 실행하고 싶은 날짜로 설정하고 해당 요일에 매주 반복하도록 선택하세요. 시작일 전까지는 집중의 실행 가능한 목록에 나타나지 않으며, 완료하면 다음 회차로 넘어갑니다. “예정”에는 미리 표시될 수 있습니다. 실제 기한이 있을 때는 마감일을 사용하세요.',
         'starter.quickCapture.check1': '수집 버튼 누르기',
         'starter.quickCapture.check2': '해 보기: 알렉스에게 전화 @전화 /due:tomorrow',
         'starter.quickCapture.check3': '진짜 마감이 있는 할 일에만 날짜 붙이기',
         'starter.focus.title': '오늘의 집중으로 최대 3개 할 일에 별표 달기',
-        'starter.focus.desc': '오늘 정말 할 몇 가지만 고르세요.',
+        'starter.focus.desc': '다음 행동은 지금 실행할 수 있는 선택지이며, 오늘 모두 끝내겠다는 약속이 아닙니다. 몇 가지에 별표를 붙여 오늘의 집중에 추가한 다음, “포커스만”으로 다른 섹션을 접으세요. “예정”은 미리보기입니다. 순서대로 진행해야 하는 프로젝트 단계에는 순차 모드를 사용하면 보통 한 번에 하나의 다음 행동이 표시됩니다. 별표나 마감일, 검토 날짜에 따라 다른 항목도 집중에 나타날 수 있습니다.',
         'starter.focus.check1': '집중 화면 열기',
         'starter.focus.check2': '별표로 가장 중요한 할 일 고르기',
         'starter.focus.check3': '필요할 때까지 할 일을 미뤄서 숨기기',
@@ -2382,14 +2520,14 @@ export const koOverrides: Record<string, string> = {
         'starter.import.check2': 'Todoist, DGT GTD, OmniFocus 또는 백업 파일 가져오기',
         'starter.import.check3': '가져온 항목을 수집함에서 살펴보기',
         'starter.weeklyReview.title': '첫 주간 검토 해 보기',
-        'starter.weeklyReview.desc': '짧은 주간 정리가 목록을 믿을 만하게 지켜 줍니다.',
+        'starter.weeklyReview.desc': '“집 수리” 프로젝트를 검토하고 다음으로 실행할 준비가 된 항목을 고르세요. 나중에 다시 생각하고 싶은 아이디어에는 “나중에 다시 검토”를 사용하세요. 검토 날짜가 설정된 채 언젠가에 남아 있다가 그날 수집함 처리에 “다시 명확히 하기”로 다시 나타납니다. 자동으로 다음 행동이 되지는 않습니다. 같은 아이디어를 다시 기록하기 전에 언젠가를 확인하거나 검색하세요.',
         'starter.weeklyReview.check1': '검토 열기',
         'starter.weeklyReview.check2': '수집함 비우기',
         'starter.weeklyReview.check3': '다음에 할 몇 가지를 고르고 나머지는 미뤄 두기',
         'starter.sampleBuyMilk': '우유 사기',
         'starter.sampleReplySam': '샘에게 답장하기',
 
-        // Settings — moved from apps/desktop settings/labels.ts (settings-i18n-20260724-01)
+
         'settings.integrations': '연동',
         'settings.searchPlaceholder': '설정 검색…',
         'settings.lookAndFeel': '외관 및 느낌',
@@ -2421,7 +2559,7 @@ export const koOverrides: Record<string, string> = {
         'settings.network': '네트워크',
         'settings.localApiServer': '로컬 API 서버 활성화',
         'settings.localApiPort': '포트',
-        'settings.localApiPortDesc': 'Localhost 전용입니다. 기본값: 3456.',
+        'settings.localApiPortDesc': '로컬 호스트 전용입니다. 기본값: 3456.',
         'settings.localApiToken': 'Bearer 토큰',
         'settings.localApiTokenDesc': '모든 요청의 Authorization 헤더에 필요합니다.',
         'settings.localApiSecurityNote': '이 토큰이 있는 로컬 앱과 스크립트는 Mindwtr 데이터를 읽고 변경할 수 있습니다.',
@@ -2476,6 +2614,8 @@ export const koOverrides: Record<string, string> = {
         'settings.networkProxyInvalid': '유효한 http(s) 프록시 URL을 입력하세요.',
         'settings.networkProxySave': '프록시 저장',
         'settings.syncPreferenceSavedFilters': '저장된 필터',
+        'savedFilters.saveTitle': "필터 저장",
+        'savedFilters.namePlaceholder': "필터 이름",
         'settings.backgroundSync': '백그라운드 동기화',
         'settings.backgroundSyncDesc': '데스크톱 동기화는 시작 시, 앱이 다시 포커스를 받을 때, Mindwtr가 실행되는 동안 매 15분마다, 할 일/프로젝트 변경 후 곧바로 실행됩니다. 트레이로 닫아도 동기화가 유지되며, \'시작 시 실행\'을 켜면 로그인 후 동기화가 시작됩니다. 앱을 종료하면 데스크톱 백그라운드 동기화가 중지됩니다.',
         'settings.attachmentsCleanupPendingDeletes': '대기 중인 원격 삭제',
@@ -2590,7 +2730,7 @@ export const koOverrides: Record<string, string> = {
         'settings.syncRemoteBusy': '호환되는 다른 Mindwtr 기기가 이 동기화 위치를 업데이트하고 있습니다. 완료될 때까지 기다린 후 다시 동기화하세요.',
         'settings.syncRemoteCleanupDeferred': '동기화 작업이 완료되었습니다. Mindwtr가 임시 동기화 잠금을 제거하지 못했지만 잠금은 자동으로 만료됩니다. 다시 시도할 필요가 없습니다.',
         'settings.syncAttachmentWriteDeferred': '일부 첨부 파일 변경을 완료하지 못했습니다. 누락된 로컬 파일을 복원하거나 해당 첨부 파일을 제거한 다음 다시 동기화하세요.',
-        'settings.syncFileAttachmentTooLarge': 'Mindwtr가 로컬 첨부 파일을 유지했습니다. File Sync는 100 MB 미만의 첨부 파일만 동기화할 수 있습니다. 더 작은 파일로 바꾸거나 첨부 파일을 제거한 다음 다시 동기화하세요.',
+        'settings.syncFileAttachmentTooLarge': 'Mindwtr가 로컬 첨부 파일을 유지했습니다. 파일 동기화는 100 MB 미만의 첨부 파일만 동기화할 수 있습니다. 더 작은 파일로 바꾸거나 첨부 파일을 제거한 다음 다시 동기화하세요.',
         'settings.syncFileGenerationCorrupt': 'Mindwtr는 로컬 첨부 파일을 보존했지만 선택한 동기화 폴더의 복사본이 손상되었습니다. 해당 폴더에서 손상된 첨부 파일 세대를 제거하거나 다른 동기화 폴더를 선택한 다음 지금 동기화를 실행하세요.',
         'settings.syncFileLockBusy': '다른 Mindwtr 작업이 파일 동기화를 사용 중입니다. 작업이 끝날 때까지 기다리세요. Mindwtr가 자동으로 다시 시도합니다.',
         'settings.syncFileLockActivationBusy': '다른 Mindwtr 작업이 파일 동기화를 사용 중입니다. 작업이 끝난 뒤 지금 동기화를 다시 선택하세요.',
@@ -2627,4 +2767,14 @@ export const koOverrides: Record<string, string> = {
     'shareCard.reviewTitle': "주간 검토",
     'shareCard.reviewBody': "이번 주에는 생각할 여유를 만들었습니다.",
     'shareCard.qrLabel': "Mindwtr 받기",
+        "taskEdit.reminders": "시작 및 마감 알림",
+        "taskEdit.reminderPolicyInherit": "기본값 사용 ({value})",
+        "taskEdit.reminderPolicySend": "보내기",
+        "taskEdit.reminderPolicySkip": "건너뛰기",
+        "taskEdit.reminderPolicyHint": "시작 및 마감 알림에는 명확한 시간이 필요합니다. 집중 및 검토 알림은 변경되지 않습니다.",
+        "taskEdit.remindersDisabledHint": "이 기기의 알림 설정에서 작업 알림이 꺼져 있습니다.",
+        "settings.taskReminderDefault": "기본 작업 알림",
+        "settings.taskReminderDefaultDesc": "새 작업과 기본값을 사용하는 작업에 적용됩니다. 보내려면 작업 알림을 켜고 시작 또는 마감 시간을 지정해야 합니다.",
+        "settings.taskReminderDefaultSend": "보내기",
+        "settings.taskReminderDefaultSkip": "건너뛰기",
 };

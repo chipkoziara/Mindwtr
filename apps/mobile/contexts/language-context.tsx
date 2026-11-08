@@ -1,8 +1,10 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { AppState, Platform } from 'react-native';
 import { workspaceSessionStorage as AsyncStorage } from '@/lib/workspace-session-storage';
 
-import { type Language, getSystemDefaultLanguage, loadTranslations, loadStoredLanguage, saveStoredLanguage } from '@mindwtr/core';
-import { logError } from '../lib/app-log';
+import { type Language, configureDateFormatting, getDateFormattingConfig, getSystemDefaultLanguage, loadTranslations, loadStoredLanguage, saveStoredLanguage } from '@mindwtr/core';
+import { logError, logInfo } from '../lib/app-log';
+import { getSystemDateFormat } from '../modules/system-date-format';
 import { markStartupPhase, measureStartupPhase } from '../lib/startup-profiler';
 
 export type { Language };
@@ -15,7 +17,6 @@ export interface LanguageContextType {
 }
 
 
-
 export const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
@@ -26,6 +27,24 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
     const [hasLoadedFallback, setHasLoadedFallback] = useState(false);
     const [hasLoadedTranslations, setHasLoadedTranslations] = useState(false);
     const [isReady, setIsReady] = useState(false);
+    const [, refreshRegionalFormats] = useState(0);
+
+    useEffect(() => {
+        if (Platform.OS !== 'ios') return;
+        const subscription = AppState.addEventListener('change', (state) => {
+            if (state !== 'active') return;
+            const config = getDateFormattingConfig();
+            const systemDateFormat = getSystemDateFormat();
+            if (config.systemDateFormat === systemDateFormat) return;
+            configureDateFormatting({ ...config, systemDateFormat });
+
+            refreshRegionalFormats((revision) => revision + 1);
+            void logInfo('System date format configured', { scope: 'regional-format', extra: {
+                releaseCheck: 'v1.3.5/system-date-format', outcome: systemDateFormat ? 'native' : 'locale-fallback',
+            } });
+        });
+        return () => subscription.remove();
+    }, []);
 
     useEffect(() => {
         markStartupPhase('js.language.load:start');

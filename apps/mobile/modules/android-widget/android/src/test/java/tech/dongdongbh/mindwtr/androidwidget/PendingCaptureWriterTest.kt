@@ -13,6 +13,20 @@ import org.junit.Test
 class PendingCaptureWriterTest {
   private fun tempFilesDir(): File = Files.createTempDirectory("mindwtr-files").toFile()
 
+  @Test fun writesOnlyAllowedDestinationMetadataAndPreservesExplicitInbox() {
+    for (status in PendingCaptureWriter.CREATION_STATUSES) {
+      val json = JSONObject(PendingCaptureWriter.write(tempFilesDir(), "Capture /next", defaultStatus = status, status = "inbox")!!.readText())
+      assertEquals(status, json.getString("defaultStatus"))
+      assertEquals("inbox", json.getString("status"))
+    }
+    for (invalid in listOf("done", "archived", "reference", "NEXT", " next ")) {
+      val json = JSONObject(PendingCaptureWriter.write(tempFilesDir(), "Keep", note = "Keep note", defaultStatus = invalid, status = invalid)!!.readText())
+      assertTrue(!json.has("defaultStatus"))
+      assertTrue(!json.has("status"))
+      assertEquals("Keep note", json.getString("note"))
+    }
+  }
+
   @Test
   fun writesOneJsonItemInTheParsePendingCaptureSchema() {
     val filesDir = tempFilesDir()
@@ -28,6 +42,25 @@ class PendingCaptureWriterTest {
     assertEquals("Buy milk", json.getString("title"))
     assertEquals("1970-01-01T00:00:00.000Z", json.getString("createdAt"))
     assertEquals("android-quick-capture", json.getString("source"))
+  }
+
+  @Test
+  fun writesLiteralMultilineNoteWithoutParsingOrTruncatingIt() {
+    val note = "  @home #literal due:tomorrow\nSecond line\n" + "x".repeat(5000)
+    val written = PendingCaptureWriter.write(tempFilesDir(), "Title", Date(0), note)
+
+    assertEquals(note, JSONObject(written!!.readText()).getString("note"))
+  }
+
+  @Test
+  fun titleOnlyAndBlankNoteKeepTheLegacyQueueShape() {
+    val filesDir = tempFilesDir()
+    val titleOnly = PendingCaptureWriter.write(filesDir, "Title")!!
+    val blankNote = PendingCaptureWriter.write(filesDir, "Title", note = " \n ")!!
+
+    assertTrue(!JSONObject(titleOnly.readText()).has("note"))
+    assertTrue(!JSONObject(blankNote.readText()).has("note"))
+    assertNull(PendingCaptureWriter.write(filesDir, "  ", note = "A note needs a title"))
   }
 
   @Test

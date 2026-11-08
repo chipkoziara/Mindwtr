@@ -125,6 +125,10 @@ describe('android-app-shortcuts', () => {
     const appIntentSource = rendererSource.slice(rendererSource.indexOf('fun appIntent('));
 
     expect(activitySource).toContain('WidgetRenderer.appIntent(this, "mindwtr:///capture-quick?mode=text&entry=details")');
+
+    expect(appIntentSource).toContain('linkInScheme(uri, context.getString(R.string.mindwtr_link_scheme))');
+    expect(readFileSync(new URL('../../../../../res/values/link_scheme.xml', nativeSourceDir), 'utf8'))
+      .toContain('<string name="mindwtr_link_scheme" translatable="false">mindwtr</string>');
     expect(activitySource).toContain('finally {\n      finish()');
     expect(activitySource).not.toMatch(/intent[?.]|Intent\(intent|putExtra|FLAG_ACTIVITY_CLEAR_TASK/);
     expect(appIntentSource).toContain('Intent(Intent.ACTION_VIEW)');

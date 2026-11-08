@@ -1,23 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { Alert } from 'react-native';
+import { NavigationContext } from '@react-navigation/native';
 import {
   buildBulkOrganizeTaskUpdates,
   buildBulkTaskTokenUpdates,
   collectBulkTaskTokens,
   formatListItemCount,
   getTrashUndoLabel,
+  runStoreCommand,
   tFallback,
   updateRangeSelection,
+  useTaskStore,
   type BulkOrganizeTaskUpdateInput,
   type StoreActionResult,
   type Task,
   type TaskStatus,
 } from '@mindwtr/core';
 import { logError } from '../lib/app-log';
+import { addHardwareBackPressListener } from '../lib/hardware-back';
 import { getBulkActionFailureMessage } from './task-list-utils';
 import { useToast } from '../contexts/toast-context';
 
 type UseTaskListSelectionParams = {
+
+  backExitsSelection?: boolean;
   batchDeleteTasks: (ids: string[]) => Promise<void | StoreActionResult>;
   batchMoveTasks: (ids: string[], status: TaskStatus) => Promise<void | StoreActionResult>;
   batchUpdateTasks: (updates: { id: string; updates: Partial<Task> }[]) => Promise<void | StoreActionResult>;
@@ -31,23 +37,14 @@ type ToggleMultiSelectOptions = {
   visibleTaskIds?: readonly string[];
 };
 
-// Core batch actions (batchDeleteTasks/batchUpdateTasks/…) are all-or-nothing:
-// on a bad input (e.g. an id removed by a sync merge between opening the confirm
-// Alert and tapping it) they return `{ success: false }` WITHOUT throwing. Turn
-// that into a throw so runBulkAction's catch shows the error toast and the
-// caller never reaches its exitSelectionMode()/success-toast lines.
+
 export function assertBulkActionSucceeded(result: void | StoreActionResult): void {
   if (result && result.success === false) {
     throw new Error(result.error ?? '');
   }
 }
 
-/**
- * Drops selected ids that are no longer on screen. Every surface that hides rows
- * — a filter, a search, a folded grouping heading — must call this with the ids
- * it actually renders: rows a bulk action still reaches after they disappear are
- * worse than not hiding them at all (#963, #970).
- */
+
 export function usePruneSelectionToVisible(
   setMultiSelectedIds: Dispatch<SetStateAction<Set<string>>>,
   visibleTaskIds: readonly string[],
@@ -62,6 +59,7 @@ export function usePruneSelectionToVisible(
 }
 
 export function useTaskListSelection({
+  backExitsSelection = true,
   batchDeleteTasks,
   batchMoveTasks,
   batchUpdateTasks,
@@ -93,6 +91,19 @@ export function useTaskListSelection({
     setRangeSelectMode(false);
     rangeSelectionAnchorIdRef.current = null;
   }, []);
+
+
+  const navigation = useContext(NavigationContext);
+  const backOwnsSelection = selectionMode && backExitsSelection && !tagModalVisible && !removeTagPickerVisible;
+  useEffect(() => {
+    if (!backOwnsSelection) return undefined;
+    const subscription = addHardwareBackPressListener(() => {
+      if (navigation && !navigation.isFocused()) return false;
+      exitSelectionMode();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [backOwnsSelection, exitSelectionMode, navigation]);
 
   const runBulkAction = useCallback(async (label: string, action: () => Promise<void>) => {
     if (bulkActionLoading) return;
@@ -190,30 +201,33 @@ export function useTaskListSelection({
     );
   }, [batchDeleteTasks, bulkActionLoading, exitSelectionMode, hasSelection, restoreTask, runBulkAction, selectedIdsArray, showToast, t]);
 
-  // Both directions go through the same core builder desktop uses. Hand-rolling
-  // the merge here meant a task the lookup missed was written back as
-  // `tags: [newTag]` — every other tag on it silently gone.
+
+  const writeTagUpdates = useCallback((tags: string | string[], mode: 'add' | 'remove') => runStoreCommand(async () => {
+    const updates = buildBulkTaskTokenUpdates(selectedIdsArray, useTaskStore.getState()._tasksById, 'tags', tags, mode);
+    return { count: updates.length, result: updates.length > 0 ? await batchUpdateTasks(updates) : undefined };
+  }), [batchUpdateTasks, selectedIdsArray]);
+
   const handleBatchAddTag = useCallback(async () => {
     const input = tagInput.trim();
     if (!hasSelection || !input || bulkActionLoading) return;
     await runBulkAction(t('bulk.addTag'), async () => {
-      const updates = buildBulkTaskTokenUpdates(selectedIdsArray, tasksById, 'tags', input, 'add');
-      // Close first so a failure's warning toast is not under the dialog; the typed tag stays for a retry.
+      const written = writeTagUpdates(input, 'add');
+
       setTagModalVisible(false);
-      if (updates.length > 0) assertBulkActionSucceeded(await batchUpdateTasks(updates));
+      const { count, result } = await written;
+      assertBulkActionSucceeded(result);
       setTagInput('');
-      if (updates.length === 0) return;
+      if (count === 0) return;
       exitSelectionMode();
       showToast({
         title: t('common.done'),
-        message: formatListItemCount(updates.length, 'task', t),
+        message: formatListItemCount(count, 'task', t),
         tone: 'success',
       });
     });
-  }, [batchUpdateTasks, bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, selectedIdsArray, showToast, t, tagInput, tasksById]);
+  }, [bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, showToast, t, tagInput, writeTagUpdates]);
 
-  // Removal offers only the tags the selection actually carries, so a typo can
-  // never look like a silent no-op.
+
   const removableTagOptions = useMemo(
     () => collectBulkTaskTokens(selectedIdsArray, tasksById, 'tags'),
     [selectedIdsArray, tasksById]
@@ -222,29 +236,36 @@ export function useTaskListSelection({
   const handleBatchRemoveTags = useCallback(async (tags: string[]) => {
     if (!hasSelection || tags.length === 0 || bulkActionLoading) return;
     await runBulkAction(tFallback(t, 'bulk.removeTag', 'Remove tag'), async () => {
-      const updates = buildBulkTaskTokenUpdates(selectedIdsArray, tasksById, 'tags', tags, 'remove');
+      const written = writeTagUpdates(tags, 'remove');
       setRemoveTagPickerVisible(false);
-      if (updates.length === 0) return;
-      assertBulkActionSucceeded(await batchUpdateTasks(updates));
+      const { count, result } = await written;
+      if (count === 0) return;
+      assertBulkActionSucceeded(result);
       exitSelectionMode();
       showToast({
         title: t('common.done'),
-        message: formatListItemCount(updates.length, 'task', t),
+        message: formatListItemCount(count, 'task', t),
         tone: 'success',
       });
     });
-  }, [batchUpdateTasks, bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, selectedIdsArray, showToast, t, tasksById]);
+  }, [bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, showToast, t, writeTagUpdates]);
 
   const handleBatchOrganize = useCallback(async (input: BulkOrganizeTaskUpdateInput) => {
     if (!hasSelection || bulkActionLoading) return;
     const updates = buildBulkOrganizeTaskUpdates(selectedIdsArray, tasksById, input);
     if (updates.length === 0) return;
     await runBulkAction(tFallback(t, 'bulk.organize', 'Bulk organize'), async () => {
-      assertBulkActionSucceeded(await batchUpdateTasks(updates));
+
+      const { count, result } = await runStoreCommand(async () => {
+        const latest = buildBulkOrganizeTaskUpdates(selectedIdsArray, useTaskStore.getState()._tasksById, input);
+        return { count: latest.length, result: latest.length > 0 ? await batchUpdateTasks(latest) : undefined };
+      });
+      if (count === 0) return;
+      assertBulkActionSucceeded(result);
       exitSelectionMode();
       showToast({
         title: t('common.done'),
-        message: formatListItemCount(updates.length, 'task', t),
+        message: formatListItemCount(count, 'task', t),
         tone: 'success',
       });
     });

@@ -1,14 +1,18 @@
 import {
+    EXTERNAL_CALENDAR_FEED_MAX_BYTES,
+    ResponseTooLargeError,
+    concatChunks,
     expandCategoryCalendars,
     isMindwtrMirrorCalendar,
     mergeExternalCalendarSources,
     parseIcsWithMetadata,
+    readResponseBody,
     type ExternalCalendarEvent,
     type ExternalCalendarSourceResult,
     type ExternalCalendarSubscription,
     type IcsCategoryInfo,
 } from '@mindwtr/core';
-import { gunzipSync, strFromU8 } from 'fflate';
+import { Gunzip, strFromU8 } from 'fflate';
 import { ExternalCalendarService } from './external-calendar-service';
 import { isLocalCalendarFileUrl } from './external-calendar-source';
 import { isTauriRuntime } from './runtime';
@@ -145,10 +149,28 @@ async function loadCachedIcsEventsForCalendar(
     return { calendarColor, categoryInfo, events };
 }
 
+
+const GUNZIP_INPUT_SLICE_BYTES = 16 * 1024;
+
+function gunzipWithinLimit(bytes: Uint8Array, limitBytes: number): Uint8Array {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const gunzip = new Gunzip((chunk) => {
+        total += chunk.length;
+        if (total > limitBytes) throw new ResponseTooLargeError(limitBytes);
+        chunks.push(chunk);
+    });
+    for (let offset = 0; offset < bytes.length; offset += GUNZIP_INPUT_SLICE_BYTES) {
+        const end = offset + GUNZIP_INPUT_SLICE_BYTES;
+        gunzip.push(bytes.subarray(offset, end), end >= bytes.length);
+    }
+    return concatChunks(chunks, total);
+}
+
 async function readCalendarResponseText(res: Response): Promise<string> {
-    const bytes = new Uint8Array(await res.arrayBuffer());
+    const bytes = new Uint8Array(await readResponseBody(res, undefined, EXTERNAL_CALENDAR_FEED_MAX_BYTES));
     const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
-    return strFromU8(isGzip ? gunzipSync(bytes) : bytes);
+    return strFromU8(isGzip ? gunzipWithinLimit(bytes, EXTERNAL_CALENDAR_FEED_MAX_BYTES) : bytes);
 }
 
 async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<string> {
@@ -156,9 +178,8 @@ async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<str
         if (!isTauriRuntime()) {
             throw new Error('Local calendar files require the desktop app.');
         }
-        // Read through our own command, not the fs plugin: the plugin's scope
-        // check canonicalizes first, which fails outright on virtual volumes
-        // such as rclone/WinFSP mounts.
+
+
         return await invokeNative<string>('read_external_calendar_file', { url });
     }
 
@@ -167,9 +188,8 @@ async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<str
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            // The HTTP plugin adds `Origin: tauri://localhost` unless it is sent empty,
-            // and some feed gateways answer any Origin with 403 (#1309). Feeds are
-            // plain downloads, so drop it the way curl and the mobile app do.
+
+
             const res = await (tauriFetch ?? fetch)(url, {
                 method: 'GET',
                 headers: { Origin: '' },
@@ -214,9 +234,8 @@ export async function fetchExternalCalendarEvents(
     ]);
 
     const icsSources: ExternalCalendarSourceResult[] = [];
-    // A feed split by CATEGORIES is represented by its category calendars, so
-    // the subscription itself drops out of the visible list once nothing is
-    // left on it.
+
+
     const splitCalendarIds = new Set<string>();
     const warnings: string[] = [];
     for (const [index, result] of icsResults.entries()) {

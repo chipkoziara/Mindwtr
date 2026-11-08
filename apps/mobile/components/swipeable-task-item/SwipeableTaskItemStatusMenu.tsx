@@ -1,4 +1,6 @@
 import React from 'react';
+import { useToast } from '../../contexts/toast-context';
+import { copyTaskReference } from '../../lib/task-reference-clipboard';
 import { Modal, Pressable, Text, View } from 'react-native';
 import { TaskStatus, tFallback } from '@mindwtr/core';
 import type { ThemeColors } from '../../hooks/use-theme-colors';
@@ -6,12 +8,15 @@ import { useStatusColors } from '../../hooks/use-status-colors';
 import { styles } from './swipeable-task-item.styles';
 
 interface SwipeableTaskItemStatusMenuProps {
-    /** Long-press on the Done option completes the task with a picked timestamp. */
+
     onBackdatedComplete?: () => void;
     onClose: () => void;
     onStatusChange: (status: TaskStatus) => void;
     onMoveToSection?: () => void;
     onMoveToDestination?: () => void;
+
+    onAddToChecklist?: () => void;
+    taskId: string;
     taskStatus: TaskStatus;
     tc: ThemeColors;
     t: (key: string) => string;
@@ -26,14 +31,18 @@ export function SwipeableTaskItemStatusMenu({
     onStatusChange,
     onMoveToSection,
     onMoveToDestination,
+    onAddToChecklist,
+    taskId,
     taskStatus,
     tc,
     t,
     visible,
 }: SwipeableTaskItemStatusMenuProps) {
     const statusColors = useStatusColors();
+    const { showToast } = useToast();
     const moveToDestinationLabel = tFallback(t, 'task.moveToProjectOrArea', 'Move to project or area…');
     const moveToSectionLabel = tFallback(t, 'viewSections.moveToSection', 'Move to section…');
+    const addToChecklistLabel = tFallback(t, 'task.addToChecklist', 'Add to checklist…');
     return (
         <Modal
             visible={visible}
@@ -79,8 +88,12 @@ export function SwipeableTaskItemStatusMenu({
                             );
                         })}
                     </View>
-                    {onMoveToDestination || onMoveToSection ? (
+                    {onMoveToDestination || onMoveToSection || onAddToChecklist ? (
                         <View style={styles.menuMoveActions}>
+                            {                                                                                 }
+                            <Text style={[styles.menuSectionTitle, { color: tc.secondaryText }]} accessibilityRole="header">
+                                {tFallback(t, 'task.destination', 'Destination')}
+                            </Text>
                             {onMoveToDestination ? (
                                 <Pressable
                                     style={[styles.menuMoveItem, { borderColor: tc.border }]}
@@ -107,8 +120,42 @@ export function SwipeableTaskItemStatusMenu({
                                     <Text style={[styles.menuMoveText, { color: tc.text }]}>{moveToSectionLabel}</Text>
                                 </Pressable>
                             ) : null}
+                            {onAddToChecklist ? (
+                                <Pressable
+                                    style={[styles.menuMoveItem, { borderColor: tc.border }]}
+                                    onPress={() => {
+                                        onAddToChecklist();
+                                        onClose();
+                                    }}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={addToChecklistLabel}
+                                >
+                                    <Text style={[styles.menuMoveText, { color: tc.text }]}>{addToChecklistLabel}</Text>
+                                </Pressable>
+                            ) : null}
                         </View>
                     ) : null}
+                    <View style={styles.menuMoveActions}>
+                        {(['link', 'id'] as const).map((kind) => {
+                            const label = kind === 'link'
+                                ? tFallback(t, 'task.copyTaskLink', 'Copy Mindwtr link')
+                                : tFallback(t, 'task.copyTaskId', 'Copy task ID');
+                            return (
+                                <Pressable
+                                    key={`copy-${kind}`}
+                                    style={[styles.menuMoveItem, { borderColor: tc.border }]}
+                                    onPress={() => {
+                                        void copyTaskReference(taskId, kind, t, showToast);
+                                        onClose();
+                                    }}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={label}
+                                >
+                                    <Text style={[styles.menuMoveText, { color: tc.text }]}>{label}</Text>
+                                </Pressable>
+                            );
+                        })}
+                    </View>
                 </View>
             </Pressable>
         </Modal>

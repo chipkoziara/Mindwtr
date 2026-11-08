@@ -21,6 +21,7 @@ import { SectionSelector } from '../ui/SectionSelector';
 import { SomedaySectionSelector } from '../ui/SomedaySectionSelector';
 import { TaskInput, type TaskInputAcceptedSuggestion } from './TaskInput';
 import { cn } from '../../lib/utils';
+import { isImeComposing } from '../../lib/ime';
 import {
     QUICK_ADD_FIELD_TOKENS,
     QuickAddTokenBadge,
@@ -38,8 +39,9 @@ interface TaskItemEditorProps {
     draft: TaskDraft;
     setField: TaskDraftSetter;
     autoFocusTitle?: boolean;
-    // One seam for the whole AI feature: the editor forwards it to the menu
-    // and panel components and otherwise knows nothing about AI.
+    isModalEditor?: boolean;
+
+
     ai: ReturnType<typeof useTaskItemAi>;
     timeEstimatesEnabled: boolean;
     projects: Project[];
@@ -65,7 +67,7 @@ interface TaskItemEditorProps {
     renderField: (fieldId: TaskEditorFieldId) => ReactNode;
     language: string;
     inputContexts: string[];
-    /** Known people for the title's %Person suggestions; without it `%` offers nothing (#1255). */
+
     inputPeople?: string[];
     onAcceptTitleSuggestion?: (suggestion: TaskInputAcceptedSuggestion) => boolean | Promise<boolean>;
     isDoneActionActive?: boolean;
@@ -81,6 +83,7 @@ interface TaskItemEditorProps {
     onConvertToSection?: () => void;
     onCancel: () => void;
     onSubmit: (e: FormEvent) => void;
+    isImportingFiles?: boolean;
     onFilesDropped?: (files: File[]) => void;
 }
 
@@ -108,6 +111,7 @@ export function TaskItemEditor({
     draft,
     setField,
     autoFocusTitle = false,
+    isModalEditor = false,
     ai,
     timeEstimatesEnabled,
     projects,
@@ -140,10 +144,11 @@ export function TaskItemEditor({
     onConvertToSection,
     onCancel,
     onSubmit,
+    isImportingFiles = false,
     onFilesDropped,
 }: TaskItemEditorProps) {
-    // Draft values and setField bindings, under the names the form below was
-    // written against.
+
+
     const {
         title: editTitle,
         contexts: editContexts,
@@ -187,9 +192,7 @@ export function TaskItemEditor({
     const [organizationOpen, setOrganizationOpen] = useState(() => sectionOpenDefaults.organization || sectionCounts.organization > 0);
     const [detailsOpen, setDetailsOpen] = useState(() => sectionOpenDefaults.details || sectionCounts.details > 0);
 
-    // Attachments can live in any of the three collapsible sections (user
-    // configurable layout); a dropped file needs to expand whichever one
-    // holds it and scroll it into view so the drop isn't invisible feedback.
+
     const attachmentsSection = findAttachmentsSection(schedulingFields, organizationFields, detailsFields);
     const attachmentsFieldRef = useRef<HTMLDivElement | null>(null);
     const [isFileDragOver, setIsFileDragOver] = useState(false);
@@ -203,8 +206,7 @@ export function TaskItemEditor({
         setIsFileDragOver(true);
     };
 
-    // dragleave also fires when the pointer crosses into a child element, which
-    // would flicker the ring off for the whole drag if not guarded.
+
     const handleFormDragLeave = (event: DragEvent<HTMLFormElement>) => {
         const next = event.relatedTarget;
         if (next instanceof Node && event.currentTarget.contains(next)) return;
@@ -225,9 +227,7 @@ export function TaskItemEditor({
         if (attachmentsSection) setRevealAttachmentsToken((prev) => prev + 1);
     };
 
-    // Expanding a section and scrolling to it in the same tick scrolls to a
-    // node that isn't laid out yet; wait a frame after the open-state update
-    // has painted before scrolling.
+
     useEffect(() => {
         if (revealAttachmentsToken === 0) return;
         const raf = requestAnimationFrame(() => {
@@ -279,10 +279,29 @@ export function TaskItemEditor({
         return false;
     };
 
+    const detailsSection = detailsFields.length > 0 && (
+        <div className="min-w-0">
+            <TaskEditorSection
+                title={t('taskEdit.details')}
+                count={sectionCounts.details}
+                open={detailsOpen}
+                onToggle={() => setDetailsOpen((prev) => !prev)}
+            >
+                {detailsFields.map((fieldId) => (
+                    <div key={fieldId} ref={fieldId === 'attachments' ? attachmentsFieldRef : undefined}>{renderField(fieldId)}</div>
+                ))}
+            </TaskEditorSection>
+        </div>
+    );
+
     return (
         <form
-            onSubmit={onSubmit}
+            onSubmit={(event) => {
+                if (isImportingFiles) { event.preventDefault(); return; }
+                onSubmit(event);
+            }}
             onKeyDown={(event) => {
+                if (isImeComposing(event)) return;
                 if (event.key === 'Escape') {
                     event.preventDefault();
                     event.stopPropagation();
@@ -296,7 +315,7 @@ export function TaskItemEditor({
                     if (typeof form.requestSubmit === 'function') {
                         form.requestSubmit();
                     } else {
-                        onSubmit(event as unknown as FormEvent);
+                        if (!isImportingFiles) onSubmit(event as unknown as FormEvent);
                     }
                 }
             }}
@@ -305,7 +324,11 @@ export function TaskItemEditor({
             onDragOver={handleFormDragOver}
             onDragLeave={handleFormDragLeave}
             onDrop={handleFormDrop}
-            className={cn("flex flex-col gap-3 max-h-[80vh]", isFileDragOver && "ring-2 ring-primary/50")}
+            className={cn(
+                'flex flex-col gap-3',
+                isModalEditor ? 'max-h-[calc(90vh-3rem)]' : 'max-h-[80vh]',
+                isFileDragOver && 'ring-2 ring-primary/50',
+            )}
         >
             <div className="flex-1 min-h-0 overflow-y-auto pr-1 pl-1 -ml-1 pt-1 -mt-1 pb-1 -mb-1 space-y-3">
                 <div className="flex items-start gap-3 pt-0.5">
@@ -348,7 +371,10 @@ export function TaskItemEditor({
                         onAcceptSuggestion={handleTitleSuggestionAccept}
                         placeholder={t('taskEdit.titleLabel')}
                         ariaLabel={t('taskEdit.titleLabel')}
-                        className="w-full rounded-sm bg-transparent border-b border-primary/60 px-1 pb-1.5 pt-0 text-lg font-semibold leading-7 text-foreground placeholder:text-muted-foreground transition-colors focus:border-primary focus:ring-0 focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:ring-offset-1 focus-visible:ring-offset-card outline-none motion-reduce:transition-none"
+                        className={cn(
+                            'w-full rounded-sm bg-transparent border-b border-primary/60 px-1 pb-1.5 pt-0 font-semibold text-foreground placeholder:text-muted-foreground transition-colors focus:border-primary focus:ring-0 focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:ring-offset-1 focus-visible:ring-offset-card outline-none motion-reduce:transition-none',
+                            isModalEditor ? 'text-2xl leading-9' : 'text-lg leading-7',
+                        )}
                         containerClassName="flex-1 min-w-0"
                         dir={titleDirection}
                     />
@@ -372,6 +398,15 @@ export function TaskItemEditor({
                     <TaskEditorAiMenu ai={ai} t={t} />
                 </div>
             <TaskEditorAiPanels ai={ai} timeEstimatesEnabled={timeEstimatesEnabled} t={t} />
+            <div className={cn(
+                'flex flex-col gap-3',
+                isModalEditor && detailsFields.length > 0 && 'lg:grid lg:grid-cols-[minmax(0,1fr)_20rem] lg:gap-6',
+            )}>
+            {isModalEditor && detailsSection}
+            <div className={cn(
+                'min-w-0 space-y-3',
+                isModalEditor && detailsFields.length > 0 && 'lg:border-l lg:border-border lg:pl-6',
+            )}>
             {basicFieldsBeforeOrganizers.length > 0 && (
                 <div className="space-y-3">
                     {basicFieldsBeforeOrganizers.map((fieldId) => (
@@ -380,7 +415,7 @@ export function TaskItemEditor({
                 </div>
             )}
             {organizerFields.length > 0 && (
-                <div className="flex flex-wrap gap-4">
+                <div className={cn('flex gap-4', isModalEditor ? 'flex-col' : 'flex-wrap')}>
                     {organizerFields.map((fieldId, index) => {
                         if (fieldId === 'area' || fieldId === 'project') {
                             const firstDestinationIndex = organizerFields.findIndex((id) => id === 'area' || id === 'project');
@@ -402,6 +437,7 @@ export function TaskItemEditor({
                                         destinationLabel={t('task.destination')}
                                         projectsLabel={t('projects.title')}
                             areasLabel={t('areas.manage')}
+                                        deferredLabel={t('projects.deferredSection')}
                                         noneLabel={t('common.none')}
                                         searchPlaceholder={t('common.search')}
                                         noMatchesLabel={t('common.noMatches')}
@@ -493,22 +529,16 @@ export function TaskItemEditor({
                             ))}
                         </TaskEditorSection>
                     )}
-                    {detailsFields.length > 0 && (
-                        <TaskEditorSection
-                            title={t('taskEdit.details')}
-                            count={sectionCounts.details}
-                            open={detailsOpen}
-                            onToggle={() => setDetailsOpen((prev) => !prev)}
-                        >
-                            {detailsFields.map((fieldId) => (
-                                <div key={fieldId} ref={fieldId === 'attachments' ? attachmentsFieldRef : undefined}>{renderField(fieldId)}</div>
-                            ))}
-                        </TaskEditorSection>
-                    )}
                 </div>
             </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2 pt-1">
+            {!isModalEditor && detailsSection}
+            </div>
+            </div>
+            <div className={cn(
+                'flex shrink-0 flex-wrap items-center gap-2',
+                isModalEditor ? 'border-t border-border pt-4' : 'pt-1',
+            )}>
                 <div className="relative">
                     <button
                         type="button"
@@ -571,15 +601,22 @@ export function TaskItemEditor({
                 )}
                 <div className="flex flex-wrap gap-2 ml-auto">
                     <button
+                        disabled={isImportingFiles}
                         type="submit"
-                        className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded hover:bg-primary/90"
+                        className={cn(
+                            'bg-primary text-primary-foreground hover:bg-primary/90',
+                            isModalEditor ? 'min-h-10 rounded-md px-4 py-2 text-sm' : 'rounded px-3 py-1.5 text-xs',
+                        )}
                     >
                         {t('common.save')}
                     </button>
                     <button
                         type="button"
                         onClick={onCancel}
-                        className="text-xs bg-muted text-muted-foreground px-3 py-1.5 rounded hover:bg-muted/80"
+                        className={cn(
+                            'bg-muted text-muted-foreground hover:bg-muted/80',
+                            isModalEditor ? 'min-h-10 rounded-md px-4 py-2 text-sm' : 'rounded px-3 py-1.5 text-xs',
+                        )}
                     >
                         {t('common.cancel')}
                     </button>

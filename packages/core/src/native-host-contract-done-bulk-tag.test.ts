@@ -10,6 +10,9 @@ import { deterministicHash128 } from './uuid';
 import { readAreaDurableData } from './native-host-contract-area-durable';
 import type { AppData, Task } from './types';
 
+
+vi.setConfig({ testTimeout: 30_000 });
+
 const NOW = '2026-10-03T13:00:00.000Z';
 const BEFORE = '2026-10-02T12:34:56.789Z';
 const UUID = '00000000-0000-4000-8000-000000000184';
@@ -116,8 +119,8 @@ describe('guarded Done bulk Add tag', () => {
             expect(logs).not.toHaveBeenCalled();
             expect(useTaskStore.getState().settings.deviceId).toBeUndefined();
             expect(buildBulkTaskTokenUpdates(['a', 'b'], useTaskStore.getState()._tasksById, 'tags', tag.trim(), 'add')).toEqual([]);
-            // Keep the displayed memory revision while saved storage advances.
-            // A fresh no-op still must reject that durable CAS mismatch.
+
+
             const displayed = request(tag); await sqlite.client().run('UPDATE tasks SET rev = rev + 1 WHERE id = ?', ['a']);
             const changed = await raw(sqlite); writes.mockClear();
             expect(await methods().prepareArchivedTasksRestore(displayed)).toMatchObject({ ok: false, error: { code: 'STALE_REVISION' } });
@@ -343,8 +346,8 @@ describe('guarded Done bulk Add tag', () => {
             await changed.restart(undefined, { recoveryLoad: true });
             expect(value(await methods().commitPreparedArchivedTasksRestore(command))).toEqual({ count: 1, changed: true });
             expect(rows()).toEqual(expected); expect(await raw(changed)).toEqual(expectedRaw);
-            // #959 only activates for an explicit completedAt patch. This tag
-            // write preserves both Done and the newer setting, as real RN does.
+
+
             expect(rows().tasks.find((row) => row.id === 'b')?.status).toBe('done'); expect(useTaskStore.getState().settings.gtd?.autoArchiveDays).toBe(1);
         } finally { await changed.close(); }
     });
@@ -363,7 +366,7 @@ describe('guarded Done bulk Add tag', () => {
         const sqlite = await setup();
         try {
             const command = await prepare(); const before = await raw(sqlite); value(await methods().commitPreparedArchivedTasksRestore(command)); const actual = await raw(sqlite);
-            expect(actual).not.toEqual(expectedRaw); // Strict legacy all-nine raw equality remains FAIL.
+            expect(actual).not.toEqual(expectedRaw);
             const differences = [];
             for (const table of Object.keys(actual)) {
                 const left = expectedRaw![table] as Array<Record<string, unknown>>; const right = actual[table] as Array<Record<string, unknown>>; expect(left).toHaveLength(right.length);

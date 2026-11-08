@@ -1,11 +1,12 @@
-import { act, renderHook } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useTaskStore, type Area, type Project, type Task } from '@mindwtr/core';
 
 import { logInfo } from '../../lib/app-log';
 import { reportError } from '../../lib/report-error';
 import { useUiStore } from '../../store/ui-store';
-import { useTaskQuickActionMenuProps } from './useTaskQuickActionMenuProps';
+import { TaskQuickActionMenuHost, useTaskQuickActionMenuProps } from './useTaskQuickActionMenuProps';
+import { holdSyncSave } from '../../test/hold-sync-save';
 
 const createProjectMock = vi.hoisted(() => vi.fn());
 const logInfoMock = vi.hoisted(() => vi.fn());
@@ -262,5 +263,67 @@ describe('task cancellation quick action', () => {
         );
         await act(async () => { showToast.mock.lastCall?.[3].onClick(); await Promise.resolve(); });
         expect(updateTask).toHaveBeenCalledWith(task.id, expect.objectContaining({ status: 'next', cancelledAt: undefined }));
+    });
+});
+
+describe('useTaskQuickActionMenuProps contexts panel', () => {
+    afterEach(() => {
+        act(() => {
+            useTaskStore.setState(initialTaskState, true);
+            useUiStore.setState(initialUiState, true);
+        });
+    });
+
+    it('merges the saved contexts onto the contexts a sync save published since the panel opened', async () => {
+        const opened: Task = { ...task, contexts: ['@a'], rev: 1 };
+        act(() => { useTaskStore.setState({ _allTasks: [opened] }); });
+        render(<TaskQuickActionMenuHost task={opened} x={0} y={0} onClose={vi.fn()} />);
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Contexts…' }));
+        fireEvent.change(screen.getByRole('textbox', { name: 'task.aria.contexts' }), { target: { value: '@a, @mine' } });
+
+        const finish = holdSyncSave(() => useTaskStore.setState({ _allTasks: [{ ...opened, rev: 3, contexts: ['@a', '@remote'] }] }));
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await act(finish);
+
+        await vi.waitFor(() => expect(useTaskStore.getState()._tasksById.get(task.id)?.contexts).toEqual(['@a', '@remote', '@mine']));
+    });
+});
+
+describe('Add to checklist quick action (#1467)', () => {
+    const initialTaskState = useTaskStore.getState();
+    const initialUiState = useUiStore.getState();
+    const capture: Task = { ...task, id: 'capture', title: 'Eggs', status: 'inbox' };
+
+    afterEach(() => {
+        act(() => {
+            useTaskStore.setState(initialTaskState, true);
+            useUiStore.setState(initialUiState, true);
+        });
+    });
+
+    it('is offered only for a title-only Inbox task that is not read-only', () => {
+        expect(renderHook(() => useTaskQuickActionMenuProps(capture)).result.current.checklistMove).toBeDefined();
+        expect(renderHook(() => useTaskQuickActionMenuProps({ ...capture, tags: ['#x'] })).result.current.checklistMove).toBeUndefined();
+        expect(renderHook(() => useTaskQuickActionMenuProps({ ...capture, status: 'next' })).result.current.checklistMove).toBeUndefined();
+        expect(renderHook(() => useTaskQuickActionMenuProps(capture, { readOnly: true })).result.current.checklistMove).toBeUndefined();
+    });
+
+    it('moves through the one store action and undoes through its pair', async () => {
+        const showToast = vi.fn();
+        const moveTaskToChecklist = vi.fn(async () => ({ success: true, id: 'target' }));
+        const undoMoveTaskToChecklist = vi.fn(async () => ({ success: true }));
+        act(() => {
+            useTaskStore.setState({ moveTaskToChecklist, undoMoveTaskToChecklist });
+            useUiStore.setState({ showToast });
+        });
+        const { result } = renderHook(() => useTaskQuickActionMenuProps(capture));
+        await act(async () => {
+            result.current.checklistMove!.onSelect('target');
+            await Promise.resolve();
+        });
+        expect(moveTaskToChecklist).toHaveBeenCalledExactlyOnceWith('capture', 'target');
+        expect(showToast).toHaveBeenCalledExactlyOnceWith('Added to checklist', 'info', 5000, expect.objectContaining({ label: 'Undo' }));
+        await act(async () => { showToast.mock.calls[0][3].onClick(); await Promise.resolve(); });
+        expect(undoMoveTaskToChecklist).toHaveBeenCalledExactlyOnceWith('capture', 'target');
     });
 });

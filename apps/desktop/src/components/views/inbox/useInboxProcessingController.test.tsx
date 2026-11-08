@@ -2,13 +2,15 @@ import { useState } from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { useTaskStore, type Area, type Project, type Task } from '@mindwtr/core';
+import { isProcessInboxReturningTask, useTaskStore, type AppData, type Area, type Project, type Task } from '@mindwtr/core';
 import { useUiStore } from '../../../store/ui-store';
 import { useInboxProcessingController } from './useInboxProcessingController';
+import { holdSyncSave } from '../../../test/hold-sync-save';
 
 type InboxControllerOptions = Parameters<typeof useInboxProcessingController>[0];
 type AddTask = InboxControllerOptions['addTask'];
 type UpdateTask = InboxControllerOptions['updateTask'];
+type InboxWizard = ReturnType<typeof useInboxProcessingController>['wizardProps'];
 
 const makeTask = (id: string, status: Task['status'] = 'inbox'): Task => ({
     id,
@@ -160,13 +162,14 @@ describe('useInboxProcessingController not-actionable destinations', () => {
     const renderController = (
         updateTask: UpdateTask,
         controllerSettings: Parameters<typeof useInboxProcessingController>[0]['settings'] = settings,
+        controllerTasks: Task[] = tasks,
     ) => renderHook(() => {
-        // The session closes itself once the queue drains, so isProcessing has
-        // to be real state or the reconciliation effect never settles.
+
+
         const [isProcessing, setIsProcessing] = useState(true);
         return useInboxProcessingController({
             t: (key) => key,
-            tasks,
+            tasks: controllerTasks,
             projects,
             areas,
             settings: controllerSettings,
@@ -181,8 +184,93 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         });
     });
 
-    // #958: picking a project and then sending the item to Reference/Someday
-    // used to write only the status, silently dropping the project.
+    it('preserves concurrent file updates, link edits, and tombstones when saving an added link', async () => {
+        const attachment = (id: string) => ({ id, kind: 'link' as const, title: id, uri: `https://${id}.example`, createdAt: tasks[0].createdAt, updatedAt: tasks[0].updatedAt });
+        const file = { ...attachment('file'), kind: 'file' as const, uri: '/data/attachments/file.pdf', size: 4 };
+        const opened = { ...tasks[0], attachments: [file, attachment('edited'), attachment('deleted')] };
+        useTaskStore.setState({ _allTasks: [opened] });
+        const { result } = renderController((id, updates) => useTaskStore.getState().updateTask(id, updates), settings, [opened]);
+        await waitFor(() => expect(result.current.wizardProps.processingTask?.id).toBe('one'));
+        act(() => {
+            expect(result.current.wizardProps.onAddLinks('not a URL')).toBe(false);
+            expect(result.current.wizardProps.onAddLinks('Draft | https://draft.example')).toBe(true);
+        });
+        const remoteAttachments = [
+            { ...file, size: 8, cloudKey: 'attachments/file.pdf' },
+            { ...attachment('edited'), title: 'Changed remotely', uri: 'https://changed.example' },
+            { ...attachment('deleted'), deletedAt: new Date().toISOString() },
+            attachment('new'),
+        ];
+        const finish = holdSyncSave(() => useTaskStore.setState({ _allTasks: [{ ...opened, rev: 5, attachments: remoteAttachments }] }));
+        let committed!: Promise<unknown>;
+        act(() => { committed = Promise.resolve(result.current.wizardProps.handleConfirmReference()); });
+        await finish();
+        await act(async () => { await committed; });
+        const saved = useTaskStore.getState()._tasksById.get('one');
+        expect(saved?.status).toBe('reference');
+        expect(saved?.attachments).toEqual([...remoteAttachments, expect.objectContaining({ title: 'Draft', uri: 'https://draft.example' })]);
+    });
+
+    it('appends a title link to the attachments a sync save published while the write waited', async () => {
+        useTaskStore.setState({ _allTasks: tasks });
+        const updateTask: UpdateTask = (id, updates) => useTaskStore.getState().updateTask(id, updates);
+        const { result } = renderController(updateTask);
+        await waitFor(() => {
+            expect(result.current.wizardProps.processingTask?.id).toBe('one');
+        });
+        act(() => {
+            result.current.wizardProps.setField('title', 'Call Alice /link:https://notes.example');
+            expect(result.current.wizardProps.onAddLinks('Draft | https://draft.example')).toBe(true);
+        });
+        const remote = { id: 'att-remote', kind: 'link' as const, title: 'Remote', uri: 'https://remote.example',
+            createdAt: '2026-07-15T00:00:00.000Z', updatedAt: '2026-07-15T00:00:00.000Z' };
+
+        const finish = holdSyncSave(() => useTaskStore.setState({
+            _allTasks: useTaskStore.getState()._allTasks.map((task) => (task.id === 'one' ? { ...task, rev: 5, attachments: [remote] } : task)),
+        }));
+        let committed!: Promise<unknown>;
+        act(() => {
+            committed = Promise.resolve(result.current.wizardProps.handleConfirmReference());
+        });
+        await finish();
+        await act(async () => { await committed; });
+
+        expect(useTaskStore.getState()._tasksById.get('one')?.attachments?.map((attachment) => attachment.uri))
+            .toEqual(['https://remote.example', 'https://notes.example', 'https://draft.example']);
+    });
+
+    it('merges the picked tags onto the tags a sync save published, and still appends a title link', async () => {
+        useTaskStore.setState({ _allTasks: tasks });
+        const updateTask: UpdateTask = (id, updates) => useTaskStore.getState().updateTask(id, updates);
+        const { result } = renderController(updateTask);
+        await waitFor(() => {
+            expect(result.current.wizardProps.processingTask?.id).toBe('one');
+        });
+        act(() => {
+            result.current.wizardProps.setField('title', 'Call Alice /link:https://notes.example');
+            result.current.wizardProps.setField('tags', '#mine');
+        });
+        const remote = { id: 'att-remote', kind: 'link' as const, title: 'Remote', uri: 'https://remote.example',
+            createdAt: '2026-07-15T00:00:00.000Z', updatedAt: '2026-07-15T00:00:00.000Z' };
+
+        const finish = holdSyncSave(() => useTaskStore.setState({
+            _allTasks: useTaskStore.getState()._allTasks.map((task) => (task.id === 'one'
+                ? { ...task, rev: 5, tags: ['#remote'], attachments: [remote] }
+                : task)),
+        }));
+        let committed!: Promise<unknown>;
+        act(() => {
+            committed = Promise.resolve(result.current.wizardProps.handleConfirmReference());
+        });
+        await finish();
+        await act(async () => { await committed; });
+
+        const stored = useTaskStore.getState()._tasksById.get('one');
+        expect(stored?.tags).toEqual(['#remote', '#mine']);
+        expect(stored?.attachments?.map((attachment) => attachment.uri)).toEqual(['https://remote.example', 'https://notes.example']);
+    });
+
+
     it.each([
         ['reference', (wizard: ReturnType<typeof renderController>['result']['current']['wizardProps']) => wizard.handleConfirmReference()],
         ['someday', (wizard: ReturnType<typeof renderController>['result']['current']['wizardProps']) => wizard.handleConfirmSomeday()],
@@ -222,8 +310,7 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         expect(updateTask).not.toHaveBeenCalled();
     });
 
-    // #1155: Reference has to reach its organization step on the project/area
-    // pickers alone, or hiding the context step makes them unreachable.
+
     it('routes guided Reference through organization controls when only containers are shown', async () => {
         const updateTask = vi.fn(async () => ({ success: true }));
         const { result } = renderController(updateTask, {
@@ -431,6 +518,54 @@ describe('useInboxProcessingController not-actionable destinations', () => {
     });
 });
 
+
+describe('useInboxProcessingController overdue review date on Someday', () => {
+    const returning = { ...makeTask('back', 'someday'), reviewAt: '2026-01-05' } as Task;
+
+    const renderController = (updateTask: UpdateTask) => renderHook(() => {
+        const [isProcessing, setIsProcessing] = useState(true);
+        return useInboxProcessingController({
+            t: (key) => key,
+            tasks: [returning],
+            projects: [],
+            areas: [],
+            settings: {},
+            addProject: async () => null,
+            addTask: async () => ({ success: true }),
+            updateTask,
+            deleteTask: async () => ({ success: true }),
+            allContexts: [],
+            allTags: [],
+            isProcessing,
+            setIsProcessing,
+        });
+    });
+
+    it.each([
+        ['guided', (wizard: InboxWizard) => wizard.handleConfirmSomeday()],
+        ['quick', (wizard: InboxWizard) => wizard.handleNotActionable('someday')],
+    ] as const)('clears it on the %s Someday path', async (mode, fileToSomeday) => {
+        const updateTask = vi.fn<UpdateTask>(async () => ({ success: true }));
+        const { result } = renderController(updateTask);
+
+        await waitFor(() => {
+            expect(result.current.wizardProps.processingTask?.id).toBe('back');
+        });
+        act(() => {
+            result.current.wizardProps.onModeChange(mode);
+        });
+        expect(isProcessInboxReturningTask(returning)).toBe(true);
+        await act(async () => {
+            await fileToSomeday(result.current.wizardProps);
+        });
+
+        expect(updateTask).toHaveBeenCalledTimes(1);
+        const updates = updateTask.mock.calls[0][1];
+        expect(updates).toMatchObject({ status: 'someday' });
+        expect(isProcessInboxReturningTask({ ...returning, ...updates })).toBe(false);
+    });
+});
+
 describe('useInboxProcessingController draft writes', () => {
     const tasks = [makeTask('one')];
     const projects = [
@@ -438,14 +573,17 @@ describe('useInboxProcessingController draft writes', () => {
         { id: 'p2', title: 'Work Project', status: 'active', areaId: 'area-1' } as Project,
     ];
 
-    const renderController = () => renderHook(() => {
+    const renderController = (
+        areas: Area[] = [],
+        settings: AppData['settings'] = {},
+    ) => renderHook(() => {
         const [isProcessing, setIsProcessing] = useState(true);
         return useInboxProcessingController({
             t: (key) => key,
             tasks,
             projects,
-            areas: [],
-            settings: {},
+            areas,
+            settings,
             addProject: async () => null,
             addTask: async () => ({ success: true }),
             updateTask: async () => ({ success: true }),
@@ -473,12 +611,20 @@ describe('useInboxProcessingController draft writes', () => {
         const draft = result.current.wizardProps.draft;
         expect(draft.title).toBe('Clarified');
 
-        // The reducer hands back the same draft when the value is unchanged; a
-        // hand-rolled spread would allocate a new one on every keystroke.
+
         act(() => {
             result.current.wizardProps.setField('title', 'Clarified');
         });
         expect(result.current.wizardProps.draft).toBe(draft);
+    });
+
+    it('starts a capture with no project or area in the default area (#1445)', async () => {
+        const { result } = renderController(
+            [{ id: 'area-1', name: 'Work' } as Area],
+            { gtd: { defaultAreaMode: 'fixed', defaultAreaId: 'area-1' } } as AppData['settings'],
+        );
+        await openFirstTask(result);
+        expect(result.current.wizardProps.draft.areaId).toBe('area-1');
     });
 
     it('drops a project that lives outside a newly picked area, and keeps one inside it', async () => {
@@ -686,8 +832,7 @@ describe('useInboxProcessingController project conversion persistence', () => {
     });
 });
 
-// #1088: the clarify title used to run a date-only parser, so it was the one
-// editable task title in the app with a smaller grammar than quick add.
+
 describe('useInboxProcessingController title grammar', () => {
     const tasks = [makeTask('one')];
     const projects = [{ id: 'p1', title: 'Vacation', status: 'active' } as Project];
@@ -712,8 +857,12 @@ describe('useInboxProcessingController title grammar', () => {
         });
     });
 
-    it('applies the quick-add tokens typed into the title to the clarified task', async () => {
-        const updateTask = vi.fn(async () => ({ success: true }));
+    it.each([
+        { token: '/estimate:45m', selected: undefined, estimate: 'custom:45' },
+        { token: '/duration:1h30m', selected: '2hr', estimate: '2hr' },
+        { token: '/estimate:tomorrow', selected: undefined, estimate: undefined },
+    ] as const)('applies quick-add tokens while respecting the estimate selection: $token', async ({ token, selected, estimate }) => {
+        const updateTask = vi.fn<UpdateTask>(async () => ({ success: true }));
         const { result } = renderController(updateTask);
 
         await waitFor(() => {
@@ -722,9 +871,10 @@ describe('useInboxProcessingController title grammar', () => {
 
         act(() => {
             result.current.wizardProps.toggleContext('@office');
+            if (selected) result.current.wizardProps.setField('timeEstimate', selected);
             result.current.wizardProps.setField(
                 'title',
-                'Call Alice @phone #urgent !Work /due:2026-09-01',
+                `Call Alice @phone #urgent !Work /due:2026-09-01 ${token}`,
             );
         });
         await act(async () => {
@@ -733,21 +883,45 @@ describe('useInboxProcessingController title grammar', () => {
 
         expect(updateTask).toHaveBeenCalledWith('one', expect.objectContaining({
             status: 'next',
-            title: 'Call Alice',
-            // The typed context joins the chip the user toggled; it never wins alone.
+            title: estimate ? 'Call Alice' : `Call Alice ${token}`,
+
             contexts: ['@office', '@phone'],
             tags: ['#urgent'],
             areaId: 'a1',
         }));
+        expect(updateTask.mock.calls[0][1].timeEstimate).toBe(estimate);
         expect(updateTask).toHaveBeenCalledWith('one', expect.objectContaining({
             dueDate: expect.stringContaining('2026-09-01'),
         }));
     });
+
+
+    it('saves typed priority, energy, and person while their controls are hidden', async () => {
+        const updateTask = vi.fn<UpdateTask>(async () => ({ success: true }));
+        const { result } = renderController(updateTask);
+
+        await waitFor(() => {
+            expect(result.current.wizardProps.processingTask?.id).toBe('one');
+        });
+
+        act(() => {
+            result.current.wizardProps.setField('title', 'Call bank /priority:high /energy:low %Alice');
+        });
+        await act(async () => {
+            await result.current.wizardProps.handleSetProject(null);
+        });
+
+        expect(updateTask).toHaveBeenCalledWith('one', expect.objectContaining({
+            status: 'next',
+            title: 'Call bank',
+            priority: 'high',
+            energyLevel: 'low',
+            assignedTo: 'Alice',
+        }));
+    });
 });
 
-// The inline person create awaited `addPerson` and threw the `Person | null`
-// result away, so a refused write left the Waiting step with no person and no
-// message — the step's other writes all toast.
+
 describe('useInboxProcessingController inline person create', () => {
     it('reports a refused person create', async () => {
         useUiStore.setState({ toasts: [] });
@@ -774,5 +948,68 @@ describe('useInboxProcessingController inline person create', () => {
         });
 
         expect(useUiStore.getState().toasts.map((toast) => toast.message)).toContain('Failed to add task');
+    });
+});
+
+
+describe('useInboxProcessingController project section', () => {
+    afterEach(() => {
+        useTaskStore.setState({ sections: [], _allSections: [] } as never);
+    });
+
+    it('writes the picked section and clears it when the project changes', async () => {
+        const sections = [
+            { id: 's-design', projectId: 'p-work', title: 'Design', order: 0, createdAt: '', updatedAt: '' },
+        ];
+        useTaskStore.setState({ sections, _allSections: sections } as never);
+        const projects = [
+            { id: 'p-work', title: 'Work', status: 'active', color: '#000', order: 0, tagIds: [], createdAt: '', updatedAt: '' },
+            { id: 'p-home', title: 'Home', status: 'active', color: '#000', order: 1, tagIds: [], createdAt: '', updatedAt: '' },
+        ] as Project[];
+        const updateTask = vi.fn(async () => ({ success: true }));
+        const { result } = renderHook(() => {
+            const [isProcessing, setIsProcessing] = useState(true);
+            return useInboxProcessingController({
+                t: (key) => key,
+                tasks: [makeTask('one')],
+                projects,
+                areas: [],
+                settings: {},
+                addProject: async () => null,
+                addTask: async () => ({ success: true }),
+                updateTask,
+                deleteTask: async () => ({ success: true }),
+                allContexts: [],
+                allTags: [],
+                isProcessing,
+                setIsProcessing,
+            });
+        });
+        await waitFor(() => {
+            expect(result.current.wizardProps.processingTask?.id).toBe('one');
+        });
+        expect(result.current.wizardProps.options.sections).toEqual(sections);
+
+        act(() => {
+            result.current.wizardProps.setField('projectId', 'p-work');
+            result.current.wizardProps.setField('sectionId', 's-design');
+        });
+        act(() => {
+            result.current.wizardProps.setField('projectId', 'p-home');
+        });
+        expect(result.current.wizardProps.draft.sectionId).toBe('');
+
+        act(() => {
+            result.current.wizardProps.setField('projectId', 'p-work');
+            result.current.wizardProps.setField('sectionId', 's-design');
+        });
+        await act(async () => {
+            await result.current.wizardProps.handleSetProject('p-work');
+        });
+        expect(updateTask).toHaveBeenCalledWith('one', expect.objectContaining({
+            status: 'next',
+            projectId: 'p-work',
+            sectionId: 's-design',
+        }));
     });
 });

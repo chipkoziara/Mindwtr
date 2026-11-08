@@ -3,6 +3,7 @@ import {
     buildTaskViewSectionUpdates,
     flushPendingSave,
     isTaskInActiveProject,
+    runStoreCommand,
     sortViewSectionDefinitions,
     useTaskStore,
     type Task,
@@ -39,8 +40,26 @@ function assertSaved(result: unknown): void {
     }
 }
 
-/** Re-read the catalogue and tasks at Apply, rather than using picker-open rows. */
+
 export async function saveSomedaySectionMove(
+    taskIds: readonly string[],
+    destinationId: string | undefined,
+    selectableIds: readonly string[],
+    noSectionTitle: string,
+): Promise<SomedaySectionMove> {
+
+    const move = await runStoreCommand(() => writeSomedaySectionMove(taskIds, destinationId, selectableIds, noSectionTitle));
+    if (move.changedCount) {
+        try {
+            await flushPendingSave();
+        } catch (error) {
+            throw new SomedaySectionMoveSaveError(move, error);
+        }
+    }
+    return move;
+}
+
+async function writeSomedaySectionMove(
     taskIds: readonly string[],
     destinationId: string | undefined,
     selectableIds: readonly string[],
@@ -76,18 +95,11 @@ export async function saveSomedaySectionMove(
         destinationTitle: destination?.title ?? noSectionTitle,
         previous,
     };
-    if (updates.length) {
-        assertSaved(await state.batchUpdateTasks(updates));
-        try {
-            await flushPendingSave();
-        } catch (error) {
-            throw new SomedaySectionMoveSaveError(move, error);
-        }
-    }
+    if (updates.length) assertSaved(await state.batchUpdateTasks(updates));
     return move;
 }
 
-/** Retry a queued write without replacing the pre-write Undo snapshot. */
+
 export async function retryPendingSomedaySectionMove(move: SomedaySectionMove): Promise<SomedaySectionMove> {
     const state = useTaskStore.getState();
     const latestById = new Map(state.tasks.map((task) => [task.id, task]));
@@ -102,7 +114,7 @@ export async function retryPendingSomedaySectionMove(move: SomedaySectionMove): 
     return move;
 }
 
-/** Only restore this scope on tasks still assigned by the move. */
+
 export async function undoSomedaySectionMove(move: SomedaySectionMove, pendingCount?: number): Promise<number> {
     const state = useTaskStore.getState();
     if (pendingCount !== undefined) {
@@ -110,15 +122,15 @@ export async function undoSomedaySectionMove(move: SomedaySectionMove, pendingCo
         return pendingCount;
     }
     const previousIds = new Set(move.previous.map((assignment) => assignment.id));
-    const latestTasks: Task[] = state.tasks.filter((task) => previousIds.has(task.id));
-    const updates = buildTaskViewSectionUndoUpdates(
-        latestTasks,
-        'someday',
-        move.previous,
-        move.destinationId,
-    );
+
+    const updates = await runStoreCommand(async () => {
+        const latest = useTaskStore.getState();
+        const latestTasks: Task[] = latest.tasks.filter((task) => previousIds.has(task.id));
+        const built = buildTaskViewSectionUndoUpdates(latestTasks, 'someday', move.previous, move.destinationId);
+        if (built.length) assertSaved(await latest.batchUpdateTasks(built));
+        return built;
+    });
     if (updates.length) {
-        assertSaved(await state.batchUpdateTasks(updates));
         try {
             await flushPendingSave();
         } catch (error) {
